@@ -1,0 +1,500 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v23-k3native — press-15: ¿la inversión K3 llega al consumidor NATIVO (FetchBody/Response/fetch)?</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v23-k3native…</pre>
+<script>
+"use strict";
+/* ============================================================================
+ * FA-v23-k3native — press-15 (V23-BUILD). Engine diagnostics 14.20.
+ * TESIS (geohot-gh1-final §CADENA): "la memoria sale de FetchBody/SSV
+ * alimentados con estado dual — los streams son el delivery". Press-14 (V22)
+ * CONFIRMÓ K3 en wire: WritableStream con size() de coste cambiante →
+ * sizeO=[C1,C2] pero sink=[C2,C1] (orden invertido entregado al sink),
+ * p1/p2=ful normal, la contabilidad interna del writable se desincroniza.
+ * PREGUNTA DE ESTE PRESS: ¿la inversión K3 llega a un consumidor NATIVO?
+ *   S1 — K3 reproducido con 4 chunks (C1..C4): orden EXACTO en sink JS +
+ *     patrón más rico (¿invierte pares o reordena arbitrario?): callOrder vs
+ *     arrivalOrder vs settleOrder vs sizeOrder + desiredSize A/B.
+ *   S2 — K3 entregado a los consumidores nativos que SÍ existen (wire V18A:
+ *     fetch-upload MUERTO "ReadableStream uploading is not supported";
+ *     Response body PARCIAL — arrayBuffer rej "ReadableStream chunk
+ *     enqueueing in the sink failed"). 4 patas, cada una con su propio K3:
+ *     A=Response.body.getReader() (orden/bytes si el reader vive),
+ *     B=resp.arrayBuffer() (len+hex+eqInv/eqNat o error exacto),
+ *     C=resp.text() (contenido u error exacto),
+ *     D=fetch POST /beacon/V23-WIRE body=readable duplex:half (si el upload
+ *     sobrevive, EL HOST VERIFICA los bytes en el wire; si no, mide el
+ *     error exacto + lkF).
+ *   S3 — K3 + FinalizationRegistry: ¿la inversión deja chunk/promise
+ *     HUÉRFANO que el FR vea recolectar? (estado dual real = memoria
+ *     retenida/liberada en orden equivocado). CTRL-marker = discriminador
+ *     GC-ran vs nunca-GC (gc() NO existe en este build).
+ *   S4 — K3 con chunks GRANDES (Uint8Array 1024B con patrón): ¿la inversión
+ *     cruza BYTES entre chunks (contenido mezclado, foreignN>0) o solo
+ *     reordena enteros (chunks puros)?
+ *   S5 — abort-dentro-de-abortSteps (geohot-gh1-final §d1 candidato):
+ *     abort#2 lanzado DESDE abortAlgorithm#1 — ¿cuelga o rechaza rápido?
+ *     Medido 0-crash + write post-abort + writer.closed.
+ *   S6 — Z + ENV-DUMP (regla máxima-telemetría: env re-medido al final).
+ * REGLAS: máxima telemetría (órdenes completos, hex de contenido, mensajes
+ * completos), 0-crash (todo try-catch; SIN killer K1 en este press; los
+ * consumidores nativos ya probaron rechazo limpio en V18A), HB 2s con
+ * contador, V23-*, slice 500, timeouts en TODAS las promises, RID<32B.
+ * Árbol que gobierna S2 (wk1200-source, ya medido en V18A):
+ *   FetchBody.cpp:70-76 (BodyInit rama ReadableStream, gates disturbed/
+ *   locked) · FetchBody.cpp:174 (consume→FetchBodyConsumer) ·
+ *   FetchBodyConsumer.cpp:329-364 (ReadableStreamToSharedBufferSink +
+ *   pipeFrom) · ReadableStreamSink.cpp:43-66 (pipeTo=READER NATIVO,
+ *   enqueue span EXACTO, close(nullptr)=EOF) · FetchBodyOwner.cpp:103-121
+ *   (arrayBuffer gates isDisturbedOrLocked) · FetchBodySource.cpp:78-93
+ *   (lado upload). WritableStreamInternals.js:552 ÚNICO anti-reentrancia,
+ *   Write :741-767 + markFirst :386-394 (assert no-op) sin re-check ⇒ K3.
+ * ========================================================================== */
+var RID="v23k"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V23-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+function hx(u,max){ if(!u){ return "-"; }
+  try{ var n=Math.min(u.length||0,max||16), s="";
+       for(var i=0;i<n;i++){ s+=("0"+u[i].toString(16)).slice(-2); }
+       return s; }
+  catch(e){ return "E"; } }
+var hbN=0;
+var HB=setInterval(function(){ hbN++; bk("HB","hb"+hbN); },2000);
+window.__V={};
+window.addEventListener("error",function(ev){ try{ bk("EX","onerror:"+String((ev&&ev.message)||"?").slice(0,80)+"@"+String((ev&&ev.lineno)||"?")+":"+String((ev&&ev.colno)||"?")); }catch(e){} });
+window.addEventListener("unhandledrejection",function(ev){ try{ bk("EVR","unhandledrej:"+String(((ev&&ev.reason&&ev.reason.message)||(ev&&ev.reason)||"?")).slice(0,80)); }catch(e){} });
+/* DR-gate (herencia fa-v16 S0) */
+var dr="-",rt="-",dk="-",DR_OK=false;
+try{ dr=typeof window.deriveRuntime;
+  if(dr==="object"&&window.deriveRuntime){
+    try{ dk=Object.keys(window.deriveRuntime).sort().join(",").slice(0,96); }catch(e){}
+    rt=typeof window.deriveRuntime.run;
+    DR_OK=(rt==="function")&&(dk.indexOf("deriveCode")>=0)&&(dk.indexOf("_internals")>=0);
+  }
+}catch(e){}
+/* ENV-DUMP en L (REGLA PERMANENTE: UA + typeofs del inventario + gc) */
+var ua="-",tTS="-",tRS="-",tWS="-",tR="-",tF="-",tW="-",tSC="-",tWR="-",tFR="-",tSAB="-",tAT="-",tGC="-",tRB="-";
+try{ ua=String(navigator.userAgent).slice(0,80); }catch(e){}
+try{ tTS=typeof TransformStream; tRS=typeof ReadableStream; tWS=typeof WritableStream; tR=typeof Response; tF=typeof fetch; tW=typeof Worker;
+     tSC=typeof structuredClone; tWR=typeof WeakRef; tFR=typeof FinalizationRegistry;
+     tSAB=typeof SharedArrayBuffer; tAT=typeof Atomics; }catch(e){}
+try{ tGC=typeof gc; }catch(e){}
+try{ var _rb0=new Response("x"); tRB=typeof _rb0.body; }catch(e){ tRB="E"; }
+bk("L","v23-k3native;ua="+ua+";TS="+tTS+";RS="+tRS+";WS="+tWS+";R="+tR+";RB="+tRB+";f="+tF+";W="+tW+";sc="+tSC+";wr="+tWR+";fr="+tFR+";sab="+tSAB+";at="+tAT+";gc="+tGC+";dr="+dr+";rt="+rt);
+say("L dr="+dr+" DR_OK="+DR_OK+" rb="+tRB);
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S1 — K3 4-chunks (repro press-14 + patrón más rico) =====
+ * v22-S4 2-chunks: size#1 LENTO (spin 8ms) + write#2 anidado AL ENTRAR de
+ * size()#1, size#2 rápido, sink async 10ms ⇒ sink=[C2,C1], p1/p2=ful.
+ * Aquí 4 chunks: write C1 (size#1 slow → nested C2), luego C3, C4 con
+ * hwm=2 ⇒ ¿C4 se encola (pairwise [C2,C1,C3,C4]) o la contabilidad
+ * desincronizada deja pasar C4 antes (reorden arbitrario)? Mide:
+ * callOrder (orden de LLAMADAS al sink, síncrono), arrivalOrder (orden de
+ * resolución del sink async con ms), settleOrder (promesas p1..p4 con ms),
+ * sizeOrder, szN, desiredSize A/B, wLk, nested. */
+if(typeof WritableStream!=="function"){ bk("S1","SKIP no-WS"); return; }
+var t0=Date.now();
+var sink1=[],sinkT1=[],sinkArr=[],sizeOrder=[],settleOrder=[],szN=0,nested="-",wsE="-",wst1=null,w1=null,p2ref=null;
+var strat={ highWaterMark:2, size:function(chunk){
+  szN++;
+  try{ sizeOrder.push(String(chunk)); }catch(e){}
+  if(szN===1){
+    try{ p2ref=w1.write("C2"); nested="ok"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+    var s0=Date.now(); while(Date.now()-s0<8){ /* size#1 LENTO: invierte timings */ }
+  }
+  return 1;
+}};
+try{
+  wst1=new WritableStream({ write:function(chunk){
+      try{ sink1.push(String(chunk)); sinkT1.push(typeof chunk); }catch(e){}
+      return new Promise(function(res){ setTimeout(function(){ try{ sinkArr.push(String(chunk)+"@"+(Date.now()-t0)); }catch(e){} res(); },10); });
+  }}, strat);
+  w1=wst1.getWriter();
+}catch(e){ wsE="E:"+String((e&&e.message)||e).slice(0,60); }
+if(!w1){ bk("S1","SKIP ws="+wsE); return; }
+var PS={p1:"-",p2:"-",p3:"-",p4:"-"};
+function track(p,k){ if(p&&typeof p.then==="function"){
+    p.then(function(){ PS[k]="ful"; try{ settleOrder.push(k+"@"+(Date.now()-t0)); }catch(e){} },
+           function(e){ PS[k]="rej:"+String((e&&e.message)||e).slice(0,40); try{ settleOrder.push(k+"!"+(Date.now()-t0)); }catch(e){} });
+  } else { if(PS[k]==="-"){ PS[k]="nop"; } } }
+var p1=null;
+try{ p1=w1.write("C1"); }catch(e){ PS.p1="E:"+String((e&&e.message)||e).slice(0,40); }
+track(p1,"p1");
+if(!p2ref){ try{ p2ref=w1.write("C2"); nested="miss-top"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); } }
+track(p2ref,"p2");
+var p3=null;
+try{ p3=w1.write("C3"); }catch(e){ PS.p3="E:"+String((e&&e.message)||e).slice(0,40); }
+track(p3,"p3");
+var p4=null;
+try{ p4=w1.write("C4"); }catch(e){ PS.p4="E:"+String((e&&e.message)||e).slice(0,40); }
+track(p4,"p4");
+var desA="-",wLk="-";
+try{ desA=String(w1.desiredSize); }catch(e){ desA="E"; }
+try{ wLk=String(wst1.locked); }catch(e){ wLk="E"; }
+bk("S1A","wsE="+wsE+";nested="+nested+";szN="+szN+";sizeO=["+sizeOrder.join(",")+"];p1="+PS.p1+";p2="+PS.p2+";p3="+PS.p3+";p4="+PS.p4+";desA="+desA+";wLk="+wLk+";sink=["+sink1.join(",")+"]");
+setTimeout(function(){
+  for(var k in PS){ if(PS[k]==="-"){ PS[k]="pending@1.6s"; } }
+  var desB="-"; try{ desB=String(w1.desiredSize); }catch(e){ desB="E"; }
+  var v="p1="+PS.p1+";p2="+PS.p2+";p3="+PS.p3+";p4="+PS.p4+";call=["+sink1.join(",")+"];arr=["+sinkArr.join(",")+"];sinkT=["+sinkT1.join(",")+"];sizeO=["+sizeOrder.join(",")+"];szN="+szN+";setO=["+settleOrder.join(",")+"];desB="+desB;
+  try{ window.__V.s1="call=["+sink1.join(",")+"]"; }catch(e){}
+  bk("S1B",v);
+},1600);
+say("S1 dispatched; nested="+nested+"; szN="+szN);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S2 — K3 → consumidores NATIVOS (FetchBody/Response/fetch) =====
+ * Fábrica k3ts: TransformStream con writableStrategy.size de coste
+ * cambiante (el MISMO K3 del press-14, writable-side) + transform
+ * identidad asíncrono (10ms). Chunks = Uint8Array(2) con tag ASCII
+ * ("C1".."C4"): el span de ReadableStreamSink::enqueue (ReadableStreamSink
+ * .cpp:54-55) necesita typed-array — el rej de V18A ("chunk enqueueing in
+ * the sink failed") fue probablemente el type-gate del string-chunk; con
+ * bytes, arrayBuffer/text tienen chance real de entregar la inversión en
+ * CONTENIDO. 4 patas con 4 K3 independientes (C2 anidado desde size#1):
+ * A=body.getReader, B=arrayBuffer (hex + eqInv "C2C1C3C4" / eqNat),
+ * C=text, D=fetch-POST(body=readable) → /beacon/V23-WIRE (el host
+ * verifica bytes en wire si el upload vive). Timeouts en todas. */
+function mkTag(t){ var u=new Uint8Array(2); u[0]=t.charCodeAt(0); u[1]=t.charCodeAt(1); return u; }
+function tagOf(v){ if(typeof v==="string"){ return v; }
+  try{ if(v&&v.length>=2){ return String.fromCharCode(v[0],v[1]); } }catch(e){}
+  try{ return String(v).slice(0,16); }catch(e){ return "?"; } }
+function k3ts(cfg){
+  var ts=null,w=null,nestedP=null,sizeOrder=[],szN=0,nested="-",tsE="-";
+  var strat={ highWaterMark:2, size:function(chunk){
+    szN++;
+    try{ sizeOrder.push(tagOf(chunk)); }catch(e){}
+    if(szN===1){
+      try{ nestedP=w.write(mkTag("C2")); nested="ok"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+      var s0=Date.now(); while(Date.now()-s0<(cfg.spin1||8)){ }
+    }
+    return 1;
+  }};
+  try{
+    ts=new TransformStream({ transform:function(chunk,ctrl){
+      return new Promise(function(res){
+        try{ ctrl.enqueue(chunk); }catch(e){ try{ ctrl.error(e); }catch(e2){} }
+        setTimeout(res,cfg.sinkDelay||10);
+      });
+    }}, strat);
+    w=ts.writable.getWriter();
+  }catch(e){ tsE="E:"+String((e&&e.message)||e).slice(0,60); }
+  return {ts:ts,w:w,err:tsE,getN:function(){return szN;},getNested:function(){return nested;},
+          getNestedP:function(){return nestedP;},getSizeO:function(){return sizeOrder;}};
+}
+function feedK3(K,r){
+  r.settle=r.settle||[];
+  function w(tag){ var p=null;
+    try{ p=K.w.write(mkTag(tag)); }catch(e){ return null; }
+    if(p&&typeof p.then==="function"){ p.then(function(){ try{ r.settle.push(tag); }catch(e){} },
+      function(e){ try{ r.settle.push(tag+"!"); }catch(e){} }); }
+    return p; }
+  w("C1");
+  var np=K.getNestedP();
+  if(np&&typeof np.then==="function"){ np.then(function(){ try{ r.settle.push("C2"); }catch(e){} },
+    function(e){ try{ r.settle.push("C2!"); }catch(e){} }); }
+  else { w("C2"); }
+  w("C3"); w("C4");
+  var closed=false;
+  setTimeout(function(){ if(closed){ return; } closed=true;
+    try{ var pc=K.w.close();
+      if(pc&&typeof pc.then==="function"){
+        pc.then(function(){ r.closed="ok"; },function(e){ r.closed="rej:"+String((e&&e.message)||e).slice(0,40); });
+        setTimeout(function(){ if(r.closed==="-"){ r.closed="pend"; } },1200);
+      } else { r.closed="sync:"+String(pc); }
+    }catch(e){ r.closed="E:"+String((e&&e.message)||e).slice(0,40); } },120);
+}
+/* ---- pata A: Response.body.getReader() ---- */
+var A=k3ts({spin1:8,sinkDelay:10});
+var rA={rc:"-",bodyT:"-",rd:"-",lk0:"-",lkA:"-",got:[],done:"-",err:"-",closed:"-",settle:[],rdr:null};
+if(A.w){
+  try{ rA.resp=new Response(A.ts.readable); rA.rc="ok"; }catch(e){ rA.rc="E:"+String((e&&e.message)||e).slice(0,48); }
+  if(rA.resp){
+    try{ rA.bodyT=typeof rA.resp.body; }catch(e){ rA.bodyT="E"; }
+    try{ rA.lk0=String(A.ts.readable.locked); }catch(e){ rA.lk0="E"; }
+    if(rA.resp.body&&typeof rA.resp.body.getReader==="function"){
+      try{ rA.rdr=rA.resp.body.getReader(); rA.rd="ok"; }catch(e){ rA.rd="E:"+String((e&&e.message)||e).slice(0,48); }
+    }
+    if(rA.rdr){
+      (function loop(){
+        rA.rdr.read().then(function(rs){
+          if(rs&&rs.done){ rA.done="t"; return; }
+          try{ rA.got.push(tagOf(rs.value)+":"+typeof rs.value); }catch(e){}
+          loop();
+        },function(e){ rA.err="E:"+String((e&&e.message)||e).slice(0,48); });
+      })();
+    }
+  }
+  feedK3(A,rA);
+}
+/* ---- pata B: arrayBuffer ---- */
+var B=k3ts({spin1:8,sinkDelay:10});
+var rB={rc:"-",ac:"-",len:"-",hex:"-",eqInv:"-",eqNat:"-",closed:"-",settle:[]};
+var EXP_INV=[0x43,0x32,0x43,0x31,0x43,0x33,0x43,0x34]; /* "C2C1C3C4" */
+var EXP_NAT=[0x43,0x31,0x43,0x32,0x43,0x33,0x43,0x34]; /* "C1C2C3C4" */
+if(B.w){
+  try{ rB.resp=new Response(B.ts.readable); rB.rc="ok"; }catch(e){ rB.rc="E:"+String((e&&e.message)||e).slice(0,48); }
+  if(rB.resp){
+    try{ rB.p=rB.resp.arrayBuffer(); rB.ac="pend"; }catch(e){ rB.ac="E:"+String((e&&e.message)||e).slice(0,40); }
+    if(rB.p&&typeof rB.p.then==="function"){
+      rB.p.then(function(ab){
+        var u=null; try{ u=new Uint8Array(ab); }catch(e){}
+        rB.ac="ok"; rB.len=String(ab.byteLength); rB.hex=hx(u,32);
+        if(u&&ab.byteLength===8){ var inv=true,nat=true;
+          for(var i=0;i<8;i++){ if(u[i]!==EXP_INV[i]){ inv=false; } if(u[i]!==EXP_NAT[i]){ nat=false; } }
+          rB.eqInv=String(inv); rB.eqNat=String(nat);
+        } else { rB.eqInv="len!=8"; rB.eqNat="len!=8"; }
+      },function(e){ rB.ac="rej:"+String((e&&e.message)||e).slice(0,48); });
+      setTimeout(function(){ if(rB.ac==="pend"){ rB.ac="pending@1.7s"; } },1700);
+    }
+  }
+  feedK3(B,rB);
+}
+/* ---- pata C: text ---- */
+var C=k3ts({spin1:8,sinkDelay:10});
+var rC={rc:"-",tx:"-",txt:"-",closed:"-",settle:[]};
+if(C.w){
+  try{ rC.resp=new Response(C.ts.readable); rC.rc="ok"; }catch(e){ rC.rc="E:"+String((e&&e.message)||e).slice(0,48); }
+  if(rC.resp){
+    try{ rC.p=rC.resp.text(); rC.tx="pend"; }catch(e){ rC.tx="E:"+String((e&&e.message)||e).slice(0,40); }
+    if(rC.p&&typeof rC.p.then==="function"){
+      rC.p.then(function(s){ rC.tx="ok"; rC.txt=String(s).slice(0,48); },
+               function(e){ rC.tx="rej:"+String((e&&e.message)||e).slice(0,48); });
+      setTimeout(function(){ if(rC.tx==="pend"){ rC.tx="pending@1.7s"; } },1700);
+    }
+  }
+  feedK3(C,rC);
+}
+/* ---- pata D: fetch-upload (el host verifica en wire) ---- */
+var D=k3ts({spin1:8,sinkDelay:10});
+var rD={f:"-",lkF:"-",st:"-",rej:"-",closed:"-",settle:[]};
+if(D.w){
+  try{
+    rD.p=fetch("/beacon/V23-WIRE",{method:"POST",cache:"no-store",headers:{"Content-Type":"application/octet-stream"},body:D.ts.readable,duplex:"half"});
+    rD.f="ok";
+    try{ rD.lkF=String(D.ts.readable.locked); }catch(e){ rD.lkF="E"; }
+  }catch(e){ rD.f="E:"+String((e&&e.message)||e).slice(0,48); }
+  if(rD.p&&typeof rD.p.then==="function"){
+    rD.p.then(function(r){ rD.st=String(r.status); },
+             function(e){ rD.rej=String((e&&e.message)||e).slice(0,48); });
+    setTimeout(function(){ if(rD.st==="-"&&rD.rej==="-"){ rD.st="pending@1.7s"; } },1700);
+  }
+  feedK3(D,rD);
+}
+bk("S2A","A{rc="+rA.rc+";bodyT="+rA.bodyT+";rd="+rA.rd+";lk0="+rA.lk0+"} B{rc="+rB.rc+";ac="+rB.ac+"} C{rc="+rC.rc+";tx="+rC.tx+"} D{f="+rD.f+";lkF="+rD.lkF+"} A.nested="+A.getNested()+";A.szN="+A.getN());
+setTimeout(function(){
+  try{ rA.lkA=String(A.ts.readable.locked); }catch(e){ rA.lkA="E"; }
+  try{ if(rA.rdr){ rA.rdr.releaseLock(); } }catch(e){}
+  bk("S2B","A{done="+rA.done+";err="+rA.err+";got=["+rA.got.join("|")+"];lkA="+rA.lkA+";closed="+rA.closed+";stl=["+rA.settle.join(",")+"];sizeO=["+A.getSizeO().join(",")+"]}");
+  bk("S2C","B{ac="+rB.ac+";len="+rB.len+";hex="+rB.hex+";eqInv="+rB.eqInv+";eqNat="+rB.eqNat+";closed="+rB.closed+";stl=["+rB.settle.join(",")+"]}");
+  bk("S2D","C{tx="+rC.tx+";txt="+rC.txt+";closed="+rC.closed+";stl=["+rC.settle.join(",")+"]}");
+  bk("S2E","D{f="+rD.f+";lkF="+rD.lkF+";st="+rD.st+";rej="+rD.rej+";closed="+rD.closed+";stl=["+rD.settle.join(",")+"]}");
+  try{ window.__V.s2="A:"+rA.done+"/"+rA.err+" B:"+rB.ac+" C:"+rC.tx+" D:"+(rD.st!=="-"&&rD.st!=="pending@1.7s"?rD.st:rD.rej); }catch(e){}
+},1700);
+say("S2 dispatched; bodyT="+rA.bodyT+"; acB="+rB.ac+"; fD="+rD.f);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S3 — K3 + FinalizationRegistry: ¿chunk/promise HUÉRFANO? =====
+ * Chunks = objetos {tag,m} con marker m registrado en FR (+WeakRef).
+ * K3 (size#1 slow + nested C2) → sink orden invertido. Tras settle:
+ * releaseLock + null de TODAS las refs fuertes + churn de memoria (gc()
+ * NO existe). Probes a 1.3s y 2.6s: fired (orden de recolección) +
+ * alive por marker. CTRL (mC, nunca entró al stream) = discriminador:
+ * CTRL recolectado ⇒ GC corrió (los no-recolectados están RETENIDOS =
+ * estado dual real); CTRL vivo ⇒ GC nunca corrió (sin señal). */
+if(typeof FinalizationRegistry!=="function"||typeof WeakRef!=="function"){ bk("S3","SKIP no-FR/WR fr="+tFR+";wr="+tWR); return; }
+var fired=[],sinkO=[],sizeOrder=[],szN=0,nested="-",wsE="-",wst=null,w=null,p2ref=null;
+var fr=null;
+try{ fr=new FinalizationRegistry(function(hv){ try{ fired.push(String(hv)); }catch(e){} }); }catch(e){ bk("S3","SKIP frE="+String((e&&e.message)||e).slice(0,48)); return; }
+function mk(tag){ return {tag:tag}; }
+var m1=mk("C1"),m2=mk("C2"),m3=mk("C3"),m4=mk("C4"),mC=mk("CTRL");
+var wr1=new WeakRef(m1),wr2=new WeakRef(m2),wr3=new WeakRef(m3),wr4=new WeakRef(m4),wrC=new WeakRef(mC);
+try{ fr.register(m1,"C1"); fr.register(m2,"C2"); fr.register(m3,"C3"); fr.register(m4,"C4"); fr.register(mC,"CTRL"); }catch(e){}
+var strat={ highWaterMark:2, size:function(chunk){
+  szN++;
+  try{ sizeOrder.push(String(chunk&&chunk.tag)); }catch(e){}
+  if(szN===1){
+    try{ p2ref=w.write({tag:"C2",m:m2}); nested="ok"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+    var s0=Date.now(); while(Date.now()-s0<8){ }
+  }
+  return 1;
+}};
+try{
+  wst=new WritableStream({ write:function(chunk){
+      try{ sinkO.push(String(chunk&&chunk.tag)); }catch(e){}
+      return new Promise(function(res){ setTimeout(res,10); });
+  }}, strat);
+  w=wst.getWriter();
+}catch(e){ wsE="E:"+String((e&&e.message)||e).slice(0,60); }
+if(!w){ bk("S3","SKIP ws="+wsE); return; }
+var PS={p1:"-",p2:"-"};
+try{ var p1=w.write({tag:"C1",m:m1});
+  if(p1&&p1.then){ p1.then(function(){ PS.p1="ful"; },function(e){ PS.p1="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+}catch(e){ PS.p1="E:"+String((e&&e.message)||e).slice(0,40); }
+if(p2ref&&p2ref.then){ p2ref.then(function(){ PS.p2="ful"; },function(e){ PS.p2="rej:"+String((e&&e.message)||e).slice(0,40); }); } else { PS.p2="nop"; }
+try{ var p3=w.write({tag:"C3",m:m3}); var p4=w.write({tag:"C4",m:m4});
+  if(p3&&p3.then){ p3.then(null,function(){}); } if(p4&&p4.then){ p4.then(null,function(){}); } }catch(e){}
+var desA="-"; try{ desA=String(w.desiredSize); }catch(e){ desA="E"; }
+bk("S3A","nested="+nested+";szN="+szN+";sizeO=["+sizeOrder.join(",")+"];sinkO=["+sinkO.join(",")+"];p1="+PS.p1+";p2="+PS.p2+";desA="+desA);
+function probe(tag){
+  var a1="-",a2="-",a3="-",a4="-",aC="-";
+  try{ a1=String(wr1.deref()?1:0); a2=String(wr2.deref()?1:0); a3=String(wr3.deref()?1:0); a4=String(wr4.deref()?1:0); aC=String(wrC.deref()?1:0); }catch(e){}
+  var v="fired=["+fired.join(",")+"];alive=[C1:"+a1+",C2:"+a2+",C3:"+a3+",C4:"+a4+",CTRL:"+aC+"];sinkO=["+sinkO.join(",")+"];p1="+PS.p1+";p2="+PS.p2;
+  try{ window.__V.s3="fired=["+fired.join(",")+"];aliveC="+aC; }catch(e){}
+  bk(tag,v);
+}
+setTimeout(function(){
+  /* drop: releaseLock + null de refs fuertes + churn (gc() NO existe) */
+  try{ w.releaseLock(); }catch(e){}
+  try{ w=null; wst=null; }catch(e){}
+  try{ m1=null; m2=null; m3=null; m4=null; mC=null; }catch(e){}
+  var churn=null;
+  try{ churn=[]; for(var i=0;i<3;i++){ churn.push(new Uint8Array(65536)); } }catch(e){}
+  setTimeout(function(){ probe("S3B"); },900);
+  setTimeout(function(){ probe("S3C"); },2200);
+},400);
+say("S3 dispatched; nested="+nested);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S4 — K3 chunks GRANDES: ¿la inversión cruza BYTES? =====
+ * Chunks = Uint8Array(1024): fill uniforme f_i=0x11*i, cabecera
+ * [0xAA,0xBB,i,f_i]. Sink inspecciona cada chunk: i (de u[2]), len,
+ * fillN (bytes 4..1023 == f_i), foreignN (bytes ≠ patrón), h8 (hex
+ * 8 primeros). Puro = foreignN=0 ∧ len=1024 (solo reordena enteros);
+ * mezclado = foreignN>0 ∨ len≠1024 (cruza BYTES entre chunks). */
+if(typeof Uint8Array==="undefined"){ bk("S4","SKIP no-u8"); return; }
+function mkChunk(i){ var f=0x11*i; var u=new Uint8Array(1024);
+  for(var j=0;j<1024;j++){ u[j]=f; }
+  u[0]=0xAA; u[1]=0xBB; u[2]=i; u[3]=f; return u; }
+function inspect(u){
+  var i=-1,len=-1,f=0,fillN=-1,foreignN=-1,h8="-";
+  try{ i=u[2]; len=u.length; f=0x11*i; fillN=0; foreignN=0;
+       for(var j=4;j<len;j++){ if(u[j]===f){ fillN++; } else { foreignN++; } }
+       h8=hx(u,8); }catch(e){}
+  return {i:i,len:len,fillN:fillN,foreignN:foreignN,h8:h8}; }
+var sink4=[],sizeOrder=[],szN=0,nested="-",wsE="-",wst=null,w=null,p2ref=null;
+var strat={ highWaterMark:2, size:function(chunk){
+  szN++;
+  try{ sizeOrder.push(String(chunk&&chunk[2])); }catch(e){}
+  if(szN===1){
+    try{ p2ref=w.write(mkChunk(2)); nested="ok"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+    var s0=Date.now(); while(Date.now()-s0<8){ }
+  }
+  return 1;
+}};
+try{
+  wst=new WritableStream({ write:function(chunk){
+      try{ sink4.push(inspect(chunk)); }catch(e){}
+      return new Promise(function(res){ setTimeout(res,10); });
+  }}, strat);
+  w=wst.getWriter();
+}catch(e){ wsE="E:"+String((e&&e.message)||e).slice(0,60); }
+if(!w){ bk("S4","SKIP ws="+wsE); return; }
+var PS={p1:"-",p2:"-",p3:"-",p4:"-"};
+try{ var p1=w.write(mkChunk(1));
+  if(p1&&p1.then){ p1.then(function(){ PS.p1="ful"; },function(e){ PS.p1="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+}catch(e){ PS.p1="E:"+String((e&&e.message)||e).slice(0,40); }
+if(p2ref&&p2ref.then){ p2ref.then(function(){ PS.p2="ful"; },function(e){ PS.p2="rej:"+String((e&&e.message)||e).slice(0,40); }); } else { PS.p2="nop"; }
+try{ var p3=w.write(mkChunk(3));
+  if(p3&&p3.then){ p3.then(function(){ PS.p3="ful"; },function(e){ PS.p3="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+}catch(e){ PS.p3="E:"+String((e&&e.message)||e).slice(0,40); }
+try{ var p4=w.write(mkChunk(4));
+  if(p4&&p4.then){ p4.then(function(){ PS.p4="ful"; },function(e){ PS.p4="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+}catch(e){ PS.p4="E:"+String((e&&e.message)||e).slice(0,40); }
+var desA="-"; try{ desA=String(w.desiredSize); }catch(e){ desA="E"; }
+var tot0=0; try{ for(var i0=0;i0<sink4.length;i0++){ tot0+=sink4[i0].len; } }catch(e){}
+bk("S4A","nested="+nested+";szN="+szN+";sizeO=["+sizeOrder.join(",")+"];desA="+desA+";got="+sink4.length+";tot="+tot0+";p1="+PS.p1+";p2="+PS.p2+";p3="+PS.p3+";p4="+PS.p4);
+setTimeout(function(){
+  for(var k in PS){ if(PS[k]==="-"){ PS[k]="pending@1.6s"; } }
+  var rows=[],ord=[],tot=0,mixed=0;
+  try{ for(var i=0;i<sink4.length;i++){ var r=sink4[i];
+      rows.push("["+r.i+","+r.len+","+r.fillN+","+r.foreignN+","+r.h8+"]");
+      ord.push(r.i); tot+=r.len; if(r.foreignN>0||r.len!==1024){ mixed++; } } }catch(e){}
+  try{ window.__V.s4="ord=["+ord.join(",")+"];mixed="+mixed+";tot="+tot; }catch(e){}
+  bk("S4B","ord=["+ord.join(",")+"];rows="+rows.join("|")+";tot="+tot+";mixed="+mixed+";p1="+PS.p1+";p2="+PS.p2+";p3="+PS.p3+";p4="+PS.p4);
+},1600);
+say("S4 dispatched; got="+sink4.length);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S5 — abort-dentro-de-abortSteps (geohot-gh1-final §d1 candidato) =====
+ * Abort :183-209 sin re-check anti-reentrancia (como Write): abort#2
+ * lanzado DESDE abortAlgorithm#1. Árbol spec: WritableStreamAbort pone
+ * state="errored" + storedError=A1 ANTES de abortSteps ⇒ abort#2 debería
+ * RECHAZAR rápido con storedError (A1); la nota §d1 predecía colgado
+ * (inFlightWriteRequest pisado). El wire decide. Extra: write post-abort
+ * (debe rechazar) + writer.closed (debe rechazar) + abN/abDone. 0-crash. */
+if(typeof WritableStream!=="function"){ bk("S5","SKIP no-WS"); return; }
+var abN=0,abDone=0,nested="-",wsE="-",wst5=null,w5=null,p2ref=null,abReasons=[];
+var PS={p1:"-",p2:"-"};   /* var hoisted: visible dentro de abort() */
+try{
+  wst5=new WritableStream({ abort:function(reason){
+      abN++;
+      try{ abReasons.push(String(reason).slice(0,24)); }catch(e){}
+      if(abN===1){
+        try{ p2ref=w5.abort("A2"); nested="ok";
+          /* attach AQUÍ: abortAlgorithm puede correr diferido (microtask) —
+             el chequeo síncrono de abajo quedaría p2="nop" para siempre */
+          if(p2ref&&p2ref.then){ p2ref.then(function(v){ PS.p2="ful:"+String(v).slice(0,16); },
+                                             function(e){ PS.p2="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+        }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+      }
+      return new Promise(function(res){ setTimeout(function(){ abDone++; res(); },10); });
+  }},{highWaterMark:1,size:function(){ return 1; }});
+  w5=wst5.getWriter();
+}catch(e){ wsE="E:"+String((e&&e.message)||e).slice(0,60); }
+if(!w5){ bk("S5","SKIP ws="+wsE); return; }
+try{ var p1=w5.abort("A1");
+  if(p1&&p1.then){ p1.then(function(v){ PS.p1="ful:"+String(v).slice(0,16); },
+                           function(e){ PS.p1="rej:"+String((e&&e.message)||e).slice(0,40); }); }
+}catch(e){ PS.p1="E:"+String((e&&e.message)||e).slice(0,40); }
+if(p2ref&&p2ref.then){ p2ref.then(function(v){ PS.p2="ful:"+String(v).slice(0,16); },
+                                   function(e){ PS.p2="rej:"+String((e&&e.message)||e).slice(0,40); }); } else { PS.p2="nop"; }
+var wrS="-",clS="-",lk="-";
+try{ var pw=w5.write("W1");
+  if(pw&&pw.then){ pw.then(function(){ wrS="ful"; },function(e){ wrS="rej:"+String((e&&e.message)||e).slice(0,40); }); } }catch(e){ wrS="E:"+String((e&&e.message)||e).slice(0,40); }
+try{ var pc=w5.closed;
+  if(pc&&pc.then){ pc.then(function(){ clS="ful"; },function(e){ clS="rej:"+String((e&&e.message)||e).slice(0,40); }); } }catch(e){ clS="E"; }
+try{ lk=String(wst5.locked); }catch(e){ lk="E"; }
+bk("S5A","nested="+nested+";abN="+abN+";abDone="+abDone+";p1="+PS.p1+";p2="+PS.p2+";wr="+wrS+";cl="+clS+";lk="+lk+";reasons=["+abReasons.join(",")+"]");
+setTimeout(function(){
+  if(PS.p1==="-"){ PS.p1="pending@1.5s"; } if(PS.p2==="-"){ PS.p2="pending@1.5s"; }
+  if(wrS==="-"){ wrS="pending@1.5s"; } if(clS==="-"){ clS="pending@1.5s"; }
+  try{ window.__V.s5="p1="+PS.p1+";p2="+PS.p2+";abN="+abN+";abDone="+abDone; }catch(e){}
+  bk("S5B","p1="+PS.p1+";p2="+PS.p2+";wr="+wrS+";cl="+clS+";abN="+abN+";abDone="+abDone+";reasons=["+abReasons.join(",")+"]");
+},1500);
+say("S5 dispatched; nested="+nested);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S6 — Z + ENV-DUMP (regla máxima-telemetría) =====
+ * Vive solo si el hilo vive (0-crash gate). Re-mide env al final +
+ * resumen de las 5 stages + hbN + DR_OK. */
+setTimeout(function(){
+  try{ clearInterval(HB); }catch(e){}
+  var t2="-",rb2="-";
+  try{ t2=[typeof TransformStream,typeof ReadableStream,typeof WritableStream,typeof Response,typeof fetch,typeof Worker,typeof FinalizationRegistry,typeof WeakRef,typeof SharedArrayBuffer,typeof gc].join(","); }catch(e){}
+  try{ var rb0=new Response("x"); rb2=typeof rb0.body; }catch(e){ rb2="E"; }
+  var v1="-",v2="-",v3="-",v4="-",v5="-";
+  try{ v1=window.__V.s1||"-"; v2=window.__V.s2||"-"; v3=window.__V.s3||"-"; v4=window.__V.s4||"-"; v5=window.__V.s5||"-"; }catch(e){}
+  var s="FA-v23-k3native complete; hbN="+hbN+"; DR_OK="+DR_OK+(DR_OK?"":" DRGATE")+";s1="+String(v1).slice(0,60)+";s2="+String(v2).slice(0,60)+";s3="+String(v3).slice(0,60)+";s4="+String(v4).slice(0,60)+";s5="+String(v5).slice(0,60)+";env=["+t2+"];rb="+rb2;
+  bk("Z",s);
+  say("Z done; hbN="+hbN);
+},3300);
+})();
+</script></body></html>

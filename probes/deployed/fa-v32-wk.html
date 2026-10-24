@@ -1,0 +1,123 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v32-wk — press-32: batería de transferables (despegado/doble-transfer/terminado)</title></head>
+<body><pre id="out">FA-v32-wk…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v32-wk — press-32: familia SerializedScriptValue (el plan #1 del DS).
+ * Reglas: beca enter ANTES de cada fila; letal AL FINAL.
+ * Benigno: despegado (neutered) correcto. Bug: buffer NO se despega,
+ *          vista sigue viva, doble-transfer sin throw, reuso sin throw. */
+var RID="v32w"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V32-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v32-wk; dr="+dr+"; rt="+rt+"; Worker="+(typeof Worker)+"; sClone="+(typeof structuredClone)+"; Atomics="+(typeof Atomics));
+
+var W=null;
+function mkW(){
+  var w=new Worker("v32-worker.js?t="+Date.now());
+  w.onerror=function(ev){ bk("WERR","worker-onerror: "+String(ev.message||ev).slice(0,70)); };
+  return w;
+}
+
+/* S2 — PING: round-trip base (benigno) */
+try{
+  W=mkW();
+  W.onmessage=function(ev){
+    var d=ev.data||{};
+    if(d.k==="pong"){ bk("S2","pong-ok (thread vivo)"); return; }
+    if(d.k==="got"){
+      /* despegado correcto esperado en MAIN: abLen=0,vLen=0 */
+      var mAb="-",mV="-";
+      try{ mAb=window.__ab.byteLength; }catch(e){ mAb="E"; }
+      try{ mV=window.__v.length; }catch(e){ mV="E"; }
+      bk("S3b","MAIN-tras-transfer: abLen="+mAb+";vLen="+mV+
+         " (0,0=despegado CORRECTO; ≠0=EL BUFFER SIGUE VIVO=BUG)"+
+         ";worker-dijo: abLen="+d.abLen+";vLen="+d.vLen);
+    }
+  };
+  W.postMessage({k:"ping"});
+}catch(e){ bk("S2","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+/* S3 — XFER: transfer real de buffer+vista (benigno esperado: neutered) */
+setTimeout(function(){
+try{
+  if(!W){ bk("S3","SKIP"); return; }
+  var ab=new ArrayBuffer(1024); var v=new Uint8Array(ab,0,16);
+  v[0]=0xFA; v[1]=0x31; v[2]=0x32; v[3]=0x33;
+  window.__ab=ab; window.__v=v;
+  W.postMessage({k:"xfer",ab:ab,v:v},[ab]);
+  bk("S3","xfer-enviado (main abLen ahora="+ab.byteLength+" — 0=neutered al vuelo)");
+}catch(e){ bk("S3","E:"+String((e&&e.message)||e).slice(0,60)); }
+},500);
+
+/* S4 — DOBLE-TRANSFER: el mismo buffer DOS VECES en la lista — DEBE throw */
+setTimeout(function(){
+try{
+  var ab=new ArrayBuffer(64);
+  var th="no", en="-";
+  try{ W.postMessage({k:"d"},[ab,ab]); }
+  catch(e){ th="SÍ"; en=e.name+":"+String((e&&e.message)||e).slice(0,40); }
+  bk("S4","doble-transfer threw="+th+";"+en+" (SÍ=correcto; NO=BUG serio)");
+}catch(e){ bk("S4","E:"+String((e&&e.message)||e).slice(0,60)); }
+},1000);
+
+/* S5 — REUSO: transferir algo YA DESPEGADO — DEBE throw */
+setTimeout(function(){
+try{
+  var ab2=new ArrayBuffer(32);
+  W.postMessage({k:"r1"},[ab2]);           /* primer transfer: ab2 queda detached */
+  var th="no", en="-";
+  try{ W.postMessage({k:"r2"},[ab2]); }     /* segundo: DEBE fallar */
+  catch(e){ th="SÍ"; en=e.name+":"+String((e&&e.message)||e).slice(0,40); }
+  bk("S5","reuso-detached threw="+th+";"+en+" (SÍ=correcto; NO=BUG UAF-class)");
+}catch(e){ bk("S5","E:"+String((e&&e.message)||e).slice(0,60)); }
+},1300);
+
+/* S6 — STRUCTUREDCLONE: cíclico + lista de transfer */
+setTimeout(function(){
+try{
+  if(typeof structuredClone!=="function"){ bk("S6","SKIP no-sClone"); return; }
+  var o={n:1}; o.self=o;
+  var ab3=new ArrayBuffer(16);
+  var c=structuredClone(o,{transfer:[ab3]});
+  var det=ab3.byteLength===0?"despegó":"NO-despegó("+ab3.byteLength+")";
+  var cyc="-";
+  try{ cyc=(c.self===c)?"cíclico-ok":"cíclico-perdido"; }catch(e){ cyc="E"; }
+  bk("S6","sClone-ok;"+det+";"+cyc);
+}catch(e){ bk("S6","E:"+String((e&&e.name)+" "+(e&&e.message)||e).slice(0,60)); }
+},1600);
+
+/* S7 — ATOMICS sin SAB: Atomics.wait sobre buffer normal — DEBE TypeError */
+setTimeout(function(){
+try{
+  var th="no", en="-", r="-";
+  try{ r=String(Atomics.wait(new Int32Array(new ArrayBuffer(8)),0,0)); }
+  catch(e){ th="SÍ"; en=e.name+":"+String((e&&e.message)||e).slice(0,40); }
+  bk("S7","Atomics.wait threw="+th+";ret="+r+";"+en+" (SÍ=correcto; NO=hang/BUG)");
+}catch(e){ bk("S7","E:"+String((e&&e.message)||e).slice(0,60)); }
+},1900);
+
+/* S8 — LETAL-LAST: transfer hacia worker TERMINADO + vista de buffer despegado */
+setTimeout(function(){
+try{
+  W.terminate();
+  var ab4=new ArrayBuffer(512);
+  var th="no", en="-";
+  try{ W.postMessage({k:"ghost"},[ab4]); }
+  catch(e){ th="SÍ"; en=e.name; }
+  bk("S8","term-transfer threw="+th+";"+en+";ab4="+ab4.byteLength+
+     " (si Z NO llega: ESTA fila mató al renderer — testigo enter/sin-Z en wire)");
+}catch(e){ bk("S8","E:"+String((e&&e.message)||e).slice(0,60)); }
+clearInterval(HB);
+setTimeout(function(){ bk("Z","FA-v32-wk complete"); },800);
+},2200);
+})();
+</script></body></html>

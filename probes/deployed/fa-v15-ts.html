@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>FA-v15-TS</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v15-TS…</pre><script>(function(){"use strict";
+var RID="ts"+Date.now().toString(36).slice(-14), OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function say(s){try{document.getElementById("out").appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function msg(f){try{f();return "ok";}catch(e){return String((e&&e.message)||e).slice(0,30);}}
+function bk(s,b){try{fetch("/beacon/V15-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,240)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000); bk("L","v15-ts;TS="+(typeof TransformStream));
+if(typeof TransformStream!=="function"){ clearInterval(HB); bk("Z","noTS"); return; }
+var C=null,N=0,ts=null,eM="";
+Array.prototype[Symbol.iterator]=function(){var t=this;N++;
+  try{ if(t&&t.length===3&&typeof t[0]==="object"&&typeof t[1]==="object"&&typeof t[2]==="object") C=[t[0],t[1],t[2]]; }catch(e){}
+  var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+try{ ts=new TransformStream({}); }catch(e){ eM=String((e&&e.message)||e).slice(0,50); }
+rst();
+var kn=C?String(Object.getOwnPropertyNames(C[0]).length):"-", idR=C?String(C[1]===(ts&&ts.readable)):"-", rd="noC",wr="noC",tee="noC";
+if(C){ try{ var r=new ReadableStreamDefaultReader(C[1]); rd="ok"; r.releaseLock(); }catch(e){ rd="E:"+String((e&&e.message)||e).slice(0,26); }
+       try{ var w=C[2].getWriter(); wr="ok"; w.releaseLock(); }catch(e){ wr="E:"+String((e&&e.message)||e).slice(0,26); }
+       try{ tee="ok:"+C[1].tee().length; }catch(e){ tee="E:"+String((e&&e.message)||e).slice(0,24); } }
+var g5=C?msg(function(){new ReadableStreamDefaultController(C[1],{},undefined,1,0);}):"noC";
+bk("S0","capN="+N+";kn="+kn+";idR="+idR+";rd="+rd+";wr="+wr+";tee="+tee+";g5="+g5+";e="+eM); say("S0 capN="+N+" idR="+idR+" g5="+g5);
+function w(f){try{f();return "ok";}catch(e){return String((e&&e.message)||e).slice(0,30);}}
+var b1=w(function(){new ReadableStream({}).pipeThrough({readable:{},writable:{}});});
+var b2=w(function(){new ReadableStream({}).pipeThrough({readable:C[0],writable:{}});});
+var b3=w(function(){new TransformStream({transform:function(c,ct){ct.enqueue(c);}});});
+bk("S1","b1="+b1+";b2="+b2+";b3="+b3);
+clearInterval(HB); bk("Z","FA-v15-TS complete;capN="+N); say("Z");
+})();</script></body></html>

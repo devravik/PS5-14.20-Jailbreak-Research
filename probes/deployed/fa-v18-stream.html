@@ -1,0 +1,96 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v18-stream — press-8 (mi diseño): byte-stream directo + BYOB via getReader({mode})</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v18-stream…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v18-stream — press-8, diseño propio (sin esperar al DS).
+ * Pregunta: el press-7 mató el ctor público BYOB — ¿pero la maquinaria de
+ * byte-streams (que SÍ existe: "ReadableByteStreamController is not impl")
+ * se alcanza por la SEGUNDA puerta: new ReadableStream({type:"bytes"}) +
+ * getReader({mode:"byob"})?
+ * Árbol: ReadableStream.js (getReader con options.mode) ·
+ *   ReadableStreamInternals.js (createReadableByteStreamController) ·
+ *   ReadableByteStreamInternals.js (enqueue/pullInto/commit).
+ * 0-crash: todo try-catch, promises con timeout, HB 2s, fetch-async. */
+var RID="v18s"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V18S-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+
+/* S0 — L + DR-gate */
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v18-stream; dr="+dr+"; rt="+rt);
+
+var C=null, RS=null;
+
+/* S1 — ¿un byte-stream se construye? ¿el controller es byte-controller real? */
+(function(){
+  var m="E",e1="",ct="-",cn="-",ds="-";
+  try{
+    RS=new ReadableStream({ type:"bytes", start:function(c){ C=c; } });
+    m="ok";
+    ct=typeof C;
+    try{ cn=(C&&C.constructor&&C.constructor.name)||"-"; }catch(e){}
+    try{ ds=String(C.desiredSize); }catch(e){ ds="E:"+String((e&&e.message)||e).slice(0,30); }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S1","new="+m+";e="+e1+";ctl="+ct+";cn="+cn+";des="+ds);
+})();
+
+/* S2 — la SEGUNDA puerta al BYOB: getReader({mode:"byob"}) (sin ctor público) */
+var RDR=null;
+(function(){
+  if(!RS){ bk("S2","SKIP no-rs"); return; }
+  var m="E",e1="",rt2="-",hn="-";
+  try{
+    RDR=RS.getReader({mode:"byob"});
+    m="ok"; rt2=typeof RDR;
+    try{ hn=(RDR&&RDR.constructor&&RDR.constructor.name)||"-"; }catch(e){}
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S2","byob="+m+";e="+e1+";t="+rt2+";cn="+hn);
+})();
+
+/* S3 — el roundtrip de BYTES: read(view 8B) pendiente → enqueue("ABCDEFGH") → byte a byte */
+(function(){
+  if(!RDR||!C){ bk("S3","SKIP no-rdr-or-ctl"); return; }
+  var view=new Uint8Array(8);
+  var settled=false;
+  function fin(tag,extra){ if(settled)return; settled=true; bk("S3",tag+extra); }
+  try{
+    RDR.read(view).then(function(res){
+      var v=res&&res.value, ok=false, len=-1, hex="";
+      try{
+        len=v?v.byteLength:-1;
+        var pat=[65,66,67,68,69,70,71,72];
+        ok=!!v&&v.byteLength===8;
+        for(var i=0;v&&i<8;i++){ hex+=(v[i]<16?"0":"")+v[i].toString(16); if(v[i]!==pat[i]) ok=false; }
+      }catch(e){ ok=false; }
+      fin("","rd=ok;eq="+ok+";len="+len+";done="+String(res&&res.done)+";hex="+hex);
+    },function(err){ fin("","rd=rej:"+String((err&&err.message)||err).slice(0,60)); });
+    C.enqueue(new Uint8Array([65,66,67,68,69,70,71,72]));
+    setTimeout(function(){ fin("","rd=pending-timeout"); },800);
+  }catch(e){ fin("","rd=E:"+String((e&&e.message)||e).slice(0,60)); }
+})();
+
+/* S4 — ¿ArrayBuffer.transfer existe en este build? (la herramienta del probe de revalidación, solo presencia) */
+(function(){
+  var t1=typeof ArrayBuffer.prototype.transfer, t2=typeof ArrayBuffer.prototype.resize, mx="-";
+  try{ mx=String(new ArrayBuffer(8,{maxByteLength:64}).maxByteLength); }catch(e){ mx="E"; }
+  bk("S4","transfer="+t1+";resize="+t2+";resizable="+mx);
+})();
+
+/* S5 — contabilidad del byte-controller: desiredSize antes/después de enqueue */
+(function(){
+  if(!C){ bk("S5","SKIP no-ctl"); return; }
+  var dB="-",dA="-",e1="";
+  try{ dB=String(C.desiredSize); }catch(e){}
+  try{ C.enqueue(new Uint8Array([1,2,3,4])); }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  try{ dA=String(C.desiredSize); }catch(e){}
+  bk("S5","desB="+dB+";desA="+dA+";e="+e1);
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v18-stream complete; DR_OK="+(rt==="function")+(rt!=="function"?" DRGATE":"")); },1600);
+})();
+</script></body></html>

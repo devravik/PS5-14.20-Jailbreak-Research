@@ -1,0 +1,90 @@
+/* press-54 EXTERNO — MSE stage-1 V2: DOM-ready attach (V52 wall was our own ordering bug), garbage + INIT A..E appends, ledger, worker-beat proxy key B. */
+(function(){
+"use strict";
+if(window.__p54)return; window.__p54=1;
+var RID="v54x"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,300)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V54-HB","hb");},2000);
+bk("V54-L","press54-EXT MSE-stage1-V2 dom-ready-attach");
+function fmt(e){return String((e&&e.name)||e).slice(0,44);}
+
+/* ledger + worker-beat proxy (B key records worker beat timestamps) */
+try{
+  var prev=null;try{prev=JSON.parse(localStorage.getItem("p51-ledger")||"null");}catch(e){}
+  var now=Date.now();
+  var cur={uid:(prev&&prev.uid)||Math.random().toString(36).slice(2,12),n:((prev&&prev.n)||0)+1,first:(prev&&prev.first)||now,last:now};
+  localStorage.setItem("p51-ledger",JSON.stringify(cur));
+  var rs=parseInt(localStorage.getItem("p53-restores")||"0",10)+1;
+  localStorage.setItem("p53-restores",String(rs));
+  var lb=null;try{lb=localStorage.getItem("p54-B");}catch(e){}
+  bk("V54-Rled","ledger n="+(prev&&prev.n)+"->"+cur.n+" same-uid="+(prev?prev.uid===cur.uid:"n/a")+" restores="+rs+" prevB="+String(lb).slice(0,26));
+}catch(e){bk("V54-Rled","ledger-FAIL "+e);}
+
+var P54_INIT = {
+  "A-valid": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAkFtb292AAAAcG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAcl0cmFrAAAAYHRraGQAAAAHAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAFAAAAA8AAAAAABYW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAABX5AAAAAAVcQAAAAAAC5oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAELbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAANNzdGJsAAAAh3N0c2QAAAAAAAAAAQAAAHdhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAUAA8ABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAIWF2Y0MBZAAo/wABAAhnZAAorNnABQABAARo6+yyAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAA=",
+  "B-stsd-entry-lie": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAkFtb292AAAAcG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAcl0cmFrAAAAYHRraGQAAAAHAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAFAAAAA8AAAAAABYW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAABX5AAAAAAVcQAAAAAAC5oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAELbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAANNzdGJsAAAAh3N0c2QAAAAAAAAAAQAAAI9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAUAA8ABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAIWF2Y0MBZAAo/wABAAhnZAAorNnABQABAARo6+yyAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAA=",
+  "C-stco-overshoot": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAkVtb292AAAAcG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAc10cmFrAAAAYHRraGQAAAAHAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAFAAAAA8AAAAAABZW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAABX5AAAAAAVcQAAAAAAC5oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAEPbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAANdzdGJsAAAAh3N0c2QAAAAAAAAAAQAAAHdhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAUAA8ABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAIWF2Y0MBZAAo/wABAAhnZAAorNnABQABAARo6+yyAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RjbwAAAAAAAAAB/////wAAABRzdHN6AAAAAAAAAAAAAAAA",
+  "D-mvhd-ts-zero": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAkFtb292AAAAcG12aGQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAcl0cmFrAAAAYHRraGQAAAAHAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAFAAAAA8AAAAAABYW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAABX5AAAAAAVcQAAAAAAC5oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAELbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAANNzdGJsAAAAh3N0c2QAAAAAAAAAAQAAAHdhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAUAA8ABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAIWF2Y0MBZAAo/wABAAhnZAAorNnABQABAARo6+yyAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAA=",
+  "E-tkhd-wid-huge": "AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMQAAAkFtb292AAAAcG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAcl0cmFrAAAAYHRraGQAAAAHAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAP////8A8AAAAAABYW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAABX5AAAAAAVcQAAAAAAC5oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAELbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAANNzdGJsAAAAh3N0c2QAAAAAAAAAAQAAAHdhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAUAA8ABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAIWF2Y0MBZAAo/wABAAhnZAAorNnABQABAARo6+yyAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAA="
+};
+
+var P54_DATA={};
+function bufFrom(s){var raw=atob(s);var a=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)a[i]=raw.charCodeAt(i);return a.buffer;}
+try{
+  var garbage=new Uint8Array(8);for(var g2=0;g2<8;g2++)garbage[g2]=0xAA;
+  P54_DATA["GARBU8"]=garbage.buffer;
+  for(var kk in P54_INIT)P54_DATA[kk]=bufFrom(P54_INIT[kk]);
+  bk("V54-Fsz","sizes "+Object.keys(P54_DATA).map(function(k){return k+":"+P54_DATA[k].byteLength;}).join(","));
+}catch(e){bk("V54-Fsz","buf-FAIL "+e);}
+
+var vid=null,ms=null,sb=null,opened=false;
+var MIME='video/mp4; codecs="avc1.640028"';
+var seq=Object.keys(P54_DATA);
+var idx=0,busy=false,wdog=null,t0=0;
+
+function attach(){  /* DOM READY — the V52 fix */
+  try{
+    vid=document.createElement("video");vid.muted=true;
+    if(document.body)document.body.appendChild(vid);else bk("V54-Fatt","no-body-still");
+    ms=new MediaSource();
+    ms.addEventListener("sourceopen",onOpen);
+    var u=URL.createObjectURL(ms);
+    vid.src=u;
+    bk("V54-Fatt","src-attach OK ms.readyState="+ms.readyState+" urllen="+String(u.length));
+  }catch(e){bk("V54-Fatt","attach-EXC "+fmt(e));}
+}
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",attach);}else{attach();}
+
+function freshSB(){
+  try{
+    if(sb){try{ms.removeSourceBuffer(sb);}catch(e){}sb=null;}
+    sb=ms.addSourceBuffer(MIME);
+  }catch(e){bk("V54-Rx","sb-EXC "+fmt(e));return null;}
+  sb.addEventListener("updateend",onDone);
+  sb.addEventListener("error",onErr);
+  return sb;
+}
+function onErr(){finish("SB-error");}
+function onDone(){if(!busy)return;busy=false;if(wdog){clearTimeout(wdog);wdog=null;}finish("updateend d="+(performance.now()-t0).toFixed(1)+"ms");}
+function finish(how){try{bk("V54-R"+seq[idx-1],how);}catch(e){}next();}
+function next(){idx++;if(idx<=seq.length)runOne(seq[idx-1]);else{try{ms.removeEventListener("sourceopen",onOpen);}catch(e){}bk("V54-END","stage1-done n="+seq.length);}}
+function runOne(name){
+  busy=true;
+  if(!freshSB()){busy=false;bk("V54-R"+name,"no-sb-closed");setTimeout(next,120);return;}
+  t0=performance.now();
+  try{
+    sb.appendBuffer(P54_DATA[name]);
+    bk("V54-E"+name,"sent "+P54_DATA[name].byteLength+"B");
+    wdog=setTimeout(function(){busy=false;bk("V54-R"+name,"NO-EVENT-1.8s");next();},1800);
+  }catch(e){busy=false;bk("V54-R"+name,"append-EXC "+fmt(e));setTimeout(next,100);}
+}
+function onOpen(){
+  if(opened)return;opened=true;
+  if(idx>0)return;
+  bk("V54-Ropen","sourceopen readyState="+ms.readyState);
+  idx=0;runOne(seq[0]);
+}
+setTimeout(function(){if(!opened){bk("V54-Ropen","sourceopen TIMEOUT 3.2s");if(idx===0){busy=false;idx=0;runOne(seq[0]);}}},3200);
+
+setTimeout(function(){clearInterval(HB);bk("V54-Z2","late-z");},16000);
+})();

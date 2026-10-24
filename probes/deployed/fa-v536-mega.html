@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V536</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="1" height="1" muted></video>
+<div id="log">V536 — Mega probe: canvas+webgl+audio+mse+fingerprint
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V536-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// ===== SECTION A: Canvas context liveness (fast) =====
+setTimeout(function(){
+  try{
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var ctx=null,s={};
+    Object.defineProperty(s,'alpha',{get:function(){ctx=c.getContext('2d');return true}});
+    var outer=c.getContext('bitmaprenderer',s);
+    if(!ctx){B('A-FAIL','no ctx');return}
+    var lw=ctx.lineWidth;
+    ctx.lineWidth=1337.42;var lw2=ctx.lineWidth;
+    ctx.save();ctx.lineWidth=42;ctx.restore();var lw3=ctx.lineWidth;
+    ctx.globalAlpha=0.5;var ga=ctx.globalAlpha;
+    ctx.setLineDash([5,3]);var ld=ctx.getLineDash();
+    var t=ctx.getTransform();
+    B('A-ALIVE','lw='+lw+' set1337='+lw2+' sr='+lw3+' ga='+ga+
+      ' dash=['+ld+'] xform.a='+t.a);
+    var ctx2=c.getContext('2d');
+    B('A-REGET','2d='+(ctx2===null?'null':ctx2===ctx?'SAME':'DIFF')+
+      ' bmr='+(c.getContext('bitmaprenderer')===outer?'SAME':'DIFF'));
+  }catch(e){B('A-ERR',''+e)}
+},100);
+
+// ===== SECTION B: WebGL + uninitialized GPU memory =====
+setTimeout(function(){
+  try{
+    var cv=document.createElement('canvas');cv.width=64;cv.height=64;
+    var gl=cv.getContext('webgl')||cv.getContext('experimental-webgl');
+    if(!gl){B('B-NO-WEBGL','webgl unavailable');return}
+    B('B-WEBGL',gl.getParameter(gl.VERSION)+' / '+gl.getParameter(gl.RENDERER));
+    var ext=gl.getSupportedExtensions();
+    B('B-EXT','n='+ext.length+': '+ext.slice(0,10).join(','));
+    var db=gl.getExtension('WEBGL_debug_renderer_info');
+    if(db)B('B-GPU',gl.getParameter(db.UNMASKED_RENDERER_WEBGL));
+
+    // Uninitialized framebuffer reads
+    var allNonzero=[];
+    for(var r=0;r<8;r++){
+      var fb=gl.createFramebuffer();
+      var tex=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,tex);
+      // Allocate texture WITHOUT clearing
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+      // DO NOT clear — read immediately
+      var pix=new Uint8Array(64*64*4);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,pix);
+      var nz=0;for(var i=0;i<pix.length;i++)if(pix[i]!==0)nz++;
+      allNonzero.push(nz);
+      if(nz>0&&r<2){
+        var sample=[];
+        for(var i=0;i<Math.min(32,pix.length);i++)
+          sample.push(('0'+pix[i].toString(16)).slice(-2));
+        B('B-STALE-'+r,nz+'/'+pix.length+' first32='+sample.join(' '));
+      }
+      gl.deleteFramebuffer(fb);gl.deleteTexture(tex);
+    }
+    B('B-UNINIT','nonzero per round: ['+allNonzero.join(',')+']');
+
+    // Create buffer with data, delete, create new buffer, read back
+    var tex2=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex2);
+    var fill=new Uint8Array(32*32*4);
+    for(var i=0;i<fill.length;i++)fill[i]=0xDE;
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,32,32,0,gl.RGBA,gl.UNSIGNED_BYTE,fill);
+    gl.deleteTexture(tex2);
+    // Now create new texture at hopefully same GPU memory
+    var tex3=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex3);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,32,32,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    var fb2=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb2);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex3,0);
+    var pix2=new Uint8Array(32*32*4);
+    gl.readPixels(0,0,32,32,gl.RGBA,gl.UNSIGNED_BYTE,pix2);
+    var deCount=0;for(var i=0;i<pix2.length;i++)if(pix2[i]===0xDE)deCount++;
+    B('B-REUSE','0xDE count='+deCount+'/'+pix2.length+' (>0 = GPU memory reuse!)');
+
+    // RAB test
+    try{
+      var rab=new ArrayBuffer(64*64*4,{maxByteLength:64*64*4*2});
+      var rv=new Uint8Array(rab);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,rv);
+      B('B-RAB','readPixels with RAB WORKED! [0]='+rv[0]);
+    }catch(e){B('B-RAB','REJECTED: '+e)}
+
+    gl.deleteFramebuffer(fb2);gl.deleteTexture(tex3);
+    B('B-DONE','webgl complete');
+  }catch(e){B('B-ERR',''+e)}
+},300);
+
+// ===== SECTION C: Web Audio =====
+setTimeout(function(){
+  try{
+    var AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC){B('C-NO-AUDIO','unavailable');return}
+    var ac=new AC();
+    B('C-AUDIO','sr='+ac.sampleRate+' state='+ac.state);
+    B('C-WORKLET',ac.audioWorklet?'YES':'NO');
+    try{var sp=ac.createScriptProcessor(4096,1,1);B('C-SPN','YES');sp.disconnect()}
+    catch(e){B('C-SPN','NO: '+e)}
+    try{var an=ac.createAnalyser();B('C-ANALYSER','YES fft='+an.fftSize)}
+    catch(e){B('C-ANALYSER','NO')}
+    // OfflineAudioContext
+    try{var oac=new OfflineAudioContext(1,44100,44100);B('C-OFFLINE','YES')}
+    catch(e){B('C-OFFLINE','NO')}
+    // AudioBuffer channel data
+    var ab=ac.createBuffer(1,4096,ac.sampleRate);
+    var cd=ab.getChannelData(0);
+    B('C-CD','type='+cd.constructor.name+' buf.bl='+cd.buffer.byteLength);
+    ac.close();
+  }catch(e){B('C-ERR',''+e)}
+},500);
+
+// ===== SECTION D: MSE compat fMP4 =====
+setTimeout(function(){
+  try{
+    B('D-START','MSE compat fMP4');
+    fetch('/test-frag-compat.mp4').then(function(r){
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return r.arrayBuffer();
+    }).then(function(ab){
+      var d=new Uint8Array(ab);
+      B('D-FETCHED','size='+d.length);
+      var initEnd=0,off=0;
+      while(off<d.length-8){
+        var sz=(d[off]<<24)|(d[off+1]<<16)|(d[off+2]<<8)|d[off+3];
+        var tp=String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
+        if(sz<8)break;
+        if(tp==='moof'&&!initEnd)initEnd=off;
+        off+=sz;
+      }
+      var ms=new MediaSource();
+      var vid=document.getElementById('vid');
+      vid.src=URL.createObjectURL(ms);
+      vid.addEventListener('error',function(){
+        B('D-VID-ERR','code='+(vid.error?vid.error.code:'?'))});
+      ms.addEventListener('sourceopen',function(){
+        B('D-OPEN','ok');
+        var sb;
+        try{sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');B('D-SB','ok')}
+        catch(e){B('D-SB-ERR',''+e);return}
+        var phase=0;
+        sb.addEventListener('updateend',function(){
+          phase++;
+          if(phase===1){
+            B('D-INIT-DONE','sb.buf.len='+sb.buffered.length);
+            sb.appendBuffer(d.slice(initEnd).buffer);
+          }else if(phase===2){
+            var bl=-1;
+            try{bl=sb.buffered.length}catch(e){B('D-BUF-ERR',''+e)}
+            B('D-MEDIA-DONE','sb.buf.len='+bl);
+            if(bl>0){
+              for(var i=0;i<bl;i++)
+                B('D-RANGE-'+i,sb.buffered.start(i)+'-'+sb.buffered.end(i));
+            }
+            try{vid.play().then(function(){
+              B('D-PLAY','ct='+vid.currentTime);
+              setTimeout(function(){
+                B('D-CHECK','ct='+vid.currentTime);
+                vid.pause();
+                try{ms.endOfStream()}catch(e){}
+              },1500);
+            }).catch(function(e){B('D-PLAY-ERR',''+e);try{ms.endOfStream()}catch(e2){}})}
+            catch(e){B('D-PLAY-SYNC-ERR',''+e)}
+          }
+        });
+        sb.addEventListener('error',function(){B('D-SB-ERROR','error')});
+        B('D-INIT','bytes 0-'+initEnd);
+        sb.appendBuffer(d.slice(0,initEnd).buffer);
+      });
+    }).catch(function(e){B('D-FETCH-ERR',''+e)});
+  }catch(e){B('D-ERR',''+e)}
+},1000);
+
+// ===== SECTION E: API fingerprint =====
+setTimeout(function(){
+  try{
+    var apis={};
+    var check=function(n,f){try{apis[n]=f()}catch(e){apis[n]='ERR'}};
+    check('WebGL2',function(){var c=document.createElement('canvas');return c.getContext('webgl2')?'YES':'NO'});
+    check('ResizeObs',function(){return typeof ResizeObserver});
+    check('IntersectObs',function(){return typeof IntersectionObserver});
+    check('PerfObs',function(){return typeof PerformanceObserver});
+    check('CSSpaint',function(){return CSS&&CSS.paintWorklet?'YES':'NO'});
+    check('CSSTypedOM',function(){return typeof CSSStyleValue});
+    check('Gamepad',function(){return typeof Gamepad});
+    check('hwConc',function(){return navigator.hardwareConcurrency});
+    check('devMem',function(){return navigator.deviceMemory||'undef'});
+    check('locks',function(){return typeof navigator.locks});
+    check('caches',function(){return typeof caches});
+    check('crypto',function(){return typeof crypto.subtle});
+    check('Intl',function(){return typeof Intl.Segmenter});
+    check('structClone',function(){return typeof structuredClone});
+    check('Streams',function(){return typeof ReadableStream+'/'+typeof WritableStream+'/'+typeof TransformStream});
+    check('compression',function(){return typeof CompressionStream});
+    check('WASM',function(){return typeof WebAssembly});
+    check('SAB',function(){return typeof SharedArrayBuffer});
+    check('Atomics',function(){return typeof Atomics});
+    check('WeakRef',function(){return typeof WeakRef});
+    check('FinReg',function(){return typeof FinalizationRegistry});
+    check('requestIdleCallback',function(){return typeof requestIdleCallback});
+    check('BroadcastChannel',function(){return typeof BroadcastChannel});
+    var summary=[];
+    for(var k in apis)summary.push(k+'='+apis[k]);
+    B('E-APIS',summary.join(' | '));
+  }catch(e){B('E-ERR',''+e)}
+
+  // Timer resolution test
+  try{
+    var t1=performance.now();var s=0;for(var i=0;i<500000;i++)s+=i;
+    var t2=performance.now();
+    B('E-TIMER','500K loop: '+(t2-t1)+'ms');
+  }catch(e){}
+
+  // Performance.memory
+  try{
+    if(performance.memory)
+      B('E-MEM','limit='+performance.memory.jsHeapSizeLimit+' used='+performance.memory.usedJSHeapSize);
+    else B('E-MEM','NO');
+  }catch(e){B('E-MEM','ERR')}
+},2000);
+
+setTimeout(function(){B('COMPLETE','all sections done')},15000);
+</script></body></html>

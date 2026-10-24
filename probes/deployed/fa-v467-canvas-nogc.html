@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>V467 Canvas NoGC</title>
+</head>
+<body>
+<div id="status">V467 Canvas NoGC — loading...</div>
+<script src="p467-canvas-minimal-spray.js"></script>
+<script>
+document.getElementById('status').textContent = 'V467 running. Auto-refresh in 90s.';
+setTimeout(function() { location.reload(); }, 90000);
+</script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8"><title>d287</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="refresh" content="90">
+</head><body><script>
+(function(){var Q=0;function B(t,b){var u='/beacon/V287-'+t+'?t='+Date.now()+'&q='+(Q++);try{if(b!==void 0&&String(b).length<1500){var x=new XMLHttpRequest();x.open('POST',u,true);x.send(String(b))}else{new Image().src=u}}catch(e){try{new Image().src=u}catch(e2){}}}
+B('BOOT');
+try{
+var ab=new ArrayBuffer(64);new Float64Array(ab)[0]=1.5;
+var v1=new Float64Array(ab);var v2=new Uint8Array(ab);
+var c=structuredClone({buf:ab,va:v1,vb:v2});
+B('T1-SAMEBUF-VA-'+(c.va.buffer===c.buf));
+B('T1-SAMEBUF-VB-'+(c.vb.buffer===c.buf));
+B('T1-VA-VB-SAME-'+(c.va.buffer===c.vb.buffer));
+B('T1-BUFLEN-'+c.buf.byteLength);
+new Uint8Array(c.buf)[0]=0xFF;
+B('T1-CROSS-VA-'+(new Uint8Array(c.va.buffer)[0]===0xFF));
+B('T1-CROSS-VB-'+(c.vb[0]===0xFF));
+}catch(e){B('T1-ERR-'+e.message.substring(0,40))}
+try{
+var ab2=new ArrayBuffer(32);new Float64Array(ab2)[0]=2.5;
+var vx=new Float64Array(ab2);
+var c2=structuredClone({n:0n,buf:ab2,view:vx});
+B('T2-BI-SAMEBUF-'+(c2.view.buffer===c2.buf));
+B('T2-BI-BUFLEN-'+c2.buf.byteLength);
+B('T2-BI-VIEWBUFLEN-'+c2.view.buffer.byteLength);
+new Uint8Array(c2.buf)[0]=0xAA;
+B('T2-BI-CROSS-'+(new Uint8Array(c2.view.buffer)[0]===0xAA));
+B('T2-BI-V0-'+c2.view[0]);
+}catch(e){B('T2-ERR-'+e.message.substring(0,40))}
+try{
+var r1=new ArrayBuffer(8,{maxByteLength:4096});
+var r2=new ArrayBuffer(4096,{maxByteLength:8192});
+var rv=new Float64Array(r2);for(var i=0;i<rv.length;i++)rv[i]=i+100;
+var c3=structuredClone({n:0n,s:r1,l:r2,v:rv});
+B('T3-RAB-VBUF-'+c3.v.buffer.byteLength);
+B('T3-RAB-VLEN-'+c3.v.length);
+B('T3-RAB-IS-L-'+(c3.v.buffer===c3.l));
+B('T3-RAB-IS-S-'+(c3.v.buffer===c3.s));
+B('T3-RAB-V0-'+c3.v[0]);
+B('T3-RAB-V1-'+c3.v[1]);
+new Uint8Array(c3.l)[0]=0xCC;new Uint8Array(c3.s)[0]=0xDD;
+B('T3-RAB-VBYTE-'+new Uint8Array(c3.v.buffer)[0].toString(16));
+}catch(e){B('T3-ERR-'+e.message.substring(0,40))}
+try{
+var a4=new ArrayBuffer(8,{maxByteLength:4096});
+var b4=new ArrayBuffer(256,{maxByteLength:4096});
+var c4b=new ArrayBuffer(2048,{maxByteLength:4096});
+var v4a=new Float64Array(c4b);var v4b=new Uint8Array(c4b);
+var c4=structuredClone({n1:1n,n2:2n,a:a4,b:b4,c:c4b,va:v4a,vb:v4b});
+B('T4-VA-BUFLEN-'+c4.va.buffer.byteLength);
+B('T4-VB-BUFLEN-'+c4.vb.buffer.byteLength);
+B('T4-VA-IS-C-'+(c4.va.buffer===c4.c));
+B('T4-VB-IS-C-'+(c4.vb.buffer===c4.c));
+B('T4-VA-IS-B-'+(c4.va.buffer===c4.b));
+B('T4-VA-IS-A-'+(c4.va.buffer===c4.a));
+}catch(e){B('T4-ERR-'+e.message.substring(0,40))}
+B('DONE');
+})();
+</script></body></html>

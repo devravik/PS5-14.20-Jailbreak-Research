@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>V417-XHTML-MAIN</title></head>
+<body>
+<div id="host">xhtml-main-target</div>
+<div id="sink">xhtml-main-sink</div>
+<script><![CDATA[
+// If this executes, XHTML scripts work in main frame on PS5
+var BQ=0;
+function B(t,d){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V417-XHTML-'+t+'?t='+Date.now()+'&q='+(BQ++),false);x.send(d||'');}catch(e){}}
+
+B('MAIN-JS-OK');
+B('MAIN-DOCTYPE-'+document.contentType);
+B('MAIN-DOCEL-'+document.documentElement.nodeName);
+B('MAIN-NS-'+document.documentElement.namespaceURI);
+
+// Test customElements API availability
+try{
+  B('MAIN-CE-API-'+(window.customElements?'Y':'N'));
+}catch(e){B('MAIN-CE-API-ERR');}
+
+// Test DOM access with namespace-aware APIs
+try{
+  var divs=document.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');
+  B('MAIN-NS-DIVS-'+divs.length);
+  for(var i=0;i<divs.length;i++){
+    var id=divs[i].getAttribute('id');
+    if(id)B('MAIN-DIV-'+id);
+  }
+}catch(e){B('MAIN-DIVS-ERR');}
+
+// Test basic CE definition
+try{
+  var ctorCount=0;
+  window.customElements.define('test-xhtml-ce',class extends HTMLElement{
+    constructor(){super();ctorCount++;B('MAIN-CTOR-'+ctorCount);}
+  });
+  B('MAIN-CE-DEFINED');
+}catch(e){B('MAIN-CE-DEF-ERR-'+String(e).substring(0,50));}
+
+// Test createElement with CE in XHTML context
+try{
+  var el=document.createElement('test-xhtml-ce');
+  B('MAIN-CREATE-CE-OK');
+  B('MAIN-CREATE-CE-PARENT-'+(el.parentNode?'Y':'NULL'));
+}catch(e){B('MAIN-CREATE-ERR-'+String(e).substring(0,50));}
+
+// Test CE via innerHTML (will NOT trigger CE -- fragment parser)
+try{
+  var host=document.getElementById('host');
+  if(host){
+    host.innerHTML='<test-xhtml-ce id="inner1">inner-content</test-xhtml-ce>';
+    B('MAIN-INNERHTML-OK');
+    var inner=document.getElementById('inner1');
+    B('MAIN-INNER-FOUND-'+(inner?'Y':'N'));
+    if(inner)B('MAIN-INNER-CTOR-'+(inner.constructor.name||'unknown'));
+  }
+}catch(e){B('MAIN-INNERHTML-ERR-'+String(e).substring(0,50));}
+
+// Test upgradeElement path: add unrecognized element then define CE
+try{
+  var host2=document.getElementById('host');
+  if(host2){
+    var unknown=document.createElementNS('http://www.w3.org/1999/xhtml','test-upgrade-ce');
+    unknown.setAttribute('id','upgrade1');
+    host2.appendChild(unknown);
+    B('MAIN-UNKNOWN-ADDED');
+    B('MAIN-UNKNOWN-CTOR-'+(unknown.constructor.name||'unknown'));
+
+    var upgradeCtorCount=0;
+    var upgradedEl=null;
+    window.customElements.define('test-upgrade-ce',class extends HTMLElement{
+      constructor(){
+        super();
+        upgradeCtorCount++;
+        upgradedEl=this;
+        B('MAIN-UPGRADE-CTOR-'+upgradeCtorCount);
+        B('MAIN-UPGRADE-PARENT-'+(this.parentNode?(this.parentNode.getAttribute&&this.parentNode.getAttribute('id'))||this.parentNode.nodeName:'NULL'));
+      }
+    });
+    B('MAIN-UPGRADE-CE-DEFINED');
+    B('MAIN-UPGRADE-TOTAL-CTOR-'+upgradeCtorCount);
+    if(upgradedEl){
+      B('MAIN-UPGRADE-SAME-'+(upgradedEl===unknown?'Y':'N'));
+    }
+  }
+}catch(e){B('MAIN-UPGRADE-ERR-'+String(e).substring(0,50));}
+
+B('MAIN-DONE');
+]]></script>
+</body>
+</html>

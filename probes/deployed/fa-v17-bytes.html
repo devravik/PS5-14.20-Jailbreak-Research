@@ -1,0 +1,265 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v17-bytes — press-7: BYOB 8-byte exact copy + desiredSize byte-count + FZ byte-buffer</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v17-bytes…</pre>
+<script>
+(function(){
+"use strict";
+/* ============================================================================
+ * FA-v17-bytes — press-7 (pre-registrado por V15-QUICK). Engine diagnostics 14.20.
+ * Pregunta: ¿el camino BYOB copia 8 bytes EXACTOS (longitud + contenido, byte a byte)?
+ * 0-crash por construcción:
+ *   - todo try-catch; único poison en S1 y PASS-THROUGH FULL-FILL (nunca under-fill);
+ *   - rst() (restore Symbol.iterator) en TODOS los paths (finally);
+ *   - SIN tee (el tee de press-5 lockeaba la fuente); SIN sync-XHR
+ *     (beacons fetch-async), HB 2s, slice 500, RID<32B;
+ *   - nonce de caché vía filename nuevo (orquestador), título fijo.
+ * Árbol que gobierna cada etapa (wk1200-source):
+ *   TransformStreamInternals.js :85 (initialize, array len-2) / :100 (return
+ *     [internal,readable,writable] — triple len-3 capturado) / :132-152
+ *     (initializeTransformStream: el readable se crea con @pull PRIVADO y SIN
+ *     type ⇒ controller DEFAULT, no byte — rama @pull de initializeReadableStream
+ *     en ReadableStreamInternals.js) / :171-218 (TransformStreamDefaultController-
+ *     Enqueue: brand-check + reenvío identidad)
+ *   TransformStream.cpp :114-119 (SequenceConverter convert :114,
+ *     ASSERT(size==3) no-op :115, jsDynamicCast->wrapped() :117 = kill-shape
+ *     si under-fill; full-fill ⇒ 0-crash)
+ *   ReadableStreamBYOBReader.js :14-24 (initialize: fallback
+ *     @getInternalReadableStream como Reader.js:30-36 del press-4 + brand
+ *     @isReadableByteStreamController ⇒ TypeError "needs a ReadableByteStream-
+ *     Controller" si el readable NO es byte) / :66-67 (read con view
+ *     byteLength===0 ⇒ PROMESA rechazada TypeError, no throw síncrono)
+ *   ReadableByteStreamInternals.js :594 (pullInto: descriptor + PENDIENTE si
+ *     queue vacía; transferBufferToCurrentRealm es IDENTIDAD :300-311 FIXME) /
+ *     :312 (enqueue) / :452 (processPullDescriptors) / :469 (fillDescriptorFrom-
+ *     Queue: la COPIA byte-a-byte vía set PÚBLICO de Uint8Array sobre NUESTRO
+ *     buffer, FIXME bug 172717) / :563 (convertDescriptor: nueva view del MISMO
+ *     ctor sobre nuestro buffer) / commitDescriptor+fulfillReadIntoRequest
+ *   TransformStreamDefaultController.js :37-48 (desiredSize →
+ *     readableStreamDefaultControllerGetDesiredSize = HWM−queue.size;
+ *     HWM readable TS = 0, size default () => 1 ⇒ conteo por CHUNKS, no bytes)
+ * ========================================================================== */
+var RID="v17a"+Date.now().toString(36).slice(-13);      /* 17 B < 32 */
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V17A-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+var PAT=[65,66,67,68,69,70,71,72];   /* "ABCDEFGH" byte-patrón */
+var T3=null, ts=null;                 /* S1 llena T3/ts */
+var by2=null, dv2=null, rp2=null, rpErr="", BYOK=false;  /* S2: BYOB reader/view/read pendiente */
+var w2=null;                          /* S3 llena w2 */
+
+/* cmpBytes — compara BYTE A BYTE contra PAT (longitud + contenido). */
+function cmpBytes(v){
+  var len="-",eq="false",dif="-",cn="-";
+  if(!v){ return {len:len,eq:eq,dif:dif,cn:cn}; }
+  try{ cn=String((v.constructor&&v.constructor.name)||"-"); }catch(x){ cn="E"; }
+  try{ len=String(v.byteLength); }catch(x){ len="E"; }
+  var same=(len==="8"),parts=[];
+  for(var i=0;i<8;i++){
+    var b="-";
+    try{ b=(typeof v.getUint8==="function")?v.getUint8(i):v[i]; }catch(x){ b="E"; same=false; }
+    if(b!==PAT[i]){ same=false; if(parts.length<8){ parts.push(i+":"+b); } }
+  }
+  if(parts.length){ dif=parts.join(","); }
+  return {len:len, eq:String(same), dif:dif, cn:cn};
+}
+
+/* ===== S0 — L + DR-gate (v14-analisis-final §5) =====
+ * DR_OK = dr==="object" && rt==="function" && keys⊇{deriveCode,_internals}.
+ * Si !DR_OK: los stages corren igual (survey 0-crash, no depende del kit)
+ * y Z emite DRGATE; el press no se quema. */
+var dr="-",rt="-",dk="-",keys=[],DR_OK=false;
+try{ dr=typeof window.deriveRuntime;
+  if(dr==="object"&&window.deriveRuntime){
+    try{ keys=Object.keys(window.deriveRuntime).sort(); dk=keys.join(",").slice(0,96); }catch(e){}
+    rt=typeof window.deriveRuntime.run;
+    DR_OK=(rt==="function")&&(keys.indexOf("deriveCode")>=0)&&(keys.indexOf("_internals")>=0);
+  }
+}catch(e){}
+bk("L","fa-v17-bytes; dr="+dr+"; rt="+rt+"; dk="+dk);
+say("S0 L+DR-gate dr="+dr+" DR_OK="+DR_OK);
+
+/* ===== S1 — poison pass-through + T3 (SIN tee) =====
+ * Captura el triple iterado por TransformStreamInternals.js:100 vía
+ * TransformStream.cpp:114-119. El iterador venenoso devuelve TODOS los
+ * elementos reales (full-fill) ⇒ ASSERT(:115) cumple, cast(:117) recibe
+ * wrappers reales ⇒ 0-crash. N cuenta las iteraciones (:85 + :100). */
+(function(){
+  var N=0,e1="",m="-",rSame="-",wSame="-";
+  Array.prototype[Symbol.iterator]=function(){var t=this;N++;
+    try{ if(T3===null&&t&&t.length===3&&typeof t[1]==="object"&&typeof t[2]==="object"){T3=[t[0],t[1],t[2]];} }catch(x){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ ts=new TransformStream({}); m="ok";
+    try{ rSame=String(ts.readable===T3[1]); }catch(x){rSame="E";}
+    try{ wSame=String(ts.writable===T3[2]); }catch(x){wSame="E";}
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,48); m="E"; }
+  finally{ rst(); }   /* restore en TODOS los paths */
+  bk("S1","new="+m+";e="+e1+";N="+N+";rSame="+rSame+";wSame="+wSame+";t3="+(T3?1:0));
+})();
+say("S1 done t3="+(T3?1:0));
+
+/* ===== S2 — BYOB reader sobre T3[1] (el gate del camino BYOB) =====
+ * new ReadableStreamBYOBReader(T3[1]): T3[1] es wrapper ⇒ @isReadableStream
+ * falla ⇒ fallback @getInternalReadableStream (ReadableStreamBYOBReader.js
+ * :14-20, mismo fallback que Reader.js:30-36 del press-4); luego el brand
+ * @isReadableByteStreamController (:22-23). El readable del TS se crea SIN
+ * type (:132-152 ⇒ rama @pull privado ⇒ controller DEFAULT) ⇒ lo esperado
+ * por árbol es ctor=E:"...needs a ReadableByteStreamController" ⇒ S3/S4
+ * saltan (graceful). ctor=ok ⇒ TS readable byte-backed (DIVERGENCIA del
+ * árbol) y se mide locked + read(view) con DataView 8B (semilla 1..8) ⇒
+ * pullInto :594 queda PENDIENTE hasta el write de S3. */
+(function(){
+  if(!T3){ bk("S2","SKIP no-T3"); return; }
+  if(typeof ReadableStreamBYOBReader!=="function"){ bk("S2","SKIP no-BYOB-ctor"); return; }
+  var ctor="-",lk="-",rdc="-";
+  try{ by2=new ReadableStreamBYOBReader(T3[1]); ctor="ok"; }
+  catch(e){ ctor="E:"+String((e&&e.message)||e).slice(0,40); }
+  if(!by2){ bk("S2","ctor="+ctor); return; }
+  try{ lk=String(T3[1].locked); }catch(e){ lk="E"; }
+  try{
+    dv2=new DataView(new Uint8Array([1,2,3,4,5,6,7,8]).buffer);
+    rp2=by2.read(dv2); rdc="pend";
+  }catch(e){ rpErr=String((e&&e.message)||e).slice(0,40); rdc="E:"+rpErr; }
+  BYOK=true;
+  bk("S2","ctor="+ctor+";lk="+lk+";read="+rdc);
+})();
+
+/* ===== S3 — writer real + write del byte-patrón "ABCDEFGH" =====
+ * T3[2] es el wrapper writable del cast (:117); el transform por defecto es
+ * identidad (TransformStreamInternals.js:171-218) ⇒ el chunk Uint8Array(8)
+ * cruza al readable (controller default ⇒ readableStreamDefaultController-
+ * Enqueue). Sólo corre si S2 dejó BYOB vivo. */
+(function(){
+  if(!BYOK||!by2){ bk("S3","SKIP no-byob"); return; }
+  var wr="-",wrt="-";
+  try{ w2=T3[2].getWriter(); wr="ok"; }
+  catch(e){ wr="E:"+String((e&&e.message)||e).slice(0,40); }
+  if(!w2){ bk("S3","wr="+wr); return; }
+  try{ w2.write(new Uint8Array(PAT)); wrt="ok"; }
+  catch(e){ wrt="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S3","wr="+wr+";wrt="+wrt);
+})();
+
+/* ===== S4 — el read() BYOB resuelve → compara BYTE A BYTE =====
+ * ReadableByteStreamInternals.js: enqueue :312 → processPullDescriptors :452
+ * → fillDescriptorFromQueue :469 COPIA los bytes del chunk DENTRO DE NUESTRO
+ * buffer con set PÚBLICO de Uint8Array (FIXME bug 172717 — la copia exacta
+ * que mide el press) → convertDescriptor :563 resuelve nueva view del MISMO
+ * ctor sobre nuestro buffer (bytesFilled/elementSize). transferBufferTo-
+ * CurrentRealm es IDENTIDAD (:300-311) ⇒ la semilla 1..8 debe quedar PISADA
+ * por PAT. eq=true sólo con len==8 y los 8 bytes == PAT; dif lista i:byte si
+ * difieren; cn discrimina el re-wrap. Fallback pend@800ms. */
+(function(){
+  if(!BYOK||!rp2){ bk("S4","SKIP "+(rpErr?("readE="+rpErr):"no-rp")); return; }
+  var sent4=false;
+  function fin4(tag,val){ if(sent4)return; sent4=true;
+    var v=val?val.value:undefined, dn=String(val?val.done:"-");
+    var r=cmpBytes(v);
+    try{by2.releaseLock();}catch(x){}
+    try{if(w2)w2.releaseLock();}catch(x){}
+    bk("S4",tag+";eq="+r.eq+";len="+r.len+";dif="+r.dif+";done="+dn+";cn="+r.cn); }
+  try{ rp2.then(function(val){fin4("rd=ok",val);},
+               function(err){fin4("rd=rej:"+String((err&&err.message)||err).slice(0,32),null);}); }
+  catch(e){ fin4("rd=E:"+String((e&&e.message)||e).slice(0,32),null); }
+  setTimeout(function(){fin4("rd=pend",null);},800);
+})();
+
+/* ===== S5 — desiredSize del controller REAL antes/después de enqueue =====
+ * TransformStreamDefaultController.js :37-48 → readableStreamDefaultController-
+ * GetDesiredSize = HWM − queue.size. HWM readable TS = 0 (TransformStream-
+ * Internals.js:77) y size default () => 1 (StreamInternals.js:166-180) ⇒ el
+ * conteo es por CHUNKS: desB=0, desA=-1 por árbol; -8 ⇒ conteo por BYTES
+ * (divergencia del árbol = hallazgo). Stream fresco propio, sin tocar T3. */
+(function(){
+  if(typeof TransformStream!=="function"){ bk("S5","SKIP no-TS"); return; }
+  var ctl5=null,e5="",ck="-",desB="-",enq5="-",desA="-";
+  try{ new TransformStream({start:function(c){ctl5=c;}}); }
+  catch(e){ e5=String((e&&e.message)||e).slice(0,48); }
+  if(!ctl5){ bk("S5","SKIP e="+e5); return; }
+  try{ ck=typeof ctl5; }catch(e){ ck="E"; }
+  try{ desB=String(ctl5.desiredSize); }catch(e){ desB="E"; }
+  try{ ctl5.enqueue(new Uint8Array(8)); enq5="ok"; }catch(e){ enq5="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ desA=String(ctl5.desiredSize); }catch(e){ desA="E"; }
+  bk("S5","ctl="+ck+";desB="+desB+";enq="+enq5+";desA="+desA+";e="+e5);
+})();
+
+/* ===== S6 — FZ byte-buffer: write-into-view sobre buffer congelado/detached =====
+ * El readable del TS es default-controller (S2) ⇒ el camino BYOB real vive en
+ * un byte-stream NATIVO: new ReadableStream({type:"bytes",start(c){ctl=c}})
+ * (gated por @readableByteStreamAPIEnabled, ReadableStreamInternals.js:66-67
+ * — si está off, ambos probes dan E:"...is not implemented" y se mide igual).
+ * 6a frozen: view 8B sobre ArrayBuffer CONGELADO + ctl.enqueue(chunk 16B) ⇒
+ *   fillDescriptorFromQueue :469 copia 8B en NUESTRO buffer vía set PÚBLICO
+ *   (typed-array set no chequea frozen — MEDIDO, sin assert: ¿TypeError o copia?).
+ * 6b detached: view creada ANTES de detachar; read con view detached ⇒
+ *   ReadableStreamBYOBReader.js:66-67 rechaza la PROMESA con TypeError
+ *   "Provided view cannot have a 0 byteLength" (esperado, 0-crash; no es
+ *   throw síncrono). Detach vía structuredClone o postMessage transfer. */
+(function(){
+  var R={fz:"-",dt:"-"}, n=0;
+  function fin(){ n++; if(n>=2){ bk("S6","fz="+R.fz+";dt="+R.dt); } }
+  /* 6a — frozen */
+  (function(){
+    try{
+      var ctl6=null;
+      var ts6=new ReadableStream({type:"bytes", start:function(c){ctl6=c;}});
+      var bf=new ArrayBuffer(8);
+      try{ Object.freeze(bf); }catch(x){}
+      var dvf=new DataView(bf);
+      var by6=new ReadableStreamBYOBReader(ts6);
+      var done6=false;
+      function fin6(tag,val){ if(done6)return; done6=true;
+        var r=cmpBytes(val?val.value:null);
+        R.fz=tag+";eq="+r.eq+";len="+r.len+";cn="+r.cn;
+        try{by6.releaseLock();}catch(x){}
+        fin(); }
+      var p6=by6.read(dvf);
+      try{ ctl6.enqueue(new Uint8Array([65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80])); }catch(x){}
+      p6.then(function(v){fin6("rd=ok",v);},
+              function(err){fin6("rd=rej:"+String((err&&err.message)||err).slice(0,24),null);});
+      setTimeout(function(){fin6("rd=pend",null);},800);
+    }catch(e){ R.fz="E:"+String((e&&e.message)||e).slice(0,40); fin(); }
+  })();
+  /* 6b — detached */
+  (function(){
+    try{
+      var ctl7=null;
+      var ts7=new ReadableStream({type:"bytes", start:function(c){ctl7=c;}});
+      var b2=new ArrayBuffer(8);
+      var dvd=new DataView(b2);      /* view ANTES del detach */
+      var how="-";
+      try{ if(typeof structuredClone==="function"){ structuredClone(b2,{transfer:[b2]}); how="sc"; } }catch(x){}
+      if(b2.byteLength!==0){ try{ window.postMessage(b2,"*",[b2]); how="pm"; }catch(x){} }
+      var det=(b2.byteLength===0);
+      var by7=new ReadableStreamBYOBReader(ts7);
+      var p7=null,syn="-";
+      try{ p7=by7.read(dvd); syn="ok"; }
+      catch(e){ syn="E:"+String((e&&e.message)||e).slice(0,32); }
+      if(p7){
+        var done7=false;
+        function fin7(tag,val){ if(done7)return; done7=true;
+          var r=cmpBytes(val?val.value:null);
+          R.dt="det="+det+";how="+how+";syn="+syn+";"+tag+";eq="+r.eq+";len="+r.len;
+          try{by7.releaseLock();}catch(x){}
+          fin(); }
+        p7.then(function(v){fin7("rd=ok",v);},
+                function(err){fin7("rd=rej:"+String((err&&err.message)||err).slice(0,24),null);});
+        try{ ctl7.enqueue(new Uint8Array(PAT)); }catch(x){}
+        setTimeout(function(){fin7("rd=pend",null);},800);
+      } else {
+        R.dt="det="+det+";how="+how+";syn="+syn+";noprom";
+        try{by7.releaseLock();}catch(x){}
+        fin();
+      }
+    }catch(e){ R.dt="E:"+String((e&&e.message)||e).slice(0,40); fin(); }
+  })();
+})();
+
+/* ===== S7 — Z ===== */
+setTimeout(function(){ clearInterval(HB);
+  bk("Z","FA-v17-bytes complete; DR_OK="+DR_OK+(DR_OK?"":" DRGATE"));
+},1600);
+})();
+</script></body></html>

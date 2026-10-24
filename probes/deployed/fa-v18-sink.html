@@ -1,0 +1,257 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v18-sink — press-8: EL SINK NATIVO — ¿el engine consume T3[1] con len/contenido exactos?</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v18-sink…</pre>
+<script>
+(function(){
+"use strict";
+/* ============================================================================
+ * FA-v18-sink — press-8 (V18-BUILD). Engine diagnostics 14.20.
+ * Pregunta (la puerta al alias): ¿Código NATIVO del engine consume NUESTRO
+ * readable (T3[1] del passthrough) con longitud/contenido EXACTOS? El
+ * veredicto lo da NUESTRO SERVIDOR en el wire (headless-friendly):
+ *   S2/PRUEBA A — new Response(T3[1]) + resp.arrayBuffer(): el BODY CONSUMER
+ *     NATIVO tira de nuestro stream (pipeTo interno). Mide ctor ok/E, len +
+ *     bytes hex del arrayBuffer, timeout 1500.
+ *   S3/PRUEBA B — fetch("/beacon/V18A-WIRE",{method:"POST",body:T3b[1],
+ *     duplex:"half"}) con "WIREBYTE" (8B) escrito vía T3b[2]: ¿fetch acepta
+ *     stream-body? EL HOST VERIFICA los bytes en el wire. T3b = SEGUNDO T3
+ *     (poison #2) para no pelear locks con A.
+ *   S4/PRUEBA C — WebSocket("wss://"+location.host+"/ws"): sólo ctor +
+ *     onopen/onerror con timeout. NO se manda nada.
+ *   S5 — desiredSize del lado writable (T3[2]) antes/después bajo consumo
+ *     nativo (medido DENTRO de la prueba A, beacon propio V18A-S5).
+ * 0-crash por construcción (reglas v16/v17):
+ *   - todo try-catch; poison pass-through FULL-FILL (nunca under-fill) y
+ *     rst() en finally en TODOS los paths; dos poisons separados (S1 y S3);
+ *   - SIN tee; SIN sync-XHR (beacons fetch-async keepalive); HB 2s;
+ *     beacons V18A-*; slice 500; RID<32B;
+ *   - timeouts en TODAS las promises (A 1500, B 1500, C 1200) y Z ≤3s.
+ * Árbol que gobierna cada etapa (wk1200-source, verificado en este build):
+ *   TransformStreamInternals.js :85 (initialize len-2) / :100 (return
+ *     [internal,readable,writable] — triple len-3 capturado) / :171-218
+ *     (TransformStreamDefaultControllerEnqueue: brand-check + reenvío identidad)
+ *   TransformStream.cpp :114-119 (SequenceConverter convert :114,
+ *     ASSERT(size==3) no-op :115, jsDynamicCast->wrapped() :117 = kill-shape
+ *     si under-fill; full-fill ⇒ 0-crash)
+ *   SINK NATIVO (el objeto del press):
+ *   FetchBody.cpp :70-76 — BodyInit rama ReadableStream: gates isDisturbed/
+ *     isLocked ⇒ TypeError "Input body is disturbed/locked"; :174 — consume()
+ *     de stream → m_consumer.resolve(promise, contentType, &owner,
+ *     m_readableStream.get())
+ *   FetchBodyOwner.cpp :103-121 — arrayBuffer(): loadingException / null-body /
+ *     isDisturbedOrLocked (:115-118) → TypeError "Body is disturbed or locked";
+ *     m_isDisturbed=true
+ *   FetchBodyConsumer.cpp :329-334 — extract(): ASSERT(!m_sink);
+ *     m_sink=ReadableStreamToSharedBufferSink::create(callback);
+ *     m_sink->pipeFrom(stream); :336-364 — resolve(): rama stream — el callback
+ *     acumula SharedBufferBuilder con cada chunk y en nullptr (close) resuelve
+ *     resolveWithData(promise, contentType, data, length) (:266-269)
+ *   ReadableStreamSink.cpp :43-45 — pipeFrom → stream.pipeTo(*this) = READER
+ *     NATIVO tirando de NUESTRO readable (pipeTo interno de JSReadableStream);
+ *     :48-57 — enqueue(): salta zero-length; :54 `std::span<const uint8_t>
+ *     chunk { buffer->data(), buffer->byteLength() };` + :55 `m_callback(&chunk)`
+ *     = LONGITUD+CONTENIDO EXACTOS entregados al callback; :59-66 — close() →
+ *     callback(nullptr) = EOF exacto
+ *   Lado request (prueba B): FetchBodySource.cpp :78-85 (close) / :90-93
+ *     (error); FetchBodySource.h :11-29 (ReadableStreamSource: doPull final —
+ *     el pull del upload lo ejerce el loader, no JS)
+ * ========================================================================== */
+var RID="v18a"+Date.now().toString(36).slice(-13);      /* 17 B < 32 */
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V18A-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+var T3=null, ts=null;    /* S1 llena T3/ts (prueba A) */
+var T3b=null, tsb=null;  /* S3 llena T3b/tsb (prueba B, poison #2) */
+
+/* hx — hex de hasta max bytes de un ArrayBuffer (len/contenido del wire). */
+function hx(ab,max){ if(!ab){ return "-"; }
+  try{ var n=Math.min(ab.byteLength,max), u=new Uint8Array(ab), s="";
+       for(var i=0;i<n;i++){ s+=("0"+u[i].toString(16)).slice(-2); }
+       return s; }
+  catch(e){ return "E"; } }
+
+/* ===== S0 — L + DR-gate (v14-analisis-final §5) =====
+ * DR_OK = dr==="object" && rt==="function" && keys⊇{deriveCode,_internals}.
+ * Si !DR_OK: los stages corren igual (survey 0-crash, no depende del kit)
+ * y Z emite DRGATE; el press no se quema. */
+var dr="-",rt="-",dk="-",keys=[],DR_OK=false;
+try{ dr=typeof window.deriveRuntime;
+  if(dr==="object"&&window.deriveRuntime){
+    try{ keys=Object.keys(window.deriveRuntime).sort(); dk=keys.join(",").slice(0,96); }catch(e){}
+    rt=typeof window.deriveRuntime.run;
+    DR_OK=(rt==="function")&&(keys.indexOf("deriveCode")>=0)&&(keys.indexOf("_internals")>=0);
+  }
+}catch(e){}
+bk("L","fa-v18-sink; dr="+dr+"; rt="+rt+"; dk="+dk);
+say("S0 L+DR-gate dr="+dr+" DR_OK="+DR_OK);
+
+/* ===== S1 — poison pass-through + T3 (SIN tee, idéntico a v16) =====
+ * Captura el triple iterado por TransformStreamInternals.js:100 vía
+ * TransformStream.cpp:114-119. El iterador venenoso devuelve TODOS los
+ * elementos reales (full-fill) ⇒ ASSERT(:115) cumple, cast(:117) recibe
+ * wrappers reales ⇒ 0-crash. N cuenta las iteraciones (:85 + :100). */
+(function(){
+  var N=0,e1="",m="-",rSame="-",wSame="-";
+  Array.prototype[Symbol.iterator]=function(){var t=this;N++;
+    try{ if(T3===null&&t&&t.length===3&&typeof t[1]==="object"&&typeof t[2]==="object"){T3=[t[0],t[1],t[2]];} }catch(x){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ ts=new TransformStream({}); m="ok";
+    try{ rSame=String(ts.readable===T3[1]); }catch(x){rSame="E";}
+    try{ wSame=String(ts.writable===T3[2]); }catch(x){wSame="E";}
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,48); m="E"; }
+  finally{ rst(); }   /* restore en TODOS los paths */
+  bk("S1","new="+m+";e="+e1+";N="+N+";rSame="+rSame+";wSame="+wSame+";t3="+(T3?1:0));
+})();
+say("S1 done t3="+(T3?1:0));
+
+/* ===== S2 — PRUEBA A: new Response(T3[1]) → resp.arrayBuffer() =====
+ * El BODY CONSUMER NATIVO tira de NUESTRO readable:
+ *   Response(stream) → FetchBody.cpp:70-76 (rama ReadableStream del BodyInit;
+ *   gates isDisturbed/isLocked) → resp.arrayBuffer() → FetchBodyOwner.cpp
+ *   :103-121 (isDisturbedOrLocked :115-118) → FetchBody.cpp:174 →
+ *   FetchBodyConsumer.cpp:336-364 (sink=ReadableStreamToSharedBufferSink +
+ *   pipeFrom) → ReadableStreamSink.cpp:43-45 (stream.pipeTo = READER NATIVO)
+ *   → enqueue :54-55 (span chunk data+byteLength EXACTOS al callback) →
+ *   close() :59-66 (callback(nullptr)=EOF) → resolveWithData.
+ * Mide: lk0/lkA (lock antes/después del pipeTo), rc (ctor Response), ac
+ * (arrayBuffer), wrA/wrtA/cls (writer+write+close), y el settle del
+ * arrayBuffer: len + eq (bytes 48..55 = "01234567") + hex. Fallback pend@1500.
+ * S5 (desiredSize bajo consumo nativo) se mide AQUÍ y emite V18A-S5 en finA. */
+(function(){
+  if(!T3){ bk("S2","SKIP no-T3"); bk("S5","SKIP no-T3"); return; }
+  var lk0="-",lkA="-",rc="-",ac="-",wrA="-",wrtA="-",cls="-";
+  var desB="-",desW="-",desF="-";
+  var wa=null,resp=null,pA=null,aDone=false;
+  function finA(tag){
+    if(aDone) return; aDone=true;
+    try{ if(wa){ wa.releaseLock(); } }catch(x){}
+    try{ if(desF==="-"){ desF=String(T3[2].desiredSize); } }catch(e){ desF="E"; }
+    bk("S2","rc="+rc+";lk0="+lk0+";lkA="+lkA+";ac="+ac+";wrA="+wrA+";wrtA="+wrtA+";cls="+cls+";"+tag);
+    bk("S5","desB="+desB+";desW="+desW+";desF="+desF);
+  }
+  try{ lk0=String(T3[1].locked); }catch(e){ lk0="E"; }
+  try{ wa=T3[2].getWriter(); wrA="ok"; }catch(e){ wrA="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ resp=new Response(T3[1]); rc="ok"; }catch(e){ rc="E:"+String((e&&e.message)||e).slice(0,48); }
+  if(!resp){ finA("ab=n/a"); return; }
+  try{ lkA=String(T3[1].locked); }catch(e){ lkA="E"; }
+  try{ pA=resp.arrayBuffer(); ac="pend"; }catch(e){ ac="E:"+String((e&&e.message)||e).slice(0,40); }
+  if(!pA){ finA("ab=n/a"); return; }
+  /* S5: desiredSize del writable ANTES del write (consumidor nativo ya
+   * tirando: pull pendiente, queue vacía ⇒ 0 por árbol HWM=0). */
+  try{ desB=String(T3[2].desiredSize); }catch(e){ desB="E"; }
+  var pwA=null;
+  try{ pwA=wa.write("01234567"); wrtA="ok"; }catch(e){ wrtA="E:"+String((e&&e.message)||e).slice(0,40); }
+  /* S5: DESPUÉS del write, síncrono — el chunk vive en la queue writable en
+   * este instante (el transform identidad lo mueve en microtask) ⇒ -1 esperado. */
+  try{ desW=String(T3[2].desiredSize); }catch(e){ desW="E"; }
+  var pcA=null;
+  try{ pcA=wa.close(); cls="ok"; }catch(e){ cls="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ if(pwA&&pwA.then){ pwA.then(null,function(){}); } }catch(x){}
+  try{ if(pcA&&pcA.catch){ pcA.catch(function(){}); } }catch(x){}
+  try{
+    pA.then(function(ab){
+        var len="-",eq="-",hex="-";
+        try{
+          len=String(ab.byteLength); hex=hx(ab,16);
+          if(len==="8"){ var u=new Uint8Array(ab), ok=true;
+            for(var i=0;i<8;i++){ if(u[i]!==48+i){ ok=false; } }
+            eq=String(ok); }
+          else{ eq="false"; }
+        }catch(x){ len="E"; eq="E"; hex="-"; }
+        finA("ab=ok;len="+len+";eq="+eq+";hex="+hex);
+      },
+      function(err){ finA("ab=rej:"+String((err&&err.message)||err).slice(0,40)); });
+  }catch(e){ finA("ab=E:"+String((e&&e.message)||e).slice(0,32)); }
+  setTimeout(function(){ finA("ab=pend"); },1500);
+})();
+say("S2 done (prueba A lanzada)");
+
+/* ===== S5 — desiredSize bajo consumo nativo (nota de diseño) =====
+ * Medido DENTRO de la prueba A (S2) y emitido en su beacon V18A-S5 al
+ * settle/timeout de A: desB (antes del write, pull nativo pendiente),
+ * desW (síncrono tras write, chunk en queue writable), desF (al settle:
+ * null si el stream cerró, número si sigue vivo en pend).
+ * WritableStream.prototype.desiredSize → WritableStreamDefaultController.
+ * js :37-48 (HWM − queueTotalSize; HWM writable TS = 0, size default
+ * () => 1 ⇒ conteo por CHUNKS). desW=-1 ⇒ nuestro chunk está PRESENTE en
+ * la queue en el instante del write; desF=null ⇒ close fluyó por el
+ * transform hasta el EOF nativo (callback(nullptr) de ReadableStreamSink
+ * :59-66) — la señal de que el consumo nativo completó. */
+
+/* ===== S3 — PRUEBA B: fetch con body=stream (SEGUNDO T3, poison #2) =====
+ * T3b nace de OTRO poison+restore separado (A ya consumió T3 ⇒ no pelean
+ * locks). wb.write("WIREBYTE") (8B exactos) + close tras settle del write ⇒
+ * POST completo para el host. fetch(body:T3b[1], duplex:"half"): el upload
+ * lo tira el loader vía ReadableStreamSource (FetchBodySource.h :11-29,
+ * doPull final) y el VEREDICTO del contenido exacto está en el wire del
+ * host (POST /beacon/V18A-WIRE, octet-stream, 8 bytes 57 49 52 45 42 59 54 45).
+ * Mide: poison#2 (new/N/rSame), wr/wrt, f (fetch devolvió promise), lkB
+ * (fetch lockea el body), settle (st=status / rej:msg / pend@1500). */
+(function(){
+  var N2=0,e2="",m2="-",rSame2="-",wSame2="-";
+  Array.prototype[Symbol.iterator]=function(){var t=this;N2++;
+    try{ if(T3b===null&&t&&t.length===3&&typeof t[1]==="object"&&typeof t[2]==="object"){T3b=[t[0],t[1],t[2]];} }catch(x){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ tsb=new TransformStream({}); m2="ok";
+    try{ rSame2=String(tsb.readable===T3b[1]); }catch(x){rSame2="E";}
+    try{ wSame2=String(tsb.writable===T3b[2]); }catch(x){wSame2="E";}
+  }catch(e){ e2=String((e&&e.message)||e).slice(0,48); m2="E"; }
+  finally{ rst(); }   /* restore en TODOS los paths, ANTES de cualquier bk */
+  if(!T3b){ bk("S3","new="+m2+";e="+e2+";N="+N2+";t3b=0"); return; }
+  if(typeof fetch!=="function"){ bk("S3","new="+m2+";N="+N2+";SKIP no-fetch"); return; }
+  var wb=null,wr="-",wrt="-",lkB="-",bDone=false;
+  function finB(tag){
+    if(bDone) return; bDone=true;
+    try{ if(wb){ wb.releaseLock(); } }catch(x){}
+    bk("S3","new="+m2+";N="+N2+";rSame="+rSame2+";wr="+wr+";wrt="+wrt+";lkB="+lkB+";"+tag);
+  }
+  try{ wb=T3b[2].getWriter(); wr="ok"; }catch(e){ wr="E:"+String((e&&e.message)||e).slice(0,40); }
+  if(!wb){ bk("S3","new="+m2+";N="+N2+";wr="+wr+";f=SKIP"); return; }
+  var pwB=null;
+  try{ pwB=wb.write("WIREBYTE"); wrt="ok"; }catch(e){ wrt="E:"+String((e&&e.message)||e).slice(0,40); }
+  var f="-",pB=null;
+  try{
+    pB=fetch("/beacon/V18A-WIRE",{method:"POST",cache:"no-store",headers:{"Content-Type":"application/octet-stream"},body:T3b[1],duplex:"half"});
+    f="ok";
+    try{ lkB=String(T3b[1].locked); }catch(e){ lkB="E"; }
+  }catch(e){ f="E:"+String((e&&e.message)||e).slice(0,48); }
+  /* cierre del body tras settle del write ⇒ el POST llega completo al host */
+  try{ if(pwB&&pwB.then){ pwB.then(function(){ try{ var pc=wb.close(); if(pc&&pc.catch){pc.catch(function(){});} }catch(x){} },
+                                     function(){ try{ var pc=wb.close(); if(pc&&pc.catch){pc.catch(function(){});} }catch(x){} }); } }
+  catch(x){ try{ var pc=wb.close(); if(pc&&pc.catch){pc.catch(function(){});} }catch(y){} }
+  if(!pB){ finB("f="+f); return; }
+  try{
+    pB.then(function(r){ finB("f="+f+";st="+String(r.status)); },
+            function(err){ finB("f="+f+";rej:"+String((err&&err.message)||err).slice(0,48)); });
+  }catch(e){ finB("f="+f+";E:"+String((e&&e.message)||e).slice(0,32)); }
+  setTimeout(function(){ finB("f="+f+";pend"); },1500);
+})();
+say("S3 done (prueba B lanzada)");
+
+/* ===== S4 — PRUEBA C: fallback WebSocket (sólo ctor + open/error) =====
+ * ws=new WebSocket("wss://"+location.host+"/ws") — NO se manda nada. Mide si
+ * el ctor existe y si abre (onopen) o falla (onerror) con timeout 1200ms;
+ * close() mudo en la limpieza. Si abre, el canal queda para un press futuro. */
+(function(){
+  if(typeof WebSocket!=="function"){ bk("S4","SKIP no-ws-ctor"); return; }
+  var wsc="-",ws=null,cDone=false;
+  function finC(tag){ if(cDone) return; cDone=true;
+    try{ if(ws&&ws.readyState<2){ ws.close(); } }catch(x){}
+    bk("S4","wsc="+wsc+";"+tag); }
+  try{ ws=new WebSocket("wss://"+location.host+"/ws"); wsc="ok"; }
+  catch(e){ wsc="E:"+String((e&&e.message)||e).slice(0,48); bk("S4","wsc="+wsc); return; }
+  try{ ws.onopen=function(){ finC("open=t"); }; }catch(x){}
+  try{ ws.onerror=function(){ finC("open=-;err=t"); }; }catch(x){}
+  setTimeout(function(){ finC("open=-;err=-;pend"); },1200);
+})();
+say("S4 done (prueba C lanzada)");
+
+/* ===== S6 — Z ===== */
+setTimeout(function(){ clearInterval(HB);
+  bk("Z","FA-v18-sink complete; DR_OK="+DR_OK+(DR_OK?"":" DRGATE"));
+},2800);
+})();
+</script></body></html>

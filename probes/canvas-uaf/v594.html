@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V594</title></head>
+<body><pre id="out">V594 — BMR trigger diagnostic</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,msg){
+  try{new Image().src='/beacon/V594-'+tag+'?d='+encodeURIComponent(String(msg).slice(0,400))+'&t='+Date.now();}catch(e){}
+  say(tag+': '+(msg||''));
+}
+
+bk('BOOT','start');
+
+/* S1: createElement canvas */
+var c1;
+try{c1=document.createElement('canvas');c1.width=1;c1.height=1;}catch(e){}
+bk('S1',c1?'canvas-OK':'canvas-FAIL');
+if(!c1){bk('ABORT','no-canvas');throw 0;}
+
+/* S2: defineProperty on settings dict */
+var fired=false,innerCtx=null,innerErr='';
+var settings={};
+try{
+  Object.defineProperty(settings,'alpha',{get:function(){
+    fired=true;
+    try{innerCtx=c1.getContext('2d');}catch(e){innerErr=e.name+':'+e.message;}
+    return true;
+  }});
+  bk('S2','defprop-OK');
+}catch(e){bk('S2','defprop-FAIL:'+e.name);throw 0;}
+
+/* S3: getContext('bitmaprenderer', settings) */
+var bmr=null,bmrErr='';
+bk('S3-PRE','calling-bmr');
+try{bmr=c1.getContext('bitmaprenderer',settings);}catch(e){bmrErr=e.name+':'+e.message;}
+bk('S3',bmr?'bmr-OK':'bmr-NULL,err='+(bmrErr||'none'));
+
+/* S4: getter + inner */
+bk('S4-GETTER',fired?'FIRED':'NOT-FIRED');
+bk('S4-INNER',innerCtx?'CREATED':'NULL,err='+(innerErr||'none'));
+
+/* S5: lineWidth on inner */
+if(innerCtx){
+  try{bk('S5','lw='+innerCtx.lineWidth);}catch(e){bk('S5','CRASH:'+e.name);}
+
+  /* S6: save x1 */
+  try{innerCtx.save();bk('S6','save1-lw='+innerCtx.lineWidth);}catch(e){bk('S6','CRASH:'+e.name);}
+
+  /* S7: save x8 + marker */
+  try{
+    for(var i=0;i<7;i++)innerCtx.save();
+    innerCtx.lineWidth=6.02214076e23;
+    bk('S7','save8-marker='+innerCtx.lineWidth);
+  }catch(e){bk('S7','CRASH:'+e.name);}
+
+  /* S8: oracle */
+  try{bk('S8','attrs='+JSON.stringify(innerCtx.getContextAttributes()));}catch(e){bk('S8','CRASH:'+e.name);}
+
+  /* S9: what does canvas think its context is now? */
+  try{
+    var t=c1.getContext('2d');
+    bk('S9','c1.getContext(2d)='+(t?'exists':'null')+',same='+(t===innerCtx));
+  }catch(e){bk('S9','CRASH:'+e.name);}
+}else{bk('S5','SKIP');}
+
+/* S10: plain bmr (no settings) */
+var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+try{var b2=c2.getContext('bitmaprenderer');bk('S10','plain-bmr='+(b2?'OK':'NULL'));}catch(e){bk('S10','ERR:'+e.name);}
+
+/* S11: bmr with plain dict */
+var c3=document.createElement('canvas');c3.width=1;c3.height=1;
+try{var b3=c3.getContext('bitmaprenderer',{alpha:true});bk('S11','dict-bmr='+(b3?'OK':'NULL'));}catch(e){bk('S11','ERR:'+e.name);}
+
+bk('DONE','v594-complete');
+</script></body></html>

@@ -1,0 +1,165 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v16-drive — press-6: T3 pass-through + rdX/wr reales + shell-vs-real controller</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v16-drive…</pre>
+<script>
+(function(){
+"use strict";
+/* ============================================================================
+ * FA-v16-drive — press-6 (diseño V15-QUICK). Engine diagnostics 14.20.
+ * 0-crash por construcción:
+ *   - todo try-catch; único poison en S1 y PASS-THROUGH FULL-FILL (nunca under-fill);
+ *   - rst() (restore Symbol.iterator) en TODOS los paths (finally);
+ *   - SIN tee (el tee de press-5 lockeaba la fuente y enmascaró rd);
+ *   - SIN sync-XHR (beacons fetch-async), HB 2s, slice 500, RID<32B;
+ *   - nonce de caché vía filename nuevo (orquestador), título fijo.
+ * Árbol que gobierna cada etapa (wk1200-source):
+ *   TransformStreamInternals.js :85 (initialize, array len-2) / :100 (return
+ *     [internal,readable,writable] — triple len-3 capturado) / :160
+ *     (TransformStreamDefaultControllerInitialize — slots SOLO en controller real)
+ *     / :171-218 (TransformStreamDefaultControllerEnqueue — brand-check + reenvío)
+ *   ReadableStreamInternals.js :231-232 (genericInitialize: escribe
+ *     ownerReadableStream + slot reader del stream ⇒ flip de locked medible)
+ *   TransformStream.cpp :114-119 (SequenceConverter convert :114,
+ *     ASSERT(size==3) no-op :115, jsDynamicCast->wrapped() :117 = kill-shape
+ *     si under-fill; full-fill ⇒ 0-crash)
+ * ========================================================================== */
+var RID="v16a"+Date.now().toString(36).slice(-13);      /* 17 B < 32 */
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V16A-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+var T3=null, ts=null, w=null;   /* S1 llena T3/ts; S3 llena w; usados en S2-S4 */
+
+/* ===== S0 — L + DR-gate (v14-analisis-final §5) =====
+ * DR_OK = dr==="object" && rt==="function" && keys⊇{deriveCode,_internals}.
+ * Si !DR_OK: los stages corren igual (survey 0-crash, no depende del kit)
+ * y Z emite DRGATE; el press no se quema. */
+var dr="-",rt="-",dk="-",keys=[],DR_OK=false;
+try{ dr=typeof window.deriveRuntime;
+  if(dr==="object"&&window.deriveRuntime){
+    try{ keys=Object.keys(window.deriveRuntime).sort(); dk=keys.join(",").slice(0,96); }catch(e){}
+    rt=typeof window.deriveRuntime.run;
+    DR_OK=(rt==="function")&&(keys.indexOf("deriveCode")>=0)&&(keys.indexOf("_internals")>=0);
+  }
+}catch(e){}
+bk("L","fa-v16-drive; dr="+dr+"; rt="+rt+"; dk="+dk);
+say("S0 L+DR-gate dr="+dr+" DR_OK="+DR_OK);
+
+/* ===== S1 — poison pass-through + T3 (SIN tee) =====
+ * Captura el triple iterado por TransformStreamInternals.js:100 vía
+ * TransformStream.cpp:114-119. El iterador venenoso devuelve TODOS los
+ * elementos reales (full-fill) ⇒ ASSERT(:115) cumple, cast(:117) recibe
+ * wrappers reales ⇒ 0-crash. N cuenta las iteraciones (:85 + :100). */
+(function(){
+  var N=0,e1="",m="-",rSame="-",wSame="-";
+  Array.prototype[Symbol.iterator]=function(){var t=this;N++;
+    try{ if(T3===null&&t&&t.length===3&&typeof t[1]==="object"&&typeof t[2]==="object"){T3=[t[0],t[1],t[2]];} }catch(x){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ ts=new TransformStream({}); m="ok";
+    try{ rSame=String(ts.readable===T3[1]); }catch(x){rSame="E";}
+    try{ wSame=String(ts.writable===T3[2]); }catch(x){wSame="E";}
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,48); m="E"; }
+  finally{ rst(); }   /* restore en TODOS los paths */
+  bk("S1","new="+m+";e="+e1+";N="+N+";rSame="+rSame+";wSame="+wSame+";t3="+(T3?1:0));
+})();
+say("S1 done t3="+(T3?1:0));
+
+/* ===== S2 — rdX sobre T3[1]: reader REAL (baseline del write :231-232) =====
+ * new ReadableStreamDefaultReader(T3[1]) sobre el stream real (sin tee previo):
+ * espera rd=ctor + locked=true; releaseLock revierte (lock-gate conmutable). */
+(function(){
+  if(!T3){ bk("S2","SKIP no-T3"); return; }
+  var rd="-",lk1="-",rel="-",lk2="-",r=null;
+  try{ r=new ReadableStreamDefaultReader(T3[1]); rd="ctor"; }
+  catch(e){ rd="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ lk1=String(T3[1].locked); }catch(e){ lk1="E"; }
+  if(r){ try{ r.releaseLock(); rel="ok"; }catch(e){ rel="E:"+String((e&&e.message)||e).slice(0,40); }
+         try{ lk2=String(T3[1].locked); }catch(e){ lk2="E"; } }
+  bk("S2","rd="+rd+";lk="+lk1+";rel="+rel+";lk2="+lk2);
+})();
+
+/* ===== S3 — wr sobre T3[2]: writer REAL =====
+ * T3[2] es el wrapper writable nacido del cast (:117) y creado en
+ * TransformStreamInternals.js:85 (initialize). Espera wr=ok + wLk=true. */
+(function(){
+  if(!T3){ bk("S3","SKIP no-T3"); return; }
+  var wr="-",wLk="-";
+  try{ w=T3[2].getWriter(); wr="ok"; }
+  catch(e){ wr="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ wLk=String(T3[2].locked); }catch(e){ wLk="E"; }
+  bk("S3","wr="+wr+";wLk="+wLk);
+})();
+
+/* ===== S4 — roundtrip punta-a-punta: write("01234567") → read() =====
+ * TransformStreamInternals.js:171-218: el transform por defecto es identidad
+ * (TransformStreamDefaultControllerEnqueue reenvía el chunk al readable).
+ * Mide valor (eq/len) + done del read() real. Fallback pend@800ms. */
+(function(){
+  if(!T3||!w){ bk("S4","SKIP no-w"); return; }
+  var r4=null,rd4="-",wrt="-";
+  try{ r4=new ReadableStreamDefaultReader(T3[1]); rd4="ctor"; }
+  catch(e){ rd4="E:"+String((e&&e.message)||e).slice(0,40); }
+  if(!r4){ bk("S4","SKIP rd4="+rd4); return; }
+  try{ w.write("01234567"); wrt="ok"; }
+  catch(e){ wrt="E:"+String((e&&e.message)||e).slice(0,40); }
+  var sent4=false;
+  function fin4(tag,val){ if(sent4)return; sent4=true;
+    var v=val?val.value:undefined, eq=String(v==="01234567"),
+        len=(typeof v==="string")?v.length:"-", dn=String(val?val.done:"-");
+    try{r4.releaseLock();}catch(x){}
+    try{w.releaseLock();}catch(x){}
+    bk("S4",tag+";wrt="+wrt+";eq="+eq+";len="+len+";done="+dn); }
+  try{ r4.read().then(function(val){fin4("rd=ok",val);},
+                       function(err){fin4("rd=rej:"+String((err&&err.message)||err).slice(0,32),null);}); }
+  catch(e){ fin4("rd=E:"+String((e&&e.message)||e).slice(0,32),null); }
+  setTimeout(function(){fin4("rd=pend",null);},800);
+})();
+
+/* ===== S5 — shell 1-arg del TS-controller =====
+ * TransformStreamDefaultController.js:30-31: guard `&&` saltado con 1 arg ⇒
+ * el ctor minte un objeto SIN slots (initialize :160 nunca corrió).
+ * TransformStreamInternals.js:171-218: enqueue sobre el shell ⇒ brand-check
+ * ⇒ TypeError "not a TransformStreamDefaultController". */
+(function(){
+  if(typeof TransformStreamDefaultController!=="function"){ bk("S5","SKIP no-ctor"); return; }
+  var shC="-",e5="",inst="-",slots="-",enq="-";
+  try{
+    var sh=new TransformStreamDefaultController({}); shC="ok";
+    try{ inst=String(sh instanceof TransformStreamDefaultController); }catch(x){ inst="E"; }
+    try{ slots=String(Object.keys(sh).length); }catch(x){ slots="E"; }
+    try{ sh.enqueue("x"); enq="ok"; }catch(e){ enq="E:"+String((e&&e.message)||e).slice(0,40); }
+  }catch(e){ e5=String((e&&e.message)||e).slice(0,48); shC="E"; }
+  bk("S5","shC="+shC+";e="+e5+";inst="+inst+";slots="+slots+";enq="+enq);
+})();
+
+/* ===== S6 — controller REAL vía start(c) =====
+ * TransformStreamInternals.js:160 (initialize corre en setup ⇒ slots reales)
+ * + :171-218 (enqueue real reenvía "nh" al readable). Roundtrip real del
+ * engine: c.enqueue("nh") directo + leer vía reader de ts.readable. */
+(function(){
+  if(typeof TransformStream!=="function"){ bk("S6","SKIP no-TS"); return; }
+  var ctl6=null,ts6=null,e6="",ck6="-",enq6="-",des6="-",rd6="-";
+  try{ ts6=new TransformStream({start:function(c){ctl6=c;}}); }
+  catch(e){ e6=String((e&&e.message)||e).slice(0,48); }
+  if(!ctl6){ bk("S6","SKIP e="+e6); return; }
+  try{ ck6=typeof ctl6; }catch(e){ ck6="E"; }
+  try{ ctl6.enqueue("nh"); enq6="ok"; }catch(e){ enq6="E:"+String((e&&e.message)||e).slice(0,40); }
+  try{ des6=String(ctl6.desiredSize); }catch(e){ des6="E"; }
+  var r6=null;
+  try{ r6=ts6.readable.getReader(); rd6="ok"; }catch(e){ rd6="E:"+String((e&&e.message)||e).slice(0,40); }
+  function bk6(tail){ bk("S6","ctl="+ck6+";enq="+enq6+";des="+des6+";rd="+rd6+";"+tail+"e="+e6); }
+  if(!r6){ bk6(""); return; }
+  try{ r6.read().then(function(val){ var v=val?val.value:undefined;
+          bk6("eq="+String(v==="nh")+";done="+String(val?val.done:"-")+";"); },
+        function(err){ bk6("rej="+String((err&&err.message)||err).slice(0,32)+";"); }); }
+  catch(e){ bk6("re="+String((e&&e.message)||e).slice(0,48)+";"); }
+})();
+
+/* ===== S7 — Z ===== */
+setTimeout(function(){ clearInterval(HB);
+  bk("Z","FA-v16-drive complete; DR_OK="+DR_OK+(DR_OK?"":" DRGATE"));
+},1600);
+})();
+</script></body></html>

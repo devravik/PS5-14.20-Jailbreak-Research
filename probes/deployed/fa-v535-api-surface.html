@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V535</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V535 — Unexplored API surface probe
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V535-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// === Part 1: WebGL ===
+try{
+  var cv=document.createElement('canvas');
+  cv.width=1;cv.height=1;
+  var gl=cv.getContext('webgl')||cv.getContext('experimental-webgl');
+  if(gl){
+    B('WEBGL','YES — '+gl.getParameter(gl.VERSION));
+    B('WEBGL-R',gl.getParameter(gl.RENDERER));
+    B('WEBGL-V',gl.getParameter(gl.VENDOR));
+    B('WEBGL-SL',gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+    var ext=gl.getSupportedExtensions();
+    B('WEBGL-EXT','count='+ext.length+': '+ext.join(','));
+    var db=gl.getExtension('WEBGL_debug_renderer_info');
+    if(db){
+      B('WEBGL-UNMASKED-R',gl.getParameter(db.UNMASKED_RENDERER_WEBGL));
+      B('WEBGL-UNMASKED-V',gl.getParameter(db.UNMASKED_VENDOR_WEBGL));
+    }else{B('WEBGL-DBG','no debug_renderer_info')}
+  }else{B('WEBGL','NO')}
+  var gl2=cv.getContext('webgl2');
+  B('WEBGL2',gl2?'YES — '+gl2.getParameter(gl2.VERSION):'NO');
+}catch(e){B('WEBGL-ERR',''+e)}
+
+// === Part 2: Web Audio ===
+try{
+  var AC=window.AudioContext||window.webkitAudioContext;
+  if(AC){
+    var ac=new AC();
+    B('AUDIO','YES — state='+ac.state+' sr='+ac.sampleRate);
+    B('AUDIO-DEST','maxChannels='+ac.destination.maxChannelCount);
+    B('AUDIO-WORKLET',ac.audioWorklet?'YES':'NO');
+    // ScriptProcessorNode
+    try{
+      var sp=ac.createScriptProcessor(4096,1,1);
+      B('AUDIO-SPN','YES');
+      sp.disconnect();
+    }catch(e){B('AUDIO-SPN-ERR',''+e)}
+    // AnalyserNode
+    try{
+      var an=ac.createAnalyser();
+      B('AUDIO-ANALYSER','YES fftSize='+an.fftSize);
+    }catch(e){B('AUDIO-ANALYSER-ERR',''+e)}
+    // OfflineAudioContext
+    try{
+      var oac=new OfflineAudioContext(1,44100,44100);
+      B('AUDIO-OFFLINE','YES');
+    }catch(e){B('AUDIO-OFFLINE-ERR',''+e)}
+    ac.close();
+  }else{B('AUDIO','NO')}
+}catch(e){B('AUDIO-ERR',''+e)}
+
+// === Part 3: Observers ===
+try{B('RESIZE-OBS',typeof ResizeObserver)}catch(e){}
+try{B('INTERSECT-OBS',typeof IntersectionObserver)}catch(e){}
+try{B('MUTATION-OBS',typeof MutationObserver)}catch(e){}
+try{B('PERF-OBS',typeof PerformanceObserver)}catch(e){}
+
+// === Part 4: Houdini / Worklets ===
+try{B('CSS-PAINT',typeof CSS!=='undefined'&&CSS.paintWorklet?'YES':'NO')}catch(e){B('CSS-PAINT',''+e)}
+try{B('CSS-ANIM-WORKLET',typeof CSS!=='undefined'&&CSS.animationWorklet?'YES':'NO')}catch(e){}
+try{B('CSS-TYPED-OM',typeof CSSStyleValue)}catch(e){B('CSS-TYPED-OM',''+e)}
+
+// === Part 5: Other attack surfaces ===
+try{B('WEBRTC',typeof RTCPeerConnection)}catch(e){}
+try{B('SPEECH-SYNTH',typeof SpeechSynthesis)}catch(e){}
+try{B('GAMEPAD',typeof Gamepad)}catch(e){}
+try{B('MIDI',typeof navigator.requestMIDIAccess)}catch(e){}
+try{B('SERIAL',typeof navigator.serial)}catch(e){}
+try{B('USB',typeof navigator.usb)}catch(e){}
+try{B('BT',typeof navigator.bluetooth)}catch(e){}
+try{B('HID',typeof navigator.hid)}catch(e){}
+try{B('NFC',typeof NDEFReader)}catch(e){B('NFC','undefined')}
+try{B('PRESENTATION',typeof Presentation)}catch(e){B('PRESENTATION','undefined')}
+try{B('PAYMENT',typeof PaymentRequest)}catch(e){B('PAYMENT','undefined')}
+
+// === Part 6: Memory/performance ===
+try{B('PERF-MEM',navigator.deviceMemory||'undefined')}catch(e){}
+try{B('HW-CONCUR',navigator.hardwareConcurrency||'undefined')}catch(e){}
+try{
+  if(performance.memory)
+    B('PERF-JSMEM','jsHeapSizeLimit='+performance.memory.jsHeapSizeLimit+
+      ' used='+performance.memory.usedJSHeapSize+' total='+performance.memory.totalJSHeapSize);
+  else B('PERF-JSMEM','NO');
+}catch(e){B('PERF-JSMEM-ERR',''+e)}
+
+// === Part 7: Timers ===
+try{
+  var t1=performance.now();
+  var sum=0;for(var i=0;i<1000000;i++)sum+=i;
+  var t2=performance.now();
+  B('TIMER-RES','1M loop: '+(t2-t1)+'ms (resolution test)');
+}catch(e){}
+
+// === Part 8: WebGL buffer ops (if available) ===
+setTimeout(function(){
+  try{
+    var cv2=document.createElement('canvas');
+    cv2.width=64;cv2.height=64;
+    var gl=cv2.getContext('webgl');
+    if(!gl){B('GL-OPS','skipped (no webgl)');return}
+
+    // Test: create buffer, fill, readPixels
+    var fb=gl.createFramebuffer();
+    var tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+    var status=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    B('GL-FB','status=0x'+status.toString(16)+' (0x8CD5=COMPLETE)');
+
+    // Clear to known color
+    gl.clearColor(0.5,0.25,0.75,1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // ReadPixels
+    var pixels=new Uint8Array(64*64*4);
+    gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    B('GL-READ','[0-3]='+pixels[0]+','+pixels[1]+','+pixels[2]+','+pixels[3]);
+
+    // Test: can we use RAB-backed view with readPixels?
+    try{
+      var rab=new ArrayBuffer(64*64*4,{maxByteLength:64*64*4*2});
+      var rabView=new Uint8Array(rab);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,rabView);
+      B('GL-RAB-READ','WORKED! [0-3]='+rabView[0]+','+rabView[1]+','+rabView[2]+','+rabView[3]);
+    }catch(e){B('GL-RAB-READ','REJECTED: '+e)}
+
+    // Test: bufferData with RAB view
+    try{
+      var buf=gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+      var rab2=new ArrayBuffer(256,{maxByteLength:1024});
+      var rv2=new Float32Array(rab2);
+      gl.bufferData(gl.ARRAY_BUFFER,rv2,gl.STATIC_DRAW);
+      B('GL-RAB-BUF','WORKED!');
+    }catch(e){B('GL-RAB-BUF','REJECTED: '+e)}
+
+    // Test: texImage2D with RAB view
+    try{
+      var tex2=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,tex2);
+      var rab3=new ArrayBuffer(4*4*4,{maxByteLength:4*4*4*2});
+      var rv3=new Uint8Array(rab3);
+      for(var i=0;i<rv3.length;i++)rv3[i]=0xCC;
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,rv3);
+      B('GL-RAB-TEX','WORKED!');
+    }catch(e){B('GL-RAB-TEX','REJECTED: '+e)}
+
+    gl.deleteFramebuffer(fb);
+    gl.deleteTexture(tex);
+
+    // Test: read UNINITIALIZED framebuffer (no clear)
+    var fb2=gl.createFramebuffer();
+    var tex2b=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex2b);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,32,32,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb2);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex2b,0);
+    // DO NOT clear — read immediately
+    var uninit=new Uint8Array(32*32*4);
+    gl.readPixels(0,0,32,32,gl.RGBA,gl.UNSIGNED_BYTE,uninit);
+    var nonzero=0;
+    for(var i=0;i<uninit.length;i++)if(uninit[i]!==0)nonzero++;
+    B('GL-UNINIT','nonzero='+nonzero+'/'+uninit.length);
+    if(nonzero>0){
+      var sample=[];
+      for(var i=0;i<Math.min(64,uninit.length);i++)sample.push(uninit[i].toString(16));
+      B('GL-UNINIT-DATA',sample.join(' '));
+    }
+    // Repeatedly create+read framebuffers to see stale GPU data
+    for(var r=0;r<5;r++){
+      var fbr=gl.createFramebuffer();
+      var texr=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,texr);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,fbr);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texr,0);
+      var rp=new Uint8Array(64*64*4);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,rp);
+      var nz=0;for(var i=0;i<rp.length;i++)if(rp[i]!==0)nz++;
+      B('GL-STALE-'+r,'nonzero='+nz+'/'+rp.length);
+      gl.deleteFramebuffer(fbr);
+      gl.deleteTexture(texr);
+    }
+
+    B('GL-OPS','complete');
+  }catch(e){B('GL-ERR',''+e)}
+},500);
+
+// === Part 9: Web Audio buffer operations ===
+setTimeout(function(){
+  try{
+    var AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC){B('AUDIO-OPS','skipped');return}
+    var ac=new AC();
+
+    // Create AudioBuffer, get channel data
+    var ab=ac.createBuffer(1,4096,ac.sampleRate);
+    var cd=ab.getChannelData(0);
+    B('AUDIO-CD','type='+cd.constructor.name+' len='+cd.length+' bo='+cd.byteOffset);
+
+    // Is the Float32Array's buffer an ArrayBuffer we can inspect?
+    var buf=cd.buffer;
+    B('AUDIO-BUF','byteLength='+buf.byteLength+' resizable='+(buf.resizable||false));
+
+    // Fill and verify
+    cd[0]=1.5;cd[1]=-0.5;
+    var cd2=ab.getChannelData(0);
+    B('AUDIO-SHARE','cd2[0]='+cd2[0]+' same='+(cd===cd2));
+
+    // ScriptProcessorNode: onaudioprocess gives live buffer access
+    var spn=ac.createScriptProcessor(4096,1,1);
+    var gotAudio=false;
+    spn.onaudioprocess=function(ev){
+      if(gotAudio)return;
+      gotAudio=true;
+      var inp=ev.inputBuffer.getChannelData(0);
+      var out=ev.outputBuffer.getChannelData(0);
+      B('AUDIO-PROC','in.len='+inp.length+' out.len='+out.length+' in.buf.bl='+inp.buffer.byteLength);
+      // Check: is the input buffer's ArrayBuffer the same across calls? Or recycled?
+      window._lastAudioBuf=inp.buffer;
+      spn.disconnect();
+    };
+    var osc=ac.createOscillator();
+    osc.connect(spn);
+    spn.connect(ac.destination);
+    osc.start();
+    setTimeout(function(){
+      osc.stop();
+      osc.disconnect();
+      ac.close();
+      if(!gotAudio)B('AUDIO-PROC','never fired');
+    },3000);
+  }catch(e){B('AUDIO-OPS-ERR',''+e)}
+},1000);
+
+setTimeout(function(){B('COMPLETE','all done')},8000);
+</script></body></html>

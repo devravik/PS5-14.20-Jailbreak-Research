@@ -1,0 +1,126 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v14-DSF — pivot battery 0-crash (PX2+JCL+CTL5+TOXR+DR) + ?reclaim=1 terminal</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v14-DSF…</pre>
+<script>
+(function(){
+"use strict";
+var RID="v14"+Date.now().toString(36).slice(-15);
+var QP=/\breclaim=1/.test(location.search);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V14-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,230)})}).catch(function(){});}catch(e){}}
+function bks(s,b){try{var x=new XMLHttpRequest();x.open("POST","/beacon/V14-"+s,false);x.setRequestHeader("Content-Type","application/json");x.send(JSON.stringify({r:RID,b:String(b).slice(0,230)}));}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function tee(){var rs=new ReadableStream({});return rs.tee();}
+function st(id,run){var r;try{rst();r=run();}catch(e){r="ETYPE:"+String((e&&e.message)||e).slice(0,80);}finally{rst();}bk(id,String(r).slice(0,220));say(id+": "+String(r).slice(0,110));return r;}
+
+if(QP){
+/* ============ MODO ?reclaim=1 — PRESS TERMINAL Q1 (crash-class, single-shot, ÚLTIMA) ============
+   R1 grow 20 (0-crash por construcción) → R2 20 pins setTimeout(Kfn,9e6) → R3 observe 1-yield.
+   El deref de results[1] ocurre DENTRO del tee de R3 ⇒ todo beacon posterior es seguro.
+   POSITIVO (a=object; c0t=true;c1t=true) ⇒ ETIQUETA Z (deallocate ceroea en shipped).
+   SEGV (HB-gap>4s sin Z) ⇒ ETIQUETA N (chunk muerto). */
+bks("L","fa-v14-dsf reclaim");
+var Kfn=window.__KFN||(window.__KFN=function(){});
+var X=window.__X||(window.__X={ourTag:"v14rc"});
+var g="ok";
+Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=20)return{done:true};i++;return{value:X,done:false};}};};
+try{tee();}catch(e){g="E:"+String((e&&e.message)||e).slice(0,40);}rst();
+var ids=[];for(var k=0;k<20;k++){try{ids.push(setTimeout(Kfn,9000000));}catch(e2){}}
+var pB=null,e3="";
+Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=1)return{done:true};i++;return{value:X,done:false};}};};
+try{pB=tee();}catch(e){e3="E:"+String((e&&e.message)||e).slice(0,40);}rst();
+var at=pB?typeof pB[1]:"nopB",l="-",inst="-",orc="-";
+try{l=String(pB[1].locked).slice(0,8);}catch(e){l="E";}
+try{inst=String(pB[1] instanceof ReadableStream).slice(0,5);}catch(e){inst="E";}
+try{var f=false,s=false;try{pB[0].cancel();}catch(e){f=true;}try{pB[1].cancel();}catch(e){s=true;}orc="c0t="+f+";c1t="+s;}catch(e){}
+for(var j=0;j<ids.length;j++)clearTimeout(ids[j]);
+bks("R3","grow="+g+";pins=20;a="+at+";inst="+inst+";l="+l+";"+orc+";e="+e3);
+setInterval(function(){bk("HB","hb");},2000);
+bk("Z","FA-v14-DSF reclaim complete");
+return;
+}
+
+/* ============ MODO DEFAULT — batería 8 stages, 0-crash por construcción ============ */
+bk("L","v14-dsf; ua="+navigator.userAgent.slice(0,40));
+setInterval(function(){bk("HB","hb");},2000);
+
+/* S0 DIAG-CAP: stash incondicional + contador + self-test D2 (kimi3) — deja CAP para CTL5 */
+st("S0", function(){
+  window.__N=0;window.__T="";window.__CAP=null;
+  Array.prototype[Symbol.iterator]=function(){var t=this;window.__N=(window.__N|0)+1;
+    try{window.__T="len="+(t&&t.length)+"|t0="+typeof t[0]+"|same="+(t[0]===t[1]);}catch(e){window.__T="E:"+e.message;}
+    if(window.__CAP===null&&t&&t.length>=2&&typeof t[0]==="object")window.__CAP=[t[0],t[1]];
+    var i=0;return{next:function(){if(i>=2)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  var D2=0,aa=[7,8];for(var v of aa)D2++;
+  try{tee();}catch(e){}
+  return "D2="+D2+";N="+window.__N+";T="+window.__T+";cap="+(window.__CAP?typeof window.__CAP[0]:"null");
+});
+
+/* PX2: accessor STRING "state" ANTES del tee + doble-cancel (persistencia). Esperado: acc=none; c0=E;c1=ok.
+   setter/getter disparan ⇒ shipped escribe/lee por put normal ⇒ divergencia MAYOR. */
+st("PX2", function(){
+  var hit="none";
+  var X2={ourTag:"v14px"};
+  try{Object.defineProperty(X2,"state",{get:function(){hit+=";get";return 4;},set:function(v){hit+=";set:"+typeof v;},configurable:true});}catch(e0){hit="E:"+e0.message;}
+  window.__X2=X2;
+  Array.prototype[Symbol.iterator]=function(){var i=0,n=2;return{next:function(){if(i>=n)return{done:true};var v=X2;i++;return{value:v,done:false};}};};
+  var p=tee();rst();
+  var c0="-",c1="-";
+  try{p[0].cancel();c0="ok";}catch(e){c0="E:"+String((e&&e.message)||e).slice(0,30);}
+  try{p[1].cancel();c1="ok";}catch(e){c1="E:"+String((e&&e.message)||e).slice(0,30);}
+  var d=null;try{d=Object.getOwnPropertyDescriptor(X2,"state");}catch(e){}
+  return "acc="+hit+"; c0="+c0+"; c1="+c1+"; desc="+(d?String(typeof d.get)+"/"+String(typeof d.set):"none")+"; xK="+Object.keys(X2).join("|").slice(0,30);
+});
+
+/* JCL2: proxy revocado + getReader PRIMERO + cancel — clase de mensaje (brand gate :30-34 sobre el proxy) */
+st("JCL", function(){
+  var pr=Proxy.revocable({ourTag:"v14j"},{});pr.revoke();
+  Array.prototype[Symbol.iterator]=function(){var i=0,n=2;return{next:function(){if(i>=n)return{done:true};var v=pr.proxy;i++;return{value:v,done:false};}};};
+  var p=tee();rst();
+  var g="-",gm="-",cl="-";
+  try{var r1=p[0].getReader();g="ok:"+typeof r1;}catch(e1){gm="MSG:"+String((e1&&e1.message)||e1).slice(0,55);}
+  try{p[0].cancel();cl="ok";}catch(e2){cl="E:"+String((e2&&e2.message)||e2).slice(0,40);}
+  return "getReader="+g+gm+"; cancel="+cl;
+});
+
+/* CTL5 — sonda del guard &&/|| (ESC1 §7, 0-crash, 4 clases de mensaje).
+   cap5: 5 args sobre CAP[0] → esperado "already has a controller" (bypass VIVO + gate-null TRIPA).
+   x5  : 5 args sobre X fresco → esperado "needs a ReadableStream" (brand gate).
+   ctl4: 4 args control → esperado "should not be called directly" (guard original vivo).
+   o5  : 5 args sobre {} → brand gate. no-throw en cap5 = null-bearer alcanzable (imposible en árbol). */
+st("CTL5", function(){
+  var CAP=window.__CAP;
+  function p5(s){var r;try{new ReadableStreamDefaultController(s,{},1,undefined,null);r="nothrow(!!)";}catch(e){r="MSG:"+String((e&&e.message)||e).slice(0,60);}return r;}
+  var r1=CAP?p5(CAP[0]):"SKIP-nocap";
+  var Xf={ourTag:"v14ctl"};
+  var r2=p5(Xf);
+  var r3="-";try{new ReadableStreamDefaultController(CAP?CAP[0]:Xf,{},1,undefined);r3="nothrow(!!)";}catch(e){r3="MSG:"+String((e&&e.message)||e).slice(0,60);}
+  var r4=p5({ourTag:"v14c0"});
+  return "cap5="+r1+"; x5="+r2+"; ctl4="+r3+"; o5="+r4;
+});
+
+/* TOXR — jcelltox por el lado observable correcto: Boolean-wrapper a través del tee.
+   getReader → esperado brand-TypeError (gate presente); cancel → TypeError; Response(p[0]) → ok
+   (jsDynamicCast CHECKED sobre el wrapper). Silencio/no-TypeError = superficie de cast observable. */
+st("TOXR", function(){
+  var w=new Boolean(true);w.ourTag="v14tox";
+  Array.prototype[Symbol.iterator]=function(){var i=0,n=2;return{next:function(){if(i>=n)return{done:true};var v=(i===0)?w:new Boolean(false);i++;return{value:v,done:false};}};};
+  var p=tee();rst();
+  var g="-",gm="-",cl="-",resp="-";
+  try{var r=p[0].getReader();g="ok:"+typeof r;}catch(e){gm="MSG:"+String((e&&e.message)||e).slice(0,55);}
+  try{p[0].cancel();cl="ok";}catch(e){cl="E:"+String((e&&e.message)||e).slice(0,30);}
+  try{var rr=new Response(p[0]);resp="ok:"+String(typeof rr.text).slice(0,6);}catch(e){resp="E:"+String((e&&e.message)||e).slice(0,40);}
+  return "getReader="+g+gm+"; cancel="+cl+"; resp="+resp;
+});
+
+/* DR: kit deriveRuntime cargado (board D) — mesa puesta para handoff */
+st("DR", function(){
+  var dr=window.deriveRuntime,keys="-";
+  try{keys=(dr&&Object.keys(dr).join(","))||"-";}catch(e){keys="E";}
+  return "dr="+String(typeof dr).slice(0,8)+"; keys="+String(keys).slice(0,140);
+});
+
+bk("Z","FA-v14-DSF complete");
+})();
+</script></body></html>

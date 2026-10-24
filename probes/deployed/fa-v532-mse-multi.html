@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V532</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="320" height="240" muted playsinline></video>
+<div id="log">V532 — MSE Multi-approach
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V532-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// === T1: Can the PS5 browser play any video at all? ===
+setTimeout(function(){
+  try{
+    B('T1-START','video element capabilities');
+    var v=document.getElementById('vid');
+    var types=['video/mp4; codecs="avc1.42E01E"','video/mp4; codecs="avc1.64001E"',
+               'video/webm; codecs="vp9"','audio/mp4; codecs="mp4a.40.2"'];
+    for(var i=0;i<types.length;i++){
+      B('T1-CAN',types[i]+' → '+v.canPlayType(types[i]));
+    }
+  }catch(e){B('T1-ERR',''+e)}
+},500);
+
+// === T2: MSE with LOCALLY GENERATED compat fMP4 (Baseline H.264 320x240) ===
+setTimeout(function(){
+  try{
+    B('T2-START','MSE compat fMP4');
+    fetch('/test-frag-compat.mp4').then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.arrayBuffer();
+    }).then(function(ab){
+      var data=new Uint8Array(ab);
+      B('T2-FETCHED','size='+data.length);
+
+      var initEnd=findMoofStart(data);
+      B('T2-INIT-END','initEnd='+initEnd);
+
+      var ms2=new MediaSource();
+      var vid2=document.createElement('video');
+      vid2.muted=true;
+      vid2.src=URL.createObjectURL(ms2);
+
+      vid2.addEventListener('error',function(){
+        B('T2-VID-ERR','code='+(vid2.error?vid2.error.code:'?'));
+      });
+
+      ms2.addEventListener('sourceopen',function(){
+        B('T2-OPEN','readyState='+ms2.readyState);
+        var sb2;
+        try{
+          sb2=ms2.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+          B('T2-SB','created');
+        }catch(e){B('T2-SB-ERR',''+e);return}
+
+        var phase=0;
+        sb2.addEventListener('updateend',function(){
+          phase++;
+
+          if(phase===1){
+            B('T2-INIT-DONE','sb.buffered.length='+sb2.buffered.length);
+            // Append media segment (moof+mdat, skip mfra at end)
+            var mediaEnd=findMfraStart(data,initEnd);
+            B('T2-MEDIA-APPEND','bytes '+initEnd+'-'+mediaEnd+' ('+( mediaEnd-initEnd)+' bytes)');
+            sb2.appendBuffer(data.slice(initEnd, mediaEnd).buffer);
+          }
+          else if(phase===2){
+            B('T2-MEDIA-DONE-PRE','BEFORE buffered access');
+            var blen;
+            try{ blen=sb2.buffered.length }catch(e){ B('T2-BUFFERED-ERR',''+e); blen=-1 }
+            B('T2-MEDIA-DONE','sb.buffered.length='+blen);
+            if(blen>0){
+              B('T2-HAS-RANGES','BUFFERED RANGES EXIST — bug should trigger');
+              for(var i=0;i<blen;i++){
+                try{
+                  B('T2-RANGE-'+i,'start='+sb2.buffered.start(i)+' end='+sb2.buffered.end(i));
+                }catch(e){B('T2-RANGE-ERR-'+i,''+e)}
+              }
+            }
+            // Also check vid.buffered — different path
+            B('T2-VID-BUFFERED-PRE','BEFORE vid.buffered access');
+            var vblen;
+            try{ vblen=vid2.buffered.length }catch(e){ B('T2-VID-BUFFERED-ERR',''+e); vblen=-1 }
+            B('T2-VID-BUFFERED','length='+vblen);
+            B('T2-SURVIVED','all buffered access completed');
+
+            try{
+              vid2.play().then(function(){
+                B('T2-PLAY','ok ct='+vid2.currentTime);
+                setTimeout(function(){
+                  B('T2-PLAY-CHECK','ct='+vid2.currentTime+' rs='+vid2.readyState);
+                  vid2.pause();
+                  try{if(ms2.readyState==='open')ms2.endOfStream();B('T2-EOS','ok')}catch(e){B('T2-EOS-ERR',''+e)}
+                },2000);
+              }).catch(function(e){B('T2-PLAY-ERR',''+e)});
+            }catch(e){B('T2-PLAY-THROW',''+e)}
+          }
+        });
+
+        sb2.addEventListener('error',function(){
+          B('T2-SB-ERROR','error event');
+        });
+
+        B('T2-INIT-APPEND','bytes 0-'+initEnd);
+        sb2.appendBuffer(data.slice(0, initEnd).buffer);
+      });
+      ms2.addEventListener('sourceclose',function(){B('T2-CLOSE','closed')});
+    }).catch(function(e){B('T2-FETCH-ERR',''+e)});
+  }catch(e){B('T2-ERR',''+e)}
+},2000);
+
+// === T3: Fetch a known-working MSE test stream from the web ===
+setTimeout(function(){
+  try{
+    B('T3-START','external MSE test');
+    // Try fetching a small fragmented MP4 from a test CDN
+    // dash.akamaized.net has DASH test streams
+    var testUrl='https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps_320x180_200k/bbb_30fps_320x180_200k_0.m4v';
+    B('T3-FETCHING',testUrl.substring(0,60)+'...');
+
+    fetch(testUrl).then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.arrayBuffer();
+    }).then(function(ab){
+      var data=new Uint8Array(ab);
+      B('T3-FETCHED','size='+data.length);
+
+      var ms=new MediaSource();
+      var vid=document.createElement('video');
+      vid.muted=true;
+      vid.src=URL.createObjectURL(ms);
+
+      vid.addEventListener('error',function(){
+        B('T3-VID-ERR','code='+(vid.error?vid.error.code:'?'));
+      });
+
+      ms.addEventListener('sourceopen',function(){
+        B('T3-MSE-OPEN','ok');
+        try{
+          var sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+          B('T3-SB','created');
+
+          sb.addEventListener('updateend',function onue(){
+            sb.removeEventListener('updateend',onue);
+            B('T3-APPENDED','sb.buffered.length='+sb.buffered.length);
+            if(sb.buffered.length>0){
+              B('T3-RANGE','start='+sb.buffered.start(0)+' end='+sb.buffered.end(0));
+              B('T3-VID-RS','readyState='+vid.readyState);
+              // Try play
+              vid.play().then(function(){B('T3-PLAY','ok ct='+vid.currentTime)})
+                .catch(function(e){B('T3-PLAY-ERR',''+e)});
+            }
+          });
+
+          sb.addEventListener('error',function(){B('T3-SB-ERR','error event')});
+          sb.appendBuffer(data.buffer);
+          B('T3-APPENDING','full segment');
+        }catch(e){B('T3-SB-CREATE-ERR',''+e)}
+      });
+      ms.addEventListener('sourceclose',function(){B('T3-CLOSE','closed')});
+    }).catch(function(e){B('T3-FETCH-ERR',''+e)});
+  }catch(e){B('T3-ERR',''+e)}
+},6000);
+
+// === T4: MSE audio-only ===
+setTimeout(function(){
+  try{
+    B('T4-START','audio-only MSE');
+    var ms=new MediaSource();
+    var aud=document.createElement('audio');
+    aud.muted=true;
+    aud.src=URL.createObjectURL(ms);
+
+    aud.addEventListener('error',function(){
+      B('T4-AUD-ERR','code='+(aud.error?aud.error.code:'?'));
+    });
+
+    ms.addEventListener('sourceopen',function(){
+      B('T4-OPEN','ok');
+      try{
+        var sb=ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+        B('T4-SB','created');
+        // We'd need an audio init segment here
+        // Try fetching audio from DASH test
+        var audioUrl='https://dash.akamaized.net/akamai/bbb_30fps/bbb_a64k/bbb_a64k_0.m4a';
+        fetch(audioUrl).then(function(r){
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          return r.arrayBuffer();
+        }).then(function(ab){
+          var data=new Uint8Array(ab);
+          B('T4-FETCHED','audio init size='+data.length);
+          sb.addEventListener('updateend',function onue(){
+            sb.removeEventListener('updateend',onue);
+            B('T4-APPENDED','sb.buffered.length='+sb.buffered.length);
+            if(sb.buffered.length>0){
+              B('T4-RANGE','start='+sb.buffered.start(0)+' end='+sb.buffered.end(0));
+            }
+          });
+          sb.addEventListener('error',function(){B('T4-SB-ERR','error')});
+          sb.appendBuffer(data.buffer);
+        }).catch(function(e){B('T4-FETCH-ERR',''+e)});
+      }catch(e){B('T4-SB-CREATE-ERR',''+e)}
+    });
+    ms.addEventListener('sourceclose',function(){B('T4-CLOSE','closed')});
+  }catch(e){B('T4-ERR',''+e)}
+},12000);
+
+// === T5: Direct video src test (non-MSE) ===
+setTimeout(function(){
+  try{
+    B('T5-START','direct video playback');
+    var v=document.createElement('video');
+    v.muted=true;
+    v.width=160;v.height=90;
+    document.body.appendChild(v);
+
+    v.addEventListener('loadeddata',function(){
+      B('T5-LOADED','readyState='+v.readyState+' dur='+v.duration);
+      B('T5-BUFFERED','length='+v.buffered.length);
+      if(v.buffered.length>0) B('T5-RANGE','start='+v.buffered.start(0)+' end='+v.buffered.end(0));
+    });
+    v.addEventListener('error',function(){
+      B('T5-VID-ERR','code='+(v.error?v.error.code:'?'));
+    });
+    v.addEventListener('canplay',function(){
+      B('T5-CANPLAY','ok');
+    });
+
+    // Use our fMP4 directly
+    v.src='/test-frag.mp4';
+    v.load();
+    B('T5-LOADING','test-frag.mp4 direct');
+  }catch(e){B('T5-ERR',''+e)}
+},18000);
+
+// Final state dump
+setTimeout(function(){
+  B('COMPLETE','all tests done');
+},25000);
+
+function findMoovEnd(data){
+  var off=0;
+  while(off<data.length-8){
+    var size=(data[off]<<24)|(data[off+1]<<16)|(data[off+2]<<8)|data[off+3];
+    var type=String.fromCharCode(data[off+4],data[off+5],data[off+6],data[off+7]);
+    if(size<8) break;
+    if(type==='moov') return off+size;
+    off+=size;
+  }
+  return 0;
+}
+function findMoofStart(data){
+  var off=0;
+  while(off<data.length-8){
+    var size=(data[off]<<24)|(data[off+1]<<16)|(data[off+2]<<8)|data[off+3];
+    var type=String.fromCharCode(data[off+4],data[off+5],data[off+6],data[off+7]);
+    if(size<8) break;
+    if(type==='moof') return off;
+    off+=size;
+  }
+  return 0;
+}
+function findMfraStart(data,start){
+  var off=start;
+  while(off<data.length-8){
+    var size=(data[off]<<24)|(data[off+1]<<16)|(data[off+2]<<8)|data[off+3];
+    var type=String.fromCharCode(data[off+4],data[off+5],data[off+6],data[off+7]);
+    if(size<8) break;
+    if(type==='mfra') return off;
+    off+=size;
+  }
+  return data.length;
+}
+</script></body></html>

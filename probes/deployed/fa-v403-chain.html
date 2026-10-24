@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>V403+V407 Chain</title>
+<style>
+body { background: #111; color: #0f0; font: 12px monospace; margin: 8px; }
+#log { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<div id="log">V403 BMP diagnostic + V407 DirectArgs chain loading...</div>
+<script>
+// Run V403 BMP diagnostic first (fast ~2s), then chain to V407 DirectArgs
+var s1 = document.createElement('script');
+s1.src = 'p403-bmpdiag.js';
+s1.onload = function() {
+  // After BMP diagnostic completes, wait 3s then load DirectArgs
+  setTimeout(function() {
+    var s2 = document.createElement('script');
+    s2.src = 'p407-directargs-nopre.js';
+    document.head.appendChild(s2);
+  }, 3000);
+};
+s1.onerror = function() {
+  // If BMP probe fails, still run DirectArgs
+  var s2 = document.createElement('script');
+  s2.src = 'p407-directargs-nopre.js';
+  document.head.appendChild(s2);
+};
+document.head.appendChild(s1);
+</script>
+</body>
+</html>

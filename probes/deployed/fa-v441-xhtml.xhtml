@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>V441</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<script type="text/javascript"><![CDATA[
+// Define custom element BEFORE the parser encounters it in markup
+// This tests whether XMLParser runs CE constructors during parsing
+var ceConstructCount = 0;
+var ceMutationLog = [];
+
+if (typeof customElements !== "undefined") {
+  class ProbeCE extends HTMLElement {
+    constructor() {
+      super();
+      ceConstructCount++;
+      this.setAttribute("data-constructed", "yes-" + ceConstructCount);
+      ceMutationLog.push("construct-" + ceConstructCount);
+
+      // Test: can we access the document from within the CE constructor during parsing?
+      try {
+        var container = document.getElementById("ce-container");
+        if (container) {
+          ceMutationLog.push("container-found");
+          // Test DOM mutation during parsing:
+          // Add a marker element to see if the parser notices
+          var marker = document.createElement("div");
+          marker.id = "ce-marker-" + ceConstructCount;
+          marker.textContent = "injected-by-ce-" + ceConstructCount;
+          container.appendChild(marker);
+          ceMutationLog.push("marker-added");
+        } else {
+          ceMutationLog.push("container-not-found");
+        }
+      } catch(e) {
+        ceMutationLog.push("error:" + e.message.slice(0,30));
+      }
+    }
+  }
+  customElements.define("probe-ce", ProbeCE);
+
+  // Second CE that does more aggressive DOM mutation
+  class AggressiveCE extends HTMLElement {
+    constructor() {
+      super();
+      ceConstructCount++;
+      this.setAttribute("data-constructed", "agg-" + ceConstructCount);
+      ceMutationLog.push("agg-construct-" + ceConstructCount);
+
+      // Test: remove the parent element during CE construction
+      try {
+        var inner = document.getElementById("inner-target");
+        if (inner && inner.parentNode) {
+          inner.parentNode.removeChild(inner);
+          ceMutationLog.push("inner-removed");
+        }
+      } catch(e) {
+        ceMutationLog.push("agg-error:" + e.message.slice(0,30));
+      }
+    }
+  }
+  customElements.define("aggressive-ce", AggressiveCE);
+}
+]]></script>
+</head>
+<body>
+<div id="ce-container">
+  <probe-ce id="probe-ce-1">content1</probe-ce>
+  <div id="inner-target">
+    <probe-ce id="probe-ce-2">content2</probe-ce>
+    <aggressive-ce id="agg-ce-1">agg-content</aggressive-ce>
+    <probe-ce id="probe-ce-3">content3-after-agg</probe-ce>
+  </div>
+  <probe-ce id="probe-ce-4">content4-after-inner</probe-ce>
+</div>
+<script type="text/javascript"><![CDATA[
+// This runs AFTER all elements are parsed
+// Report CE construction results via beacons, then load main probe
+var BQ = 0;
+function B(tag, data) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open("POST", "/beacon/V441-" + tag + "?q=" + (BQ++), false);
+    x.setRequestHeader("Content-Type", "text/plain");
+    x.send(typeof data === "object" ? JSON.stringify(data) : String(data || ""));
+  } catch(e) {}
+}
+
+B("XHTML-LOADED");
+B("XHTML-CE-COUNT", ceConstructCount);
+B("XHTML-CE-LOG", ceMutationLog.join("|"));
+
+// Check DOM state after parsing
+var container = document.getElementById("ce-container");
+if (container) {
+  B("XHTML-CONTAINER-KIDS", container.childNodes.length);
+  var ids = [];
+  for (var i = 0; i < container.children.length; i++) {
+    ids.push(container.children[i].id || container.children[i].tagName);
+  }
+  B("XHTML-CONTAINER-IDS", ids.join(","));
+}
+
+// Check if inner-target survived the aggressive CE
+var inner = document.getElementById("inner-target");
+B("XHTML-INNER-EXISTS", inner ? "yes" : "no");
+
+// Check parser state markers
+var markers = document.querySelectorAll("[id^='ce-marker-']");
+B("XHTML-MARKERS", markers.length);
+
+// Now load the main probe script
+var s = document.createElement("script");
+s.src = "p441-xhtml-alias.js?v=441a";
+document.body.appendChild(s);
+]]></script>
+</body>
+</html>

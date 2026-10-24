@@ -1,0 +1,63 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-BASIC - inversion + deriveRuntime</title></head>
+<body><pre id="out">FA-BASIC — pidInverted + deriveRuntime loaded</pre>
+<script src="./runtime-derive/derive-runtime.js"></script>
+<script src="./src/firmware.js"></script>
+<script>
+(function(){
+ "use strict";
+ var run = "basic" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/BA-"+st+"/"+run, false);
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("BA-beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){
+   return function(){
+     var self = this;
+     var X = { ourTag: "basic-inversion-target" };
+     window.__inversionTarget = X;
+     var i = 0, n = 2;
+     return { next: function(){
+        if (i>=n) return {done:true};
+        i++;
+        return {value: X, done:false};
+     }};
+   };
+ }
+ say("FA-BASIC chain starts");
+ beacon("L","page loaded; deriveRuntime="+(typeof window.deriveRuntime));
+ if (typeof window.deriveRuntime === "object" && typeof window.deriveRuntime.run === "function") {
+   beacon("RDOK","deriveRuntime=true");
+ } else {
+   beacon("RDERR","deriveRuntime MISSING");
+ }
+ try {
+   beacon("A1","inversion");
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var rs = new ReadableStream({});
+   var pair = rs.tee();
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   var firstThrew=false, secondThrew=false;
+   try { pair[0].cancel(); } catch(e){ firstThrew=true; }
+   try { pair[1].cancel(); } catch(e){ secondThrew=true; }
+   var locked = pair[0].locked;
+   var gr = typeof pair[0].getReader;
+   var cr = typeof pair[0].cancel;
+   beacon("B1","pidInverted="+((!secondThrew && firstThrew)?"true":"false")+"; locked="+locked+"; gr="+gr+"; cr="+cr);
+ } catch(e){ beacon("E1","inversion threw: "+String(e).slice(0,140)); }
+ try {
+   beacon("A2","readback state-machine on REAL tee");
+   var rs2 = new ReadableStream({});
+   var pair2 = rs2.tee();
+   beacon("B2","locked="+pair2[0].locked+"; gr2="+typeof pair2[0].getReader+"; cr2="+typeof pair2[0].cancel);
+ } catch(e){ beacon("E2","readback: "+String(e).slice(0,140)); }
+ beacon("Z","FA-BASIC complete");
+ say("done");
+})();
+</script></body></html>

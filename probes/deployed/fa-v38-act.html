@@ -1,0 +1,95 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v38-act — press-38: ¿el RENDER-USE de webfonts está POLICY-bloqueado? (check/measureText/fresh)</title></head>
+<body><pre id="out">FA-v38-act…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v38-act — press-38: las fuentes LOAD-ean pero NINGUNA vía las renderiza.
+ * Tres pruebas DEFINITIVAS antes de declarar policy-block:
+ * A) document.fonts.check("40px fef-f10") → ¿el selector dice que existe?
+ * B) ctx.measureText DIRECTO (sin layout): 80.0 = métricas nuestras;
+ *    ~26-27 = ni el canvas las usa → block global.
+ * C) span FRESH creado DESPUÉS de fonts.ready (por si el reflow-late
+ *    no valida font-loads en este build).
+ * + dump del estado completo de document.fonts. */
+var RID="v38a"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V38-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+var cv=document.createElement("canvas");
+var ctx=null; var cvt="-";
+try{ ctx=cv.getContext("2d"); cvt=ctx?"2d-ok":"no-2d"; }catch(e){ cvt="E"; }
+bk("V38-L","v38-act; dr="+dr+"; rt="+rt+"; canvas2d="+cvt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+var fams=[];
+function doLoad(id, f){
+  bk("V38-E"+id, "enter-load "+id);
+  try{
+    var ff=new FontFace("fef-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")");
+    document.fonts.add(ff); fams.push("fef-"+id);
+    ff.load().then(function(){ bk("V38-R"+id, id+" load=OK"); },
+                    function(err){ bk("V38-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,55)); });
+  }catch(e){ bk("V38-R"+id, id+" E:"+String((e&&e.message)||e).slice(0,50)); }
+}
+setTimeout(function(){ doLoad("f10","f10.ttf"); }, 300);
+setTimeout(function(){ doLoad("f11","f11.ttf"); }, 1100);
+
+/* A) check + dump del fontset */
+setTimeout(function(){
+  var c1="-",c2="-",dump="s";
+  try{ c1=document.fonts.check("40px fef-f10"); }catch(e){ c1="E:"+String((e&&e.message)||e).slice(0,25); }
+  try{ c2=document.fonts.check("40px fef-f11"); }catch(e){ c2="E"; }
+  try{
+    var arr=[];
+    document.fonts.forEach(function(f2){ arr.push(f2.family+":"+f2.status); });
+    dump=arr.join(",")+"(total="+document.fonts.size+")";
+  }catch(e){ dump="iter-E:"+String((e&&e.message)||e).slice(0,30); }
+  bk("V38-A","A: check-f10="+c1+";check-f11="+c2+";set="+dump);
+}, 2500);
+
+/* B) measureText directo (sin layout) — la métrica pura */
+setTimeout(function(){
+  var r="";
+  try{
+    ctx.font="40px fef-f10"; r+="m10="+ctx.measureText("A").width;
+  }catch(e){ r+="m10-E"; }
+  try{
+    ctx.font="40px fef-f11"; r+=",m11="+ctx.measureText("A").width;
+  }catch(e){ r+=",m11-E"; }
+  try{
+    ctx.font="40px serif"; r+=",mserif="+ctx.measureText("A").width;
+  }catch(e){ r+=",mserif-E"; }
+  bk("V38-B","B: "+r+" (80/80/=80=métricas NUESTRAS; ≈27=max serif)");
+}, 3000);
+
+/* C) span FRESH tras fonts.ready + medición 100px blast */
+setTimeout(function(){
+  try{
+    if(document.fonts.ready){
+      document.fonts.ready.then(function(){
+        var sp=document.createElement("span");
+        sp.style.fontFamily="fef-f10, serif";
+        sp.style.fontSize="100px";
+        sp.textContent="A";
+        document.body.appendChild(sp);
+        setTimeout(function(){
+          var w="-";
+          try{ w=Math.round(sp.getBoundingClientRect().width*10)/10; }catch(e){ w="E"; }
+          bk("V38-C","C: fresh-ready-100px="+w+" (200=usado; ~67=fallback; riesgo-policy si 67)");
+          document.body.removeChild(sp);
+        }, 600);
+      });
+      bk("V38-Ec","enter C (fonts.ready escuchado)");
+    }
+  }catch(e){ bk("V38-C","C-E:"+String((e&&e.message)||e).slice(0,50)); }
+}, 3500);
+
+setTimeout(function(){ clearInterval(HB); bk("V38-Z","FA-v38-act complete"); }, 7000);
+setTimeout(function(){ clearInterval(HB); bk("V38-Z2","late-z(15s)"); }, 15000);
+})();
+</script></body></html>

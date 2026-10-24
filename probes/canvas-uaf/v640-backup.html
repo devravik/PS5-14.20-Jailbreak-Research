@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V640</title></head>
+<body><pre id="out">V640 — info leak survey (FontFaceSet, Error stack, FinReg, toString)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<80;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++]||(new Image());
+  img.src='/beacon/V640-'+tag+'?d='+encodeURIComponent(String(d).slice(0,800))+'&t='+Date.now();
+}
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+function f2h(v){_f64[0]=v;return '0x'+('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function cc2hex(s){var h='';for(var i=0;i<Math.min(s.length,40);i++){var c=s.charCodeAt(i);h+=(c<16?'0':'')+c.toString(16);}return h;}
+
+bk('BOOT','v640-infoleak-survey');
+
+/* ================================================================
+ * TEST A: FontFaceSet iterator invalidation
+ * clear() during values() iteration → stale index → OOB?
+ * ================================================================ */
+try {
+  var ffs = document.fonts;
+  var ffsHas = typeof ffs !== 'undefined' && typeof ffs.add === 'function';
+  bk('FFS-CAP', 'has='+ffsHas+',sz='+ffs.size);
+
+  if (ffsHas) {
+    var faces = [];
+    for (var fi = 0; fi < 16; fi++) {
+      var ff = new FontFace('T'+fi, 'url(http://<HOST_IP>/font'+fi+'.woff2)');
+      faces.push(ff);
+      ffs.add(ff);
+    }
+    bk('FFS-ADD', 'n='+faces.length+',sz='+ffs.size);
+
+    var iter = ffs.values();
+    var r0 = iter.next();
+    var r0val = r0.value ? (r0.value.family||'?') : 'null';
+    bk('FFS-I0', 'done='+r0.done+',val='+r0val);
+
+    var r1 = iter.next();
+    bk('FFS-I1', 'done='+r1.done+',val='+(r1.value?r1.value.family:'null'));
+
+    ffs.clear();
+    bk('FFS-CLR', 'sz='+ffs.size);
+
+    var r2 = iter.next();
+    var r2type = typeof r2.value;
+    var r2info = 'done='+r2.done+',type='+r2type;
+    if (r2.value && r2type === 'object') {
+      try { r2info += ',fam='+r2.value.family; } catch(e) { r2info += ',fam-e='+e.name; }
+      try { r2info += ',str='+String(r2.value).slice(0,60); } catch(e) { r2info += ',str-e='+e.name; }
+      try { r2info += ',ctor='+(r2.value.constructor?r2.value.constructor.name:'?'); } catch(e) {}
+    }
+    bk('FFS-I2-POST', r2info);
+
+    var r3 = iter.next();
+    bk('FFS-I3', 'done='+r3.done+',type='+typeof r3.value);
+
+    for (var fi2 = 0; fi2 < 3; fi2++) {
+      var rN = iter.next();
+      if (rN.done) break;
+      var rNinfo = 'type='+typeof rN.value;
+      if (rN.value && typeof rN.value === 'object') {
+        try { rNinfo += ',fam='+rN.value.family; } catch(e) {}
+        try { rNinfo += ',str='+String(rN.value).slice(0,40); } catch(e) {}
+      }
+      bk('FFS-I'+(fi2+4), rNinfo);
+    }
+  }
+} catch(e) { bk('FFS-ERR', e.name+':'+e.message.slice(0,100)); }
+
+/* ================================================================
+ * TEST B: forEach with mutation during callback
+ * ================================================================ */
+try {
+  for (var bi = 0; bi < 8; bi++) {
+    ffs.add(new FontFace('B'+bi, 'url(http://<HOST_IP>/fontB'+bi+'.woff2)'));
+  }
+  var bCount = 0, bVals = [];
+  ffs.forEach(function(ff) {
+    bCount++;
+    if (bCount === 3) {
+      ffs.clear();
+    }
+    bVals.push(ff ? (ff.family||'?') : 'NULL');
+  });
+  bk('FFS-FE', 'count='+bCount+',vals='+bVals.join(','));
+} catch(e) { bk('FFS-FE-ERR', e.name+':'+e.message.slice(0,100)); }
+
+/* ================================================================
+ * TEST C: Error stack traces — any address info?
+ * ================================================================ */
+try {
+  function inner3(){ throw new Error('probe'); }
+  function inner2(){ return inner3(); }
+  function inner1(){ return inner2(); }
+  try { inner1(); } catch(e) {
+    var stack = e.stack || '';
+    bk('STACK', cc2hex(stack.slice(0,80))+'|len='+stack.length);
+    if (stack.indexOf('0x') >= 0 || /[0-9a-f]{8,}/i.test(stack)) {
+      bk('STACK-LEAK', stack.slice(0,300));
+    }
+  }
+} catch(e) { bk('STACK-ERR', e.name); }
+
+/* ================================================================
+ * TEST D: toString/valueOf on internal objects
+ * ================================================================ */
+try {
+  var cv = document.createElement('canvas');
+  cv.width=1;cv.height=1;
+  var ctx = cv.getContext('2d');
+  var grad = ctx.createLinearGradient(0,0,1,1);
+  grad.addColorStop(0,'red');
+  grad.addColorStop(1,'blue');
+
+  var gs = String(grad);
+  bk('GRAD-STR', cc2hex(gs)+'|'+gs.slice(0,40));
+
+  var pat = ctx.createPattern(cv, 'repeat');
+  var ps = String(pat);
+  bk('PAT-STR', cc2hex(ps)+'|'+ps.slice(0,40));
+
+  var td = ctx.getTransform();
+  var tds = JSON.stringify(td);
+  bk('XFORM-J', tds.slice(0,80));
+
+  var tm = ctx.measureText('AAAA');
+  var tmKeys = Object.getOwnPropertyNames(tm);
+  bk('TM-KEYS', tmKeys.join(','));
+} catch(e) { bk('OBJ-ERR', e.name+':'+e.message.slice(0,60)); }
+
+/* ================================================================
+ * TEST E: FinalizationRegistry + WeakRef timing
+ * ================================================================ */
+try {
+  var frAvail = typeof FinalizationRegistry !== 'undefined';
+  var wrAvail = typeof WeakRef !== 'undefined';
+  bk('FR-CAP', 'fr='+frAvail+',wr='+wrAvail);
+
+  if (frAvail) {
+    var leaked = [];
+    var fr = new FinalizationRegistry(function(token) {
+      leaked.push(token);
+      bk('FR-CB', 'token='+token+',n='+leaked.length);
+    });
+
+    (function(){
+      var obj = {x:1};
+      fr.register(obj, 'marker-'+Date.now());
+      obj = null;
+    })();
+
+    for (var gi = 0; gi < 100; gi++) {
+      var tmp = new ArrayBuffer(65536);
+    }
+  }
+} catch(e) { bk('FR-ERR', e.name); }
+
+/* ================================================================
+ * TEST F: Proxy + Symbol.toPrimitive on gradient set as fillStyle
+ * ================================================================ */
+try {
+  var cv2 = document.createElement('canvas');
+  cv2.width=1;cv2.height=1;
+  var ctx2 = cv2.getContext('2d');
+  var g2 = ctx2.createLinearGradient(0,0,1,1);
+  g2.addColorStop(0,'red');
+  ctx2.fillStyle = g2;
+
+  var fs2 = ctx2.fillStyle;
+  var fs2type = typeof fs2;
+  var fs2info = 'type='+fs2type;
+  if (fs2type === 'string') {
+    fs2info += ',val='+fs2+',hex='+cc2hex(fs2);
+  } else if (fs2type === 'object') {
+    fs2info += ',ctor='+(fs2.constructor?fs2.constructor.name:'?');
+    try {
+      var prim = fs2[Symbol.toPrimitive]||fs2.valueOf||fs2.toString;
+      if (prim) fs2info += ',prim='+prim.call(fs2);
+    } catch(e) { fs2info += ',prim-e='+e.name; }
+  }
+  bk('GRAD-FS', fs2info);
+} catch(e) { bk('GRAD-FS-ERR', e.name); }
+
+/* ================================================================
+ * TEST G: DOM collection iterator after mutation
+ * ================================================================ */
+try {
+  var div = document.createElement('div');
+  for (var di = 0; di < 8; di++) {
+    var sp = document.createElement('span');
+    sp.className = 'probe';
+    sp.textContent = 'S'+di;
+    div.appendChild(sp);
+  }
+  document.body.appendChild(div);
+
+  var col = div.getElementsByClassName('probe');
+  bk('DOM-COL', 'len='+col.length);
+
+  var nodeIter = col[Symbol.iterator]();
+  var n0 = nodeIter.next();
+  bk('DOM-I0', 'done='+n0.done+',tag='+(n0.value?n0.value.tagName:'?'));
+
+  while (div.firstChild) div.removeChild(div.firstChild);
+  bk('DOM-MUTATE', 'children='+div.childNodes.length);
+
+  var n1 = nodeIter.next();
+  var n1info = 'done='+n1.done;
+  if (n1.value) {
+    n1info += ',type='+typeof n1.value+',tag='+(n1.value.tagName||'?');
+    try { n1info += ',txt='+n1.value.textContent; } catch(e) {}
+  }
+  bk('DOM-I1-POST', n1info);
+
+  var n2 = nodeIter.next();
+  bk('DOM-I2', 'done='+n2.done+',val='+(n2.value?n2.value.tagName:'null'));
+} catch(e) { bk('DOM-ERR', e.name+':'+e.message.slice(0,60)); }
+
+/* ================================================================
+ * TEST H: Performance API — check timer resolution
+ * ================================================================ */
+try {
+  var t0 = performance.now();
+  var sum = 0;
+  for (var pi = 0; pi < 1000; pi++) sum += pi;
+  var t1 = performance.now();
+  var dt = t1 - t0;
+  bk('PERF', 'dt='+dt+',t0='+t0+',res='+(t1-t0).toFixed(6));
+} catch(e) { bk('PERF-ERR', e.name); }
+
+bk('DONE','v640-complete');
+say('DONE');
+
+setTimeout(function(){ location.href='v641.html?cb=641001'; }, 20000);
+</script>
+</body></html>

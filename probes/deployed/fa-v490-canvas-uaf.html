@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+</head><body>
+<!-- CVE-2026-43720 Canvas getContext UAF repro (issue #11, Portablelle probes) -->
+<!-- DIAG v2: no-JS img beacon discriminates parse/display failure vs XHR being blocked -->
+<!-- Single run per Guide open. R3/R4 expected to white-page: reopen User's Guide. -->
+<img src="/beacon/VCAN-HTMLIMG?t=1" width="1" height="1" style="display:none" alt="">
+<script>window.onerror=function(m,u,l){try{new Image().src='/beacon/VCAN-SYNERR?t='+encodeURIComponent(String(m).substring(0,90))+'@'+l;}catch(e){}};</script>
+<script src="fa-canvas-uaf.js"></script>
+</body></html>

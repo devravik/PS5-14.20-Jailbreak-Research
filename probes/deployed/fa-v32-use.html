@@ -1,0 +1,99 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v32-use — press-22: USAR el TransformStream cuyo internal es NUESTRO Proxy (qué le pide el engine)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v32-use…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v32-use — press-22. Del press-21 S4: el ctor TS acepta un objeto
+ * CUALQUIERA como slot0 (m_internalTransformStream persistente) y no
+ * crasheó con presión GC. Ahora: slot0 = un PROXY que LOGEA cada acceso
+ * del engine (qué propiedades lee, con qué args llama). Luego USAMOS el tsB:
+ * readable, writable, write, read, tee. Cada acceso del C++ a nuestro
+ * proxy = un beacon ACC. (Los private-names se cortan en Proxy — el engine
+ * recibirá undefined ahí — medido, riesgo tolerado.)
+ * Máxima telemetría. Kit incluido. */
+var RID="v32u"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V32-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v32-use; dr="+dr+"; rt="+rt);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poi(a){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=a.length)return{done:true};var v=a[i];i++;return{value:v,done:false};}};};}
+
+var ACC=[];
+function logAcc(k){ var s=String(k); if(ACC.length<40 && ACC[ACC.length-1]!==s) ACC.push(s); }
+
+/* S1 — capturar el triple real + construir tsB con PROXY como slot0 */
+var CAP=null, tsB=null, PX=null;
+(function(){
+  Array.prototype[Symbol.iterator]=function(){var t=this;
+    try{ if(CAP===null&&t&&t.length===3) CAP=[t[0],t[1],t[2]]; }catch(e){}
+    var i=0;return{next:function(){if(i>=t.length)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+  try{ new TransformStream({}); }catch(e){}
+  rst();
+  bk("S1","cap="+!!CAP);
+  if(!CAP) return;
+  PX=new Proxy({}, {
+    get:function(t,k,r){ logAcc("g:"+(typeof k==="symbol"?"sym":String(k)).slice(0,24)); return undefined; },
+    set:function(t,k,v){ logAcc("s:"+String(k).slice(0,24)); return true; },
+    has:function(t,k){ logAcc("h:"+String(k).slice(0,24)); return false; },
+    getOwnPropertyDescriptor:function(t,k){ logAcc("d:"+String(k).slice(0,24)); return undefined; },
+    ownKeys:function(t){ logAcc("ownKeys"); return []; }
+  });
+  var m="E",e1="";
+  poi([PX,CAP[1],CAP[2]]);
+  try{ tsB=new TransformStream({}); m="ok"; }catch(e){ e1=String((e&&e.message)||e).slice(0,40); }
+  rst();
+  bk("S1B","tsB="+m+";e="+e1+";accPostCtor=["+ACC.join(",")+"]");
+})();
+
+/* S2 — acceder tsB.readable / tsB.writable (¿qué le pide al proxy?) */
+(function(){
+  if(!tsB){ bk("S2","SKIP"); return; }
+  ACC=[];
+  var r1="-",r2="-";
+  try{ var rb=tsB.readable; r1=typeof rb; }catch(e){ r1="E:"+String((e&&e.message)||e).slice(0,30); }
+  try{ var wb=tsB.writable; r2=typeof wb; }catch(e){ r2="E:"+String((e&&e.message)||e).slice(0,30); }
+  bk("S2","readable="+r1+";writable="+r2+";acc=["+ACC.join(",")+"]");
+})();
+
+/* S3 — writer + write("PROBE") por el tsB (¿el transformSink llama al proxy?) */
+(function(){
+  if(!tsB){ bk("S3","SKIP"); return; }
+  ACC=[];
+  var m="-",e1="";
+  try{
+    var w=tsB.writable.getWriter();
+    m="gotWriter";
+    w.write("PROBE").then(function(){ bk("S3W","write-resolvio;acc=["+ACC.join(",")+"]"); },
+                          function(err){ bk("S3W","write-rej:"+String((err&&err.message)||err).slice(0,60)+";acc=["+ACC.join(",")+"]"); });
+    setTimeout(function(){ bk("S3W-t","write-pendiente@800ms;acc=["+ACC.join(",")+"]"); },800);
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S3",m+";e="+e1);
+})();
+
+/* S4 — reader + read() por el tsB */
+(function(){
+  if(!tsB){ bk("S4","SKIP"); return; }
+  ACC=[];
+  var m="-",e1="";
+  try{
+    var rd=tsB.readable.getReader();
+    m="gotReader";
+    rd.read().then(function(v){ bk("S4R","read-ok:"+JSON.stringify(v).slice(0,60)+";acc=["+ACC.join(",")+"]"); },
+                   function(err){ bk("S4R","read-rej:"+String((err&&err.message)||err).slice(0,60)+";acc=["+ACC.join(",")+"]"); });
+    setTimeout(function(){ bk("S4R-t","read-pendiente@800ms;acc=["+ACC.join(",")+"]"); },800);
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4",m+";e="+e1);
+})();
+
+setTimeout(function(){ rst(); clearInterval(HB); bk("Z","FA-v32-use complete"); },2200);
+})();
+</script></body></html>

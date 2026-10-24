@@ -1,0 +1,68 @@
+# Source trees (do not commit WebKit source)
+WebKit-*/
+.webkit-src/
+wk1200-source/
+14.20-bid/
+
+# Raw logs (unsanitized)
+*.log
+host-stdout.log
+host-beacons.log
+
+# Private / unsanitized data
+.local/
+
+# Scratch and temp directories
+.scratch/
+.tmp/
+.wrangler/
+
+# Reference exploits (third-party, may contain hardcoded IPs)
+refs/
+
+# Beacon dashboard (Cloudflare Worker, local dev)
+beacon-dashboard/
+
+# Chain HTML drafts (local working copies)
+chain*.html
+.chain_original.html
+
+# Screenshots (local)
+chain_after.png
+
+# Handoff docs (local)
+DEEPSEEK_HANDOFF.md
+
+# Dispatch transcripts and scratch (may contain LAN IPs)
+dsh-*.txt
+dsh-*.md
+p*-beacon-check-dsh-*.md
+
+# Agent / IDE config
+.claude/
+.cursor/
+.vscode/
+
+# Secrets and credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*
+secrets*
+
+# Node
+node_modules/
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Build artifacts
+*.o
+*.so
+*.dylib

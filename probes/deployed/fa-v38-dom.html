@@ -1,0 +1,115 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<script>
+/* DEFINICIONES tempranas: el custom element debe existir ANTES de que el
+ * parser llegue al <fa-cw> del body (para que su connectedCallback corra
+ * DURANTE el parseo = el path del CER-WRITE). */
+var RID="v38d"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/V38-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var INV=[];
+window.__cwRes="-";
+try{
+  customElements.define("fa-cw", class extends HTMLElement{
+    connectedCallback(){
+      INV.push("cw");
+      /* ★ CER-WRITE: document.write DURANTE el parseo (el clásico) */
+      bk("armed-CW","document.write desde connectedCallback durante parseo");
+      try{ document.write("<!--cw-->"); window.__cwRes="write-OK (¡divergente!)"; }
+      catch(e){ window.__cwRes=String((e&&e.name)||e)+":"+String((e&&e.message)||e).slice(0,40); }
+      bk("CW-RES",window.__cwRes);
+    }
+  });
+}catch(e){ bk("CW-DEF","E:"+String((e&&e.message)||e).slice(0,50)); }
+</script>
+<title>FA-v38-dom — press-28: DOM top-3 (CER-WRITE parser · RANGE-MUTEX · FRAME-DETACH)</title></head>
+<body><pre id="out">FA-v38-dom…</pre>
+<fa-cw></fa-cw>
+<script>
+(function(){
+"use strict";
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v38-dom; dr="+dr+"; rt="+rt+"; CE="+(typeof customElements));
+
+/* S1 — CER-NEST: append anidado dentro de connectedCallback (orden FIFO) */
+(function(){
+  var ord=[];
+  try{
+    customElements.define("fa-nest", class extends HTMLElement{
+      connectedCallback(){
+        ord.push(this.tagName);
+        if(this.tagName==="FA-NEST" && !this.querySelector("fa-nest2")){
+          try{ var c=document.createElement("fa-nest2"); this.appendChild(c); }catch(e){}
+        }
+      }
+    });
+    customElements.define("fa-nest2", class extends HTMLElement{
+      connectedCallback(){ ord.push(this.tagName+":hijo"); }
+    });
+    var host=document.createElement("fa-nest");
+    document.body.appendChild(host);
+    bk("S1","ord=["+ord.join(",")+"] (FIFO esperado: FA-NEST,FA-NEST2:hijo en el mismo flush)");
+  }catch(e){ bk("S1","E:"+String((e&&e.message)||e).slice(0,50)); }
+})();
+
+/* S2 — RANGE-MUTEX: listener DOMCharacterDataModified que muta el Range a mitad */
+(function(){
+  var nInv=0, rState="-", threw="-";
+  try{
+    var cd=document.createTextNode("ABCDEFGH");
+    document.body.appendChild(cd);
+    var r=document.createRange();
+    r.setStart(cd,2); r.setEnd(cd,6);
+    cd.addEventListener("DOMCharacterDataModified", function(){
+      nInv++;
+      try{ r.setStart(cd,0); r.setEnd(cd,1); }catch(e){} /* mutar a mitad */
+    });
+    cd.data="ZZZZZZZZZZZZ"; /* dispara el listener dentro del op */
+    rState="s="+r.startOffset+";e="+r.endOffset+";txt="+r.toString().slice(0,12);
+  }catch(e){ threw=String((e&&e.message)||e).slice(0,40); }
+  bk("S2","nInv="+nInv+";"+rState+";threw="+threw+" (¿el range quedó re-parado o fantasma?)");
+})();
+
+/* S3 — ORPHAN-SEL: selección sobre nodo que se remueve */
+(function(){
+  var m="-",e1="";
+  try{
+    var div=document.createElement("div"); div.textContent="SELECCIONAME";
+    document.body.appendChild(div);
+    var sel=window.getSelection();
+    var rr=document.createRange(); rr.selectNodeContents(div);
+    sel.removeAllRanges(); sel.addRange(rr);
+    document.body.removeChild(div); /* huérfana */
+    m="rangeCount="+sel.rangeCount;
+    try{ m+=";r0="+String(sel.getRangeAt(0).collapsed); }catch(e){ m+=";r0=E:"+String((e&&e.message)||e).slice(0,24); }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,40); }
+  bk("S3",m+";e="+e1+" (¿auto-corrige o queda huérfana?)");
+})();
+
+/* S4 — FRAME-DETACH: iframe que se remueve a sí mismo a mitad de callback */
+(function(){
+  var m="-",nRem=0;
+  try{
+    var f=document.createElement("iframe");
+    document.body.appendChild(f);
+    f.addEventListener("DOMNodeRemovedFromDocument", function(){ nRem++; });
+    var cw=f.contentWindow;
+    f.remove(); /* detach */
+    var alive="-";
+    try{ alive=(cw===null)?"cw=null":("cw="+(typeof cw.document)); }catch(e){ alive="cw-threw"; }
+    m=alive+";nRem="+nRem;
+  }catch(e){ m="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S4",m+" (cw=null+solo-1-removal = guardas OK)");
+})();
+
+/* S5 — el resultado del CER-WRITE (corrió durante el parseo, arriba) */
+bk("S5","cwRes="+window.__cwRes+" (InvalidStateError = árbol conforme · write-OK = DIVERGENCIA = parser-corruption territory)");
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v38-dom complete"); },1800);
+})();
+</script></body></html>

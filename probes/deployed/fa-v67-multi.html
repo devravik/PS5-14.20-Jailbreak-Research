@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v67-multi</title>
+</head><body>
+<script src="p221-clonedargs-gc-uaf.js?v=221a"></script>
+<script>
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p180a-fontface-fuzz.js?v=180a2';
+  document.body.appendChild(s);
+}, 3000);
+// p173a: SVG font uint16 overflow — runs in iframe after 6s
+setTimeout(function() {
+  var f = document.createElement('iframe');
+  f.src = 'p173a-svgfont-overflow.html?v=173a1';
+  f.style.cssText = 'width:1px;height:1px;border:none;position:absolute;left:-9999px';
+  document.body.appendChild(f);
+}, 6000);
+</script>
+</body></html>

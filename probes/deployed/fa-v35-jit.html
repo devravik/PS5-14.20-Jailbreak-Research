@@ -1,0 +1,82 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v35-jit — press-25: las esquinas del JIT (Luna a/b/c — frío vs caliente)</title></head>
+<body><pre id="out">FA-v35-jit…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v35-jit — press-25 (probes LUNA-JIT a/b/c, 0-crash, correctitud pura).
+ * (a) catch en frame caliente: ¿recibe el token EXACTO + el local intacto?
+ * (b) alternancia normal/excepcional en caliente: ¿excepción residual,
+ *     finally exactamente una vez, sin efectos post-fallo?
+ * (c) builtin inlineado que tira: ¿cae en el catch INTERNO correcto?
+ * Cada probe corre FRÍO (100) y CALIENTE (20000) y compara. */
+var RID="v35j"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V35-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v35-jit; dr="+dr+"; rt="+rt);
+
+/* (a) identidad del token + valor local previo */
+function probeA(n){
+  var bad=0, tok=new Error("TOKEN-A");
+  var o={get p(){ throw tok; }};
+  function f(){ var x=42; try{ x=o.p; }catch(e){ return (e===tok) && (x===42); } return false; }
+  for(var i=0;i<n;i++){ if(!f()) bad++; }
+  return "bad="+bad+"/"+n;
+}
+var aC=probeA(100), aH=probeA(20000);
+bk("SA","frio:"+aC+";caliente:"+aH+" (bad=0 sano; bad>0 = catch recibe token equivocado o local corrupto)");
+
+/* (b) alternancia + finally-exactamente-una-vez + sin efectos post-fallo */
+function probeB(n){
+  var bad=0, resid=0;
+  var tok=new Error("TOKEN-B");
+  var o={get p(){ throw tok; }};
+  function g(i){
+    var fin=0, post=0, caught=false;
+    try{
+      if(i%2===0){ o.p; }         /* pares: tira */
+      post++;                      /* nunca debe correr en pares */
+    }catch(e){ caught=(e===tok); }
+    finally{ fin++; }
+    if(fin!==1) bad+=1;
+    if(i%2===0 && (post!==0||!caught)) bad+=2;
+    if(i%2===1 && post!==1) bad+=4;
+    return bad;
+  }
+  for(var i=0;i<n;i++){ g(i); }
+  /* excepción residual: una op que NO tira jamás, tras la serie */
+  try{ (1+1); }catch(e){ resid++; }
+  return "bad="+bad+";resid="+resid+"/"+n;
+}
+var bC=probeB(100), bH=probeB(20000);
+bk("SB","frio:"+bC+";caliente:"+bH+" (bad=0,resid=0 sano)");
+
+/* (c) builtin que tira (forEach sobre null) dentro de try caliente: ¿catch interno TypeError, externo nada? */
+function probeC(n){
+  var bad=0;
+  function inner(){ var log="";
+    try{ Array.prototype.forEach.call(null,function(){}); }
+    catch(e){ log=(e instanceof TypeError)?"innerT":"innerOTRO:"+String((e&&e.message)||e).slice(0,20); }
+    return log;
+  }
+  function outer(){
+    var r="";
+    try{ r=inner(); }catch(e){ r="OUTER-CONTAMINADO"; }
+    return r;
+  }
+  for(var i=0;i<n;i++){ if(outer()!=="innerT") bad++; }
+  return "bad="+bad+"/"+n;
+}
+var cC=probeC(100), cH=probeC(20000);
+bk("SC","frio:"+cC+";caliente:"+cH+" (bad=0 sano; OUTER-CONTAMINADO = handler equivocado)");
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v35-jit complete"); },1500);
+})();
+</script></body></html>

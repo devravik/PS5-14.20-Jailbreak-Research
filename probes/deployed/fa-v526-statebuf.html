@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>V526 Canvas State Buffer Probe</title>
+</head>
+<body>
+<pre id="log">Loading V526 canvas state buffer probe...</pre>
+<script>
+var s = document.createElement('script');
+s.src = 'p526-canvas-statebuf.js?t=' + Date.now();
+s.onload = function() {
+  document.getElementById('log').textContent += '\np526 loaded OK\nAuto-reload in 120s.';
+  setTimeout(function() { location.reload(); }, 120000);
+};
+s.onerror = function() {
+  document.getElementById('log').textContent += '\nFAILED\nRetry in 10s.';
+  setTimeout(function() { location.reload(); }, 10000);
+};
+document.body.appendChild(s);
+</script>
+</body>
+</html>

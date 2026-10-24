@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>p190 Multi-Probe UAF Runner</title></head>
+<body>
+<script>
+(function() {
+  "use strict";
+
+  var BASE = location.protocol + '//' + location.host;
+
+  function syncB(tag) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('GET', BASE + '/beacon/V190-' + tag + '?t=' + Date.now(), false);
+      x.send();
+    } catch(e) {}
+  }
+
+  // Each probe: name, script file, completion beacon substring, timeout ms
+  var PROBES = [
+    { name: 'P184', file: 'p184-eventtarget-uaf.js', done: 'V184-ALL-DONE', timeout: 30000 },
+    { name: 'P185', file: 'p185-font-uaf.js',        done: 'V185-ALL-DONE', timeout: 30000 },
+    { name: 'P186', file: 'p186-svg-style-uaf.js',    done: 'V186-ALL-DONE', timeout: 30000 },
+    { name: 'P188', file: 'p188-urlparser-uaf.js',    done: 'V188-ALL-DONE', timeout: 30000 }
+  ];
+
+  var results = {};
+  var currentIndex = 0;
+
+  syncB('BOOT-PROBES-' + PROBES.length);
+
+  function runProbe(index) {
+    if (index >= PROBES.length) {
+      // All probes done — beacon summary
+      var parts = [];
+      for (var i = 0; i < PROBES.length; i++) {
+        parts.push(PROBES[i].name + '=' + (results[PROBES[i].name] || 'UNKNOWN'));
+      }
+      syncB('SUMMARY-' + parts.join(','));
+      syncB('ALL-COMPLETE');
+      return;
+    }
+
+    var probe = PROBES[index];
+    syncB('STARTING-' + probe.name);
+
+    // Create an iframe to isolate the probe (crash containment)
+    var iframe = document.createElement('iframe');
+    iframe.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px;';
+    document.body.appendChild(iframe);
+
+    var completed = false;
+    var timer = null;
+
+    function finish(status) {
+      if (completed) return;
+      completed = true;
+      if (timer) clearTimeout(timer);
+
+      results[probe.name] = status;
+      syncB(probe.name + '-RESULT-' + status);
+
+      // Clean up iframe
+      try { iframe.remove(); } catch(e) {}
+
+      // Small delay before next probe to let things settle
+      setTimeout(function() {
+        runProbe(index + 1);
+      }, 500);
+    }
+
+    // Timeout = likely crash (iframe died silently)
+    timer = setTimeout(function() {
+      // Check if iframe is still alive
+      var alive = false;
+      try {
+        // Accessing contentWindow on a crashed iframe throws or returns null
+        alive = !!(iframe.contentWindow && iframe.contentDocument);
+        // Try to run something in the iframe
+        iframe.contentWindow.postMessage('ping', '*');
+      } catch(e) {
+        alive = false;
+      }
+
+      if (!alive) {
+        syncB(probe.name + '-TIMEOUT-CRASH');
+        finish('CRASH');
+      } else {
+        syncB(probe.name + '-TIMEOUT-ALIVE');
+        finish('TIMEOUT-ALIVE');
+      }
+    }, probe.timeout);
+
+    // Listen for completion beacons from the iframe
+    // We poll the server log? No — we intercept XHR from the iframe.
+    // Actually, the probe scripts use synchronous XHR beacons to the server.
+    // We can't intercept those. Instead, use a message channel:
+    // Inject a wrapper that posts a message when the probe's completion beacon fires.
+
+    // Build the iframe content: a page that loads the probe and monitors for completion
+    var iframeHTML = '<!doctype html><html><head><meta charset="utf-8"></head><body>';
+    iframeHTML += '<script>';
+    // Override XMLHttpRequest in the iframe to detect completion beacons
+    iframeHTML += 'var _origOpen = XMLHttpRequest.prototype.open;';
+    iframeHTML += 'XMLHttpRequest.prototype.open = function(m, url) {';
+    iframeHTML += '  if (url && (url.indexOf("ALL-DONE") !== -1 || url.indexOf("COMPLETE") !== -1 || url.indexOf("ALL-COMPLETE") !== -1)) {';
+    iframeHTML += '    try { parent.postMessage("PROBE-DONE-' + probe.name + '", "*"); } catch(e) {}';
+    iframeHTML += '  }';
+    iframeHTML += '  return _origOpen.apply(this, arguments);';
+    iframeHTML += '};';
+    iframeHTML += '<\/script>';
+    iframeHTML += '<script src="' + probe.file + '?v=' + probe.name + 'mp"><\/script>';
+    iframeHTML += '</body></html>';
+
+    // Listen for the completion message
+    function onMessage(e) {
+      if (e.data === 'PROBE-DONE-' + probe.name) {
+        window.removeEventListener('message', onMessage);
+        syncB(probe.name + '-COMPLETED-OK');
+        finish('OK');
+      }
+    }
+    window.addEventListener('message', onMessage);
+
+    // Write the iframe content
+    try {
+      iframe.srcdoc = iframeHTML;
+    } catch(e) {
+      // Fallback: use blob URL
+      try {
+        var blob = new Blob([iframeHTML], {type: 'text/html'});
+        iframe.src = URL.createObjectURL(blob);
+      } catch(e2) {
+        syncB(probe.name + '-IFRAME-FAIL');
+        finish('IFRAME-FAIL');
+      }
+    }
+
+    syncB(probe.name + '-IFRAME-LAUNCHED');
+  }
+
+  // Start the sequential probe run
+  runProbe(0);
+
+})();
+</script>
+</body>
+</html>

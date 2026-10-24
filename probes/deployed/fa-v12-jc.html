@@ -1,0 +1,178 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v12-jc — jcelltox matrix battery (DS-V6M design, 0-crash by design)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v12-jc — A1/A2/A3/A4/J4d/S4e/D</pre>
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>
+(function(){
+"use strict";
+var RID = "v12" + Date.now().toString(36).slice(-16);
+var out = document.getElementById("out");
+function say(s){ try{ out.appendChild(document.createTextNode("\n"+s)); }catch(e){} }
+function b(st, body){
+  try{ fetch("/beacon/V12-"+st, { method:"POST", cache:"no-store",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({r:RID, b:String(body).slice(0,240)}) }).catch(function(){}); }catch(e){}
+}
+var OI = Array.prototype[Symbol.iterator];
+function restore(){ try{ Array.prototype[Symbol.iterator] = OI; }catch(e){} }
+function iterOf(yielder){ return function(){
+      var i = 0, n = 2;
+      return { next: function(){
+        if (i >= n) return { done: true };
+        var v = yielder(i); i++;
+        return { value: v, done: false };
+      }};
+    };
+  }
+function mkX(tag){ var X = { ourTag: tag }; window.__jcX = X; return iterOf(function(){ return X; }); }
+function stage(id, poison, work){
+    try{
+      b(id + "A", id + " start");
+      say("V12-" + id + " ...");
+      if (poison) { Array.prototype[Symbol.iterator] = poison(); }
+      var r;
+      try{ r = work(); }
+      finally{ restore(); }
+      b(id + "B", "SURV " + String(r).slice(0,225));
+      say("V12-" + id + " " + r);
+      return r;
+    }catch(e){
+      restore();
+      var msg = String((e && e.message) || e).slice(0,90);
+      b(id + "E", "ETYPE: " + msg);
+      say("V12-" + id + " E " + msg);
+      return "E:" + msg;
+    }
+  }
+  function tee(){ var rs = new ReadableStream({}); return rs.tee(); }
+
+  /* matriz compacta: pair0/pair1 + introspeccion de Xa/Xb (own-keys) */
+  function matrix(p, Xa, Xb){
+    var s = "";
+    try{ s += "t0=" + typeof p[0] + "; l0=" + String(p[0].locked).slice(0,5) + "; g0=" + typeof p[0].getReader; }catch(e){ s += "p0E:" + String((e&&e.message)||e).slice(0,40); }
+    try{ var f0=false, s0=false; try{ p[0].cancel(); }catch(e){ f0=true; } try{ p[1].cancel(); }catch(e){ s0=true; }
+         s += "; c0=" + f0 + "; c1=" + s0; }catch(e2){ s += "; cE:" + String((e2&&e2.message)||e2).slice(0,30); }
+    try{ s += "; i0=" + String(p[0] instanceof ReadableStream).slice(0,5); }catch(e3){ s += "; iE"; }
+    try{ s += "; xK=" + Object.keys(Xa).join("|").slice(0,30) + "; xl=" + String(typeof Xa.locked).slice(0,9) + "; xKb=" + Object.keys(Xb).join("|").slice(0,20); }catch(e4){ s += "; xE:" + String((e4&&e4.message)||e4).slice(0,30); }
+    return s;
+  }
+
+  /* L */
+  try{ b("L", "loaded; dr=" + (typeof window.deriveRuntime) + "; ua=" + navigator.userAgent.slice(0,44));
+       say("V12-L loaded; drift=" + (typeof window.deriveRuntime)); }catch(e){}
+  try{ setInterval(function(){ b("HB", "hb"); }, 2000); }catch(e){}
+
+  /* C0 — control limpio */
+  stage("C0", null, function(){
+    var p = tee();
+    return "clean len=" + p.length + "; locked=" + p[0].locked;
+  });
+
+  /* A1 PRIVATE-READ-MATRIX: [Xa{ourTag,locked:true,reader:"s"}, Xb] */
+  stage("A1", function(){
+    var Xa = { ourTag: "v12a", locked: true, reader: "s" };
+    var Xb = { ourTag: "v12b" };
+    window.__jcXa = Xa; window.__jcXb = Xb;
+    return iterOf(function(i){ return i === 0 ? Xa : Xb; });
+  }, function(){
+    var p = tee();
+    return matrix(p, window.__jcXa, window.__jcXb);
+  });
+
+  /* A2 STATE-PERSISTENCE: tee1 [Xa,Xa] cancel-flip; tee2 [Xa,Xb] matriz */
+  stage("A2", function(){
+    var Xa = { ourTag: "v12per" };
+    window.__jcXa = Xa; window.__jcXb = null;
+    return iterOf(function(){ return Xa; });
+  }, function(){
+    var p1 = tee(); var c0=false, c1=false;
+    try{ p1[0].cancel(); }catch(e){ c0=true; } try{ p1[1].cancel(); }catch(e){ c1=true; }
+    var hh = tee();
+    window.__jcXb = { ourTag: "v12per2" };
+    restore();
+    Array.prototype[Symbol.iterator] = iterOf(function(i){ return i === 0 ? window.__jcXa : window.__jcXb; })();
+    var m = matrix(hh, window.__jcXa, window.__jcXb || { ourTag: "-" });
+    return "flip0=" + c0 + "; flip1=" + c1 + "; m2[" + m + "]";
+  });
+
+  /* A3 PROXY-FORWARD: yield [Proxy(->Xa live), Xb] */
+  stage("A3", function(){
+    var Xa = { ourTag: "v12px" };
+    var pr = Proxy.revocable(Xa, {});
+    window.__jcXa = Xa; window.__jcPr = pr;
+    var Xb = { ourTag: "v12pxb" };
+    window.__jcXb = Xb;
+    return iterOf(function(i){ return i === 0 ? pr.proxy : Xb; });
+  }, function(){
+    var p = tee();
+    return matrix(p, window.__jcXa, window.__jcXb);
+  });
+
+  /* A4 REVOKED-YIELDED: yield [revokedProxy, Xb] */
+  stage("A4", function(){
+    var pr = Proxy.revocable({ ourTag: "v12rv" }, {}); pr.revoke();
+    window.__jcXa = pr.proxy; window.__jcPr = pr;
+    var Xb = { ourTag: "v12rvb" };
+    window.__jcXb = Xb;
+    return iterOf(function(i){ return i === 0 ? pr.proxy : Xb; });
+  }, function(){
+    var p = tee();
+    return matrix(p, window.__jcXa, window.__jcXb);
+  });
+
+  /* J4d toX-CONTROL: ReadableStream({type: revokedProxy}) — TypeError esperado */
+  stage("J4d", function(){
+    var pr = Proxy.revocable({}, {}); pr.revoke();
+    window.__jcXa = pr.proxy; window.__jcXb = null;
+    return null;
+  }, function(){
+    var out2;
+    try{ out2 = String(new ReadableStream({ type: window.__jcXa }).tee().length).slice(0,6); }
+    catch(e){ out2 = "E:[" + String((e && e.name) || "?") + "] " + String((e && e.message) || e).slice(0,70); }
+    return "toX-ctrl=" + out2;
+  });
+
+  /* S4e — BOXED 2:1 (decide (b2): writer pool+1 :1487 vs reader double-append :4045+:4145) */
+  stage("S4e", null, function(){
+    if (typeof BigInt === "undefined") return "SKIP no-BigInt";
+    var X = { ourTag: "s4e-inv" }, arr = [], i;
+    for (i = 0; i < 127; i++) arr.push(Object((BigInt(1) << BigInt(40)) + BigInt(i)));
+    arr.push(X); arr.push(X);
+    var c;
+    try { c = structuredClone(arr); } catch(e){ return "E-class:" + String((e && e.message) || e).slice(0,80) + "; BUGLIVE=true"; }
+    var v127 = c[127], v128 = c[128];
+    var clean = (c.length === 129) && v127 && typeof v127 === "object" && v127.ourTag === "s4e-inv" &&
+                v128 && typeof v128 === "object" && v128.ourTag === "s4e-inv";
+    return "len=" + c.length + "; t127=" + typeof v127 + "; t128=" + typeof v128 +
+           "; dedup=" + (v127 === v128) + "; clean=" + clean + "; BUGLIVE=" + (!clean);
+  });
+
+  /* D DR-TYPEOF — fail-closed: NUNCA run(p), solo typeof/keys/descriptors */
+  stage("D", null, function(){
+    var s = "";
+    try{
+      s += "dr=" + (typeof window.deriveRuntime);
+      if (window.deriveRuntime && typeof window.deriveRuntime === "object"){
+        var ks = Object.keys(window.deriveRuntime);
+        s += "; keys=" + ks.join("|").slice(0,120);
+        var tps = [];
+        for (var i = 0; i < Math.min(ks.length, 10); i++){ tps.push(typeof window.deriveRuntime[ks[i]]); }
+        s += "; types=" + tps.join(",");
+      }
+    }catch(e){ s += "; drE:" + String((e && e.message) || e).slice(0,40); }
+    try{
+      var Xa = window.__jcXa;
+      if (Xa){
+        var d = Object.getOwnPropertyDescriptor(Xa, "ourTag");
+        s += "; x|keys=" + Object.keys(Xa).join("|").slice(0,40) +
+             "; proto=" + String(Object.prototype.toString.call(Object.getPrototypeOf(Xa))).slice(0,20) +
+             "; desc-e=" + (d ? String(d.enumerable) : "-") + "; inst=" + (Xa instanceof Object);
+      } else { s += "; x-missing"; }
+    }catch(e2){ s += "; xE:" + String((e2 && e2.message) || e2).slice(0,40); }
+    return s;
+  });
+
+  b("Z", "FA-v12-jc complete");
+  say("FA-v12-jc complete");
+})();
+</script></body></html>

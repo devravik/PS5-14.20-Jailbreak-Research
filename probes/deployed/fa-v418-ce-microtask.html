@@ -1,0 +1,230 @@
+<!doctype html>
+<html>
+<head><title>V418</title></head>
+<body>
+<script>
+var BQ=0;
+function B(t,b){
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V418-'+t+'?t='+Date.now()+'&q='+(BQ++),false);x.send(b||'');}catch(e){}
+}
+B('BOOT');
+
+// V418: Microtask re-entry during CE construction
+// JSCustomElementInterface.cpp line 156: performMicrotaskCheckpoint() runs
+// BETWEEN constructor return and validation checks (lines 165-184).
+// This is a re-entry window where arbitrary JS can execute while the
+// parser is mid-CE-creation.
+
+var results = {};
+var testNum = 0;
+
+// ===== TEST 1: Basic microtask fires during construction =====
+var mt1_fired = false;
+var mt1_docState = null;
+class T1Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt1_fired = true;
+      mt1_docState = document.readyState;
+      B('T1-MT-FIRED-STATE-' + mt1_docState);
+    });
+  }
+}
+customElements.define('test-1', T1Element);
+
+// ===== TEST 2: Microtask removes body during CE construction =====
+var mt2_fired = false;
+var mt2_removed = false;
+var mt2_err = null;
+class T2Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt2_fired = true;
+      try {
+        if (document.body && document.body.parentNode) {
+          document.body.parentNode.removeChild(document.body);
+          mt2_removed = true;
+          B('T2-MT-BODY-REMOVED');
+        } else {
+          B('T2-MT-NO-BODY');
+        }
+      } catch(e) {
+        mt2_err = e.message;
+        B('T2-MT-ERR-' + (e.message||'').substring(0,40));
+      }
+    });
+  }
+}
+customElements.define('test-2', T2Element);
+
+// ===== TEST 3: Microtask does document.write during CE construction =====
+var mt3_fired = false;
+var mt3_wrote = false;
+var mt3_err = null;
+class T3Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt3_fired = true;
+      try {
+        document.write('<div id="injected3">INJECTED</div>');
+        mt3_wrote = true;
+        B('T3-MT-WRITE-OK');
+      } catch(e) {
+        mt3_err = e.message;
+        B('T3-MT-WRITE-ERR-' + (e.message||'').substring(0,40));
+      }
+    });
+  }
+}
+customElements.define('test-3', T3Element);
+
+// ===== TEST 4: Microtask removes the CE's intended parent =====
+var mt4_fired = false;
+var mt4_err = null;
+class T4Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt4_fired = true;
+      try {
+        var container = document.getElementById('t4-container');
+        if (container && container.parentNode) {
+          container.parentNode.removeChild(container);
+          B('T4-MT-CONTAINER-REMOVED');
+        } else {
+          B('T4-MT-NO-CONTAINER');
+        }
+      } catch(e) {
+        mt4_err = e.message;
+        B('T4-MT-ERR-' + (e.message||'').substring(0,40));
+      }
+    });
+  }
+}
+customElements.define('test-4', T4Element);
+
+// ===== TEST 5: Microtask does document.open during CE construction =====
+var mt5_fired = false;
+var mt5_err = null;
+class T5Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt5_fired = true;
+      try {
+        document.open();
+        document.write('<html><body><div id="t5-replaced">REPLACED</div></body></html>');
+        document.close();
+        B('T5-MT-DOCOPEN-OK');
+      } catch(e) {
+        mt5_err = e.message;
+        B('T5-MT-DOCOPEN-ERR-' + (e.message||'').substring(0,40));
+      }
+    });
+  }
+}
+customElements.define('test-5', T5Element);
+
+// ===== TEST 6: Microtask replaces innerHTML of parent during construction =====
+var mt6_fired = false;
+var mt6_err = null;
+class T6Element extends HTMLElement {
+  constructor() {
+    super();
+    Promise.resolve().then(() => {
+      mt6_fired = true;
+      try {
+        var container = document.getElementById('t6-container');
+        if (container) {
+          container.innerHTML = '<span id="t6-replaced">REPLACED</span>';
+          B('T6-MT-INNERHTML-OK');
+        }
+      } catch(e) {
+        mt6_err = e.message;
+        B('T6-MT-INNERHTML-ERR-' + (e.message||'').substring(0,40));
+      }
+    });
+  }
+}
+customElements.define('test-6', T6Element);
+
+B('CE-ALL-DEFINED');
+</script>
+
+<!-- T1: basic microtask timing -->
+<div id="t1-container"><test-1 id="t1-target"></test-1></div>
+<script>
+B('T1-POST');
+B('T1-MTFIRED-' + mt1_fired);
+B('T1-DOCSTATE-' + mt1_docState);
+var t1t = document.getElementById('t1-target');
+B('T1-FOUND-' + (t1t ? t1t.tagName : 'MISSING'));
+B('T1-PARENT-' + (t1t && t1t.parentNode ? t1t.parentNode.id : 'NULL'));
+</script>
+
+<!-- T2: body removal via microtask -->
+<div id="t2-container"><test-2 id="t2-target"></test-2></div>
+<script>
+B('T2-POST');
+B('T2-MTFIRED-' + mt2_fired);
+B('T2-REMOVED-' + mt2_removed);
+if(mt2_err) B('T2-ERR-' + mt2_err.substring(0,40));
+B('T2-HASBODY-' + !!document.body);
+var t2t = document.getElementById('t2-target');
+B('T2-FOUND-' + (t2t ? 'YES' : 'NO'));
+</script>
+
+<!-- T3: document.write via microtask -->
+<div id="t3-container"><test-3 id="t3-target"></test-3></div>
+<script>
+B('T3-POST');
+B('T3-MTFIRED-' + mt3_fired);
+B('T3-WROTE-' + mt3_wrote);
+if(mt3_err) B('T3-ERR-' + mt3_err.substring(0,40));
+var inj3 = document.getElementById('injected3');
+B('T3-INJECTED-' + (inj3 ? 'YES' : 'NO'));
+</script>
+
+<!-- T4: remove intended parent via microtask -->
+<div id="t4-container"><test-4 id="t4-target"></test-4></div>
+<script>
+B('T4-POST');
+B('T4-MTFIRED-' + mt4_fired);
+if(mt4_err) B('T4-ERR-' + mt4_err.substring(0,40));
+var t4c = document.getElementById('t4-container');
+B('T4-CONTAINER-' + (t4c ? 'PRESENT' : 'REMOVED'));
+var t4t = document.getElementById('t4-target');
+B('T4-TARGET-' + (t4t ? 'FOUND' : 'MISSING'));
+if(t4t) B('T4-TARGET-PARENT-' + (t4t.parentNode ? t4t.parentNode.id || t4t.parentNode.tagName : 'NULL'));
+</script>
+
+<!-- T5: document.open via microtask -- MOST DANGEROUS -->
+<!-- If this runs without T6, T5 might destroy the document -->
+
+<!-- T6: innerHTML replace of parent via microtask -->
+<div id="t6-container"><test-6 id="t6-target"></test-6></div>
+<script>
+B('T6-POST');
+B('T6-MTFIRED-' + mt6_fired);
+if(mt6_err) B('T6-ERR-' + mt6_err.substring(0,40));
+var t6c = document.getElementById('t6-container');
+B('T6-CONTAINER-' + (t6c ? 'PRESENT' : 'REMOVED'));
+var t6r = document.getElementById('t6-replaced');
+B('T6-REPLACED-' + (t6r ? 'YES' : 'NO'));
+var t6t = document.getElementById('t6-target');
+B('T6-TARGET-' + (t6t ? 'FOUND' : 'MISSING'));
+</script>
+
+<!-- SKIP T5 for safety - document.open would destroy everything -->
+<!-- Uncomment to test: <test-5 id="t5-target"></test-5> -->
+
+<script>
+B('ALL-DONE');
+// heartbeat
+setInterval(function(){B('HB')},10000);
+</script>
+</body>
+</html>

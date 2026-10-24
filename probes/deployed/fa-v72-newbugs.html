@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v72-newbugs</title>
+</head><body>
+<iframe src="p210-svgfont-placeholder-overflow.html?v=210a" style="width:1px;height:1px;border:none;position:absolute;left:-9999px"></iframe>
+<script>
+// p171: ReadableStream tee UAF — after p210 starts (6s)
+setTimeout(function() {
+  var s = document.createElement('script');
+  s.src = 'p171-stream-reader-uaf.js?v=171a';
+  document.body.appendChild(s);
+}, 6000);
+</script>
+</body></html>

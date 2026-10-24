@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V530</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="1" height="1" muted></video>
+<div id="log">V530 — MediaSource Probe
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V530-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// === T1: isTypeSupported survey ===
+setTimeout(function(){
+  try{
+    B('T1-START','isTypeSupported');
+    var types=[
+      'video/mp4',
+      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4; codecs="avc1.4D401E"',
+      'video/mp4; codecs="avc1.64001E"',
+      'video/mp4; codecs="hev1.1.6.L93.B0"',
+      'video/mp4; codecs="hvc1.1.6.L93.B0"',
+      'audio/mp4; codecs="mp4a.40.2"',
+      'audio/mp4; codecs="opus"',
+      'video/webm',
+      'video/webm; codecs="vp8"',
+      'video/webm; codecs="vp9"',
+      'audio/webm; codecs="opus"',
+      'audio/webm; codecs="vorbis"',
+      'video/mp2t',
+    ];
+    for(var i=0;i<types.length;i++){
+      var s=MediaSource.isTypeSupported(types[i]);
+      B('T1-TYPE',types[i]+' → '+s);
+    }
+    B('T1-DONE','ok');
+  }catch(e){B('T1-ERR',''+e)}
+},500);
+
+// === T2: Create MediaSource + attach to video ===
+var ms,vid,sb;
+setTimeout(function(){
+  try{
+    B('T2-START','create MediaSource');
+    ms=new MediaSource();
+    B('T2-CREATED','readyState='+ms.readyState);
+
+    vid=document.getElementById('vid');
+    var url=URL.createObjectURL(ms);
+    B('T2-URL','created objectURL');
+
+    ms.addEventListener('sourceopen',function(){
+      B('T2-OPEN','readyState='+ms.readyState);
+      // Try adding a source buffer
+      try{
+        // Try most common format first
+        sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+        B('T2-SRCBUF','added video/mp4 avc1');
+      }catch(e){
+        B('T2-SRCBUF-ERR','mp4: '+e);
+        // Try audio
+        try{
+          sb=ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+          B('T2-SRCBUF','added audio/mp4 aac');
+        }catch(e2){
+          B('T2-SRCBUF-ERR2','audio: '+e2);
+          // Try webm
+          try{
+            sb=ms.addSourceBuffer('video/webm; codecs="vp9"');
+            B('T2-SRCBUF','added video/webm vp9');
+          }catch(e3){
+            B('T2-SRCBUF-ERR3','webm: '+e3);
+          }
+        }
+      }
+
+      if(sb){
+        B('T2-SB-MODE','mode='+sb.mode);
+        B('T2-SB-BUFFERED','buffered.length='+sb.buffered.length);
+        B('T2-SB-UPDATING','updating='+sb.updating);
+
+        // Append minimal MP4 init segment
+        appendInitSegment();
+      }
+    });
+
+    ms.addEventListener('sourceclose',function(){
+      B('T2-CLOSE','readyState='+ms.readyState);
+    });
+
+    ms.addEventListener('sourceended',function(){
+      B('T2-ENDED','readyState='+ms.readyState);
+    });
+
+    vid.src=url;
+    B('T2-SRC-SET','waiting for sourceopen');
+  }catch(e){B('T2-ERR',''+e)}
+},3000);
+
+function appendInitSegment(){
+  try{
+    B('T3-START','append init segment');
+
+    // Minimal MP4 ftyp+moov for H.264 Baseline
+    // ftyp: isom, 0x200, [isom, iso2, mp41]
+    var ftyp=hexToBytes(
+      '00000018'+ // size=24
+      '66747970'+ // 'ftyp'
+      '69736F6D'+ // major_brand='isom'
+      '00000200'+ // minor_version=512
+      '69736F6D'  // compatible_brand='isom'
+    );
+
+    // Minimal moov with one video track (H.264 Baseline 320x240)
+    // We build bottom-up
+
+    // avcC: minimal SPS+PPS for baseline profile
+    var sps=hexToBytes('6742C01E DA02405D CB040400 00030004 00000300 3C320000');
+    var pps=hexToBytes('68CE3880');
+
+    var avcCData=hexToBytes(
+      '01'+ // configVersion=1
+      '42'+ // AVCProfileIndication (Baseline)
+      'C0'+ // profile_compat
+      '1E'+ // AVCLevelIndication (3.0)
+      'FF'+ // lengthSizeMinusOne=3 (NALU len=4)
+      'E1'  // numSPS=1
+    );
+    // SPS length + data
+    var spsRaw=hexToBytes('6742C01EDA02405DCB04040000030004000003003C3200');
+    var spsLen=new Uint8Array([(spsRaw.length>>8)&0xFF, spsRaw.length&0xFF]);
+    // PPS
+    var ppsRaw=hexToBytes('68CE3880');
+    var ppsCount=new Uint8Array([1]);
+    var ppsLen=new Uint8Array([(ppsRaw.length>>8)&0xFF, ppsRaw.length&0xFF]);
+
+    var avcC=concatBytes([avcCData, spsLen, spsRaw, ppsCount, ppsLen, ppsRaw]);
+    var avcCBox=makeBox('avcC', avcC);
+
+    // avc1 box (visual sample entry)
+    var avc1Header=hexToBytes(
+      '00000000 00000001'+ // reserved + data_ref_index=1
+      '00000000 00000000 00000000 00000000'+ // pre_defined + reserved
+      '0140'+ // width=320
+      '00F0'+ // height=240
+      '00480000'+ // horiz_res
+      '00480000'+ // vert_res
+      '00000000'+ // reserved
+      '0001'+ // frame_count=1
+      '00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000'+ // compressorname (32 bytes)
+      '0018'+ // depth=24
+      'FFFF'  // pre_defined=-1
+    );
+    var avc1Box=makeBox('avc1', concatBytes([avc1Header, avcCBox]));
+
+    // stsd
+    var stsdHeader=hexToBytes('00000000 00000001'); // version+flags, entry_count=1
+    var stsdBox=makeBox('stsd', concatBytes([stsdHeader, avc1Box]));
+
+    // stts (empty)
+    var sttsBox=makeBox('stts', hexToBytes('00000000 00000000'));
+    // stsc (empty)
+    var stscBox=makeBox('stsc', hexToBytes('00000000 00000000'));
+    // stsz (empty)
+    var stszBox=makeBox('stsz', hexToBytes('00000000 00000000 00000000'));
+    // stco (empty)
+    var stcoBox=makeBox('stco', hexToBytes('00000000 00000000'));
+
+    // stbl
+    var stblBox=makeBox('stbl', concatBytes([stsdBox, sttsBox, stscBox, stszBox, stcoBox]));
+
+    // dinf > dref > url
+    var urlBox=makeBox('url ', hexToBytes('00000001')); // self-contained flag
+    var drefBox=makeBox('dref', concatBytes([hexToBytes('00000000 00000001'), urlBox]));
+    var dinfBox=makeBox('dinf', drefBox);
+
+    // vmhd
+    var vmhdBox=makeBox('vmhd', hexToBytes('00000001 0000 0000 0000 0000'));
+
+    // minf
+    var minfBox=makeBox('minf', concatBytes([vmhdBox, dinfBox, stblBox]));
+
+    // hdlr (vide)
+    var hdlrBox=makeBox('hdlr', hexToBytes(
+      '00000000'+ // version+flags
+      '00000000'+ // pre_defined
+      '76696465'+ // handler_type='vide'
+      '00000000 00000000 00000000'+ // reserved
+      '00' // name (null)
+    ));
+
+    // mdhd
+    var mdhdBox=makeBox('mdhd', hexToBytes(
+      '00000000'+ // version+flags
+      '00000000'+ // creation_time
+      '00000000'+ // modification_time
+      '00015F90'+ // timescale=90000
+      '00000000'+ // duration=0
+      '55C40000'  // language+pre_defined
+    ));
+
+    // mdia
+    var mdiaBox=makeBox('mdia', concatBytes([mdhdBox, hdlrBox, minfBox]));
+
+    // tkhd
+    var tkhdBox=makeBox('tkhd', hexToBytes(
+      '00000003'+ // version=0, flags=3 (enabled+in_movie)
+      '00000000'+ // creation_time
+      '00000000'+ // modification_time
+      '00000001'+ // track_ID=1
+      '00000000'+ // reserved
+      '00000000'+ // duration=0
+      '00000000 00000000'+ // reserved
+      '0000'+ // layer
+      '0000'+ // alternate_group
+      '0000'+ // volume
+      '0000'+ // reserved
+      '00010000 00000000 00000000 00000000 00010000 00000000 00000000 00000000 40000000'+ // matrix
+      '01400000'+ // width=320 (16.16)
+      '00F00000'  // height=240 (16.16)
+    ));
+
+    // trak
+    var trakBox=makeBox('trak', concatBytes([tkhdBox, mdiaBox]));
+
+    // mvhd
+    var mvhdBox=makeBox('mvhd', hexToBytes(
+      '00000000'+ // version+flags
+      '00000000'+ // creation_time
+      '00000000'+ // modification_time
+      '000003E8'+ // timescale=1000
+      '00000000'+ // duration=0
+      '00010000'+ // rate=1.0
+      '0100'+ // volume=1.0
+      '0000 00000000 00000000'+ // reserved
+      '00010000 00000000 00000000 00000000 00010000 00000000 00000000 00000000 40000000'+ // matrix
+      '00000000 00000000 00000000 00000000 00000000 00000000'+ // pre_defined
+      '00000002'  // next_track_ID=2
+    ));
+
+    // moov
+    var moovBox=makeBox('moov', concatBytes([mvhdBox, trakBox]));
+
+    // Full init segment
+    var initSeg=concatBytes([ftyp, moovBox]);
+    B('T3-BUILT','initSeg size='+initSeg.length);
+
+    sb.addEventListener('updateend',function(){
+      B('T3-UPDATEEND','buffered.length='+sb.buffered.length);
+      if(sb.buffered.length>0){
+        B('T3-RANGE','start='+sb.buffered.start(0)+' end='+sb.buffered.end(0));
+      }
+      // Access video.buffered too — might trigger PlayStation buffered()
+      B('T3-VID-BUFFERED','length='+vid.buffered.length);
+
+      // Try endOfStream
+      try{
+        ms.endOfStream();
+        B('T3-EOS','ok');
+      }catch(e){B('T3-EOS-ERR',''+e)}
+    });
+
+    sb.addEventListener('error',function(e){
+      B('T3-SB-ERROR','error event');
+    });
+
+    sb.appendBuffer(initSeg.buffer);
+    B('T3-APPENDED','waiting for updateend');
+
+  }catch(e){B('T3-ERR',''+e)}
+}
+
+// Helpers
+function hexToBytes(hex){
+  hex=hex.replace(/\s/g,'');
+  var arr=new Uint8Array(hex.length/2);
+  for(var i=0;i<hex.length;i+=2) arr[i/2]=parseInt(hex.substr(i,2),16);
+  return arr;
+}
+function concatBytes(arrays){
+  var total=0;for(var i=0;i<arrays.length;i++) total+=arrays[i].length;
+  var r=new Uint8Array(total);var off=0;
+  for(var i=0;i<arrays.length;i++){r.set(arrays[i],off);off+=arrays[i].length}
+  return r;
+}
+function makeBox(type,data){
+  var size=8+data.length;
+  var box=new Uint8Array(size);
+  box[0]=(size>>24)&0xFF;box[1]=(size>>16)&0xFF;box[2]=(size>>8)&0xFF;box[3]=size&0xFF;
+  box[4]=type.charCodeAt(0);box[5]=type.charCodeAt(1);box[6]=type.charCodeAt(2);box[7]=type.charCodeAt(3);
+  box.set(data,8);
+  return box;
+}
+
+// === T4: RAB view into SourceBuffer.appendBuffer ===
+setTimeout(function(){
+  try{
+    B('T4-START','SourceBuffer RAB append');
+    if(!sb){B('T4-SKIP','no SourceBuffer');return}
+    if(sb.updating){B('T4-SKIP','still updating');return}
+
+    // Create RAB, append in-bounds
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var rv=new Uint8Array(rab,0,64);
+    for(var i=0;i<64;i++) rv[i]=0;
+
+    try{
+      sb.appendBuffer(rv);
+      B('T4-APPENDED-IN','accepted RAB view');
+    }catch(e){
+      B('T4-APPENDED-IN-ERR',''+e);
+    }
+  }catch(e){B('T4-ERR',''+e)}
+},15000);
+
+// === T5: WebSocket with RAB ===
+setTimeout(function(){
+  try{
+    B('T5-START','WebSocket availability');
+    B('T5-WS','typeof='+typeof WebSocket);
+    // Don't actually connect — just confirm it exists
+    B('T5-DONE','ok');
+  }catch(e){B('T5-ERR',''+e)}
+},18000);
+
+// === T6: video element error monitoring ===
+setTimeout(function(){
+  try{
+    B('T6-START','video state check');
+    if(vid){
+      B('T6-VID','readyState='+vid.readyState+' networkState='+vid.networkState+' error='+(vid.error?vid.error.code:'none'));
+      B('T6-BUFFERED','vid.buffered.length='+vid.buffered.length);
+      if(ms) B('T6-MS','readyState='+ms.readyState);
+      if(sb) B('T6-SB','updating='+sb.updating+' buffered.length='+sb.buffered.length);
+    }
+  }catch(e){B('T6-ERR',''+e)}
+},20000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},22000);
+</script></body></html>

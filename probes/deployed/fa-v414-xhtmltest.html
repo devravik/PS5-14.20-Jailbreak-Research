@@ -1,0 +1,184 @@
+<!doctype html><html><head><title>V414</title></head><body>
+<script>
+var BQ = 0;
+function B(t) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/beacon/V414-' + t + '?t=' + Date.now() + '&q=' + (BQ++), false);
+    x.send('');
+  } catch(e) {}
+}
+B('BOOT');
+
+// Test 1: Blob URL XHTML iframe
+B('T1-BLOB-XHTML');
+try {
+  var xhtml = '<?xml version="1.0"?>\n' +
+    '<html xmlns="http://www.w3.org/1999/xhtml">\n' +
+    '<head><title>blob</title></head>\n' +
+    '<body>\n' +
+    '<script><![CDATA[\n' +
+    'try {\n' +
+    '  var x = new XMLHttpRequest();\n' +
+    '  x.open("POST", "/beacon/V414-T1-BLOB-XHTML-JS-OK?t=" + Date.now(), false);\n' +
+    '  x.send("");\n' +
+    '} catch(e) {\n' +
+    '  new Image().src = "/beacon/V414-T1-BLOB-ERR?t=" + Date.now();\n' +
+    '}\n' +
+    ']]></' + 'script>\n' +
+    '</body></html>';
+  var blob = new Blob([xhtml], {type: 'application/xhtml+xml'});
+  var url = URL.createObjectURL(blob);
+  var f = document.createElement('iframe');
+  f.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  f.src = url;
+  f.onload = function() { B('T1-IFRAME-LOADED'); };
+  f.onerror = function() { B('T1-IFRAME-ERROR'); };
+  document.body.appendChild(f);
+  B('T1-IFRAME-CREATED');
+} catch(e) {
+  B('T1-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 2: Blob URL text/xml iframe
+B('T2-XML');
+try {
+  var xml = '<?xml version="1.0"?>\n' +
+    '<html xmlns="http://www.w3.org/1999/xhtml">\n' +
+    '<head><title>xml</title></head>\n' +
+    '<body>\n' +
+    '<script><![CDATA[\n' +
+    'try {\n' +
+    '  var x = new XMLHttpRequest();\n' +
+    '  x.open("POST", "/beacon/V414-T2-XML-JS-OK?t=" + Date.now(), false);\n' +
+    '  x.send("");\n' +
+    '} catch(e) {\n' +
+    '  new Image().src = "/beacon/V414-T2-XML-ERR?t=" + Date.now();\n' +
+    '}\n' +
+    ']]></' + 'script>\n' +
+    '</body></html>';
+  var blob2 = new Blob([xml], {type: 'text/xml'});
+  var url2 = URL.createObjectURL(blob2);
+  var f2 = document.createElement('iframe');
+  f2.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  f2.src = url2;
+  f2.onload = function() { B('T2-IFRAME-LOADED'); };
+  document.body.appendChild(f2);
+  B('T2-IFRAME-CREATED');
+} catch(e) {
+  B('T2-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 3: Server-hosted XHTML in iframe
+B('T3-SERVER-XHTML');
+try {
+  var f3 = document.createElement('iframe');
+  f3.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  f3.src = 'p413-xhtml-ce-direct.xhtml';
+  f3.onload = function() { B('T3-IFRAME-LOADED'); };
+  f3.onerror = function() { B('T3-IFRAME-ERROR'); };
+  document.body.appendChild(f3);
+  B('T3-IFRAME-CREATED');
+} catch(e) {
+  B('T3-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 4: DOMParser XHTML with window check
+B('T4-DOMPARSER');
+try {
+  var dp = new DOMParser();
+  var doc = dp.parseFromString(
+    '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><div id="t4">ok</div></body></html>',
+    'application/xhtml+xml'
+  );
+  var t4el = doc.getElementById('t4');
+  B('T4-PARSE-OK-' + (t4el ? t4el.textContent : 'MISSING'));
+  B('T4-HAS-WINDOW-' + (doc.defaultView ? 'Y' : 'N'));
+  B('T4-HAS-CE-' + (doc.defaultView && doc.defaultView.customElements ? 'Y' : 'N'));
+} catch(e) {
+  B('T4-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 5: XMLHttpRequest to fetch XHTML + check responseXML
+B('T5-XHR-XML');
+try {
+  var xr = new XMLHttpRequest();
+  xr.open('GET', 'p413-xhtml-ce-direct.xhtml', false);
+  xr.send();
+  B('T5-STATUS-' + xr.status);
+  B('T5-CONTENT-TYPE-' + (xr.getResponseHeader('Content-Type') || 'NONE').substring(0, 40));
+  if (xr.responseXML) {
+    B('T5-RESPONSEXML-OK');
+    var body = xr.responseXML.querySelector('body');
+    B('T5-BODY-' + (body ? 'Y' : 'N'));
+    B('T5-HAS-WINDOW-' + (xr.responseXML.defaultView ? 'Y' : 'N'));
+  } else {
+    B('T5-RESPONSEXML-NULL');
+  }
+} catch(e) {
+  B('T5-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 6: Create XHTML document via implementation and check CE support
+B('T6-CREATE-XHTML-DOC');
+try {
+  var xdoc = document.implementation.createDocument(
+    'http://www.w3.org/1999/xhtml', 'html', null);
+  B('T6-DOC-OK');
+  B('T6-HAS-WINDOW-' + (xdoc.defaultView ? 'Y' : 'N'));
+  B('T6-NODE-NAME-' + xdoc.documentElement.nodeName);
+} catch(e) {
+  B('T6-ERR-' + (e.message || '').substring(0, 60));
+}
+
+// Test 7: innerHTML with XHTML namespace custom element
+B('T7-INNERHTML-CE');
+try {
+  window.__t7count = 0;
+  class T7Elem extends HTMLElement {
+    constructor() {
+      super();
+      window.__t7count++;
+      B('T7-CTOR-' + window.__t7count);
+      try {
+        // Try to appendChild(this) to a different parent
+        var sink = document.getElementById('t7sink');
+        if (sink) {
+          sink.appendChild(this);
+          B('T7-REPARENT-OK-' + window.__t7count);
+        }
+      } catch(e) {
+        B('T7-REPARENT-ERR-' + (e.message || '').substring(0, 40));
+      }
+    }
+  }
+  customElements.define('t7-elem', T7Elem);
+  B('T7-DEFINED');
+
+  var t7sink = document.createElement('div');
+  t7sink.id = 't7sink';
+  document.body.appendChild(t7sink);
+
+  var t7container = document.createElement('div');
+  t7container.id = 't7container';
+  document.body.appendChild(t7container);
+
+  // innerHTML triggers HTML parser which supports custom elements
+  t7container.innerHTML = '<t7-elem id="t7a"></t7-elem><t7-elem id="t7b"></t7-elem>';
+  B('T7-INNERHTML-DONE');
+  B('T7-CTOR-TOTAL-' + window.__t7count);
+  B('T7-SINK-CHILDREN-' + t7sink.childNodes.length);
+  B('T7-CONTAINER-CHILDREN-' + t7container.childNodes.length);
+
+  // Check if reparenting worked
+  var t7a = document.getElementById('t7a');
+  if (t7a) {
+    B('T7-T7A-PARENT-' + (t7a.parentNode ? t7a.parentNode.id : 'NULL'));
+  }
+} catch(e) {
+  B('T7-ERR-' + (e.message || '').substring(0, 60));
+}
+
+B('DONE');
+</script>
+</body></html>

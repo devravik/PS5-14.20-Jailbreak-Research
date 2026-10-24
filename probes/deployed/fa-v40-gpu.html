@@ -1,0 +1,121 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v40-gpu — press-30: WebGL + WASM — ¿el GPU está expuesto? (inventario + driver + shader)</title></head>
+<body><pre id="out">FA-v40-gpu…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v40-gpu — press-30: ¿WebGL/WebGL2 + WASM expuestos en este webview?
+ * Si WebGL vive: getParameter (VENDOR/RENDERER/VERSION) + UNMASKED (driver
+ * EXACTO del GPU = mapa de CVEs por versión) + extensiones + shader compile.
+ * WASM: validate/compile mínimo + SIMD + Memory/Table. Todo 0-crash. */
+var RID="v40g"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V40-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v40-gpu; dr="+dr+"; rt="+rt+"; GL1="+(typeof WebGLRenderingContext)+"; GL2="+(typeof WebGL2RenderingContext)+"; WASM="+(typeof WebAssembly));
+
+/* S1 — WebGL contexto + identidad del GPU/driver */
+(function(){
+  var m="-",e1="";
+  try{
+    var c=document.createElement("canvas");
+    var gl=c.getContext("webgl2")||c.getContext("webgl")||c.getContext("experimental-webgl");
+    if(!gl){ bk("S1","NO-CONTEXT (webview sin GL)"); return; }
+    var ver=gl.getParameter(gl.VERSION);
+    var ven=gl.getParameter(gl.VENDOR);
+    var ren=gl.getParameter(gl.RENDERER);
+    var slv=gl.getParameter(gl.SHADING_LANGUAGE_VERSION);
+    m="CTX-OK;ver="+ver+";slv="+slv+";vendor="+ven+";renderer="+ren;
+    /* el driver real: UNMASKED */
+    try{
+      var dbg=gl.getExtension("WEBGL_debug_renderer_info");
+      if(dbg){
+        var ur=gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+        var uv=gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+        m+=";UNMASKED_R="+ur+";UNMASKED_V="+uv;
+      } else { m+=";no-dbg-ext"; }
+    }catch(e){ m+=";dbg-E"; }
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S1",m+";e="+e1);
+})();
+
+/* S2 — extensiones GL (el mapa de capacidades del driver) */
+(function(){
+  try{
+    var c=document.createElement("canvas");
+    var gl=c.getContext("webgl2")||c.getContext("webgl");
+    if(!gl){ bk("S2","SKIP"); return; }
+    var ex=gl.getSupportedExtensions()||[];
+    var params=[];
+    try{ params.push("maxTex="+gl.getParameter(gl.MAX_TEXTURE_SIZE)); }catch(e){}
+    try{ params.push("maxRB="+gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)); }catch(e){}
+    try{ params.push("maxVS="+gl.getParameter(gl.MAX_VERTEX_ATTRIBS)); }catch(e){}
+    bk("S2","nExt="+ex.length+";"+params.join(";")+";ext="+ex.slice(0,14).join(",").slice(0,300));
+  }catch(e){ bk("S2","E:"+String((e&&e.message)||e).slice(0,50)); }
+})();
+
+/* S3 — shader compile mínimo (¿el compilador de shaders corre?) */
+(function(){
+  try{
+    var c=document.createElement("canvas");
+    var gl=c.getContext("webgl2")||c.getContext("webgl");
+    if(!gl){ bk("S3","SKIP"); return; }
+    var vs=gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs,"attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}");
+    gl.compileShader(vs);
+    var okV=gl.getShaderParameter(vs,gl.COMPILE_STATUS);
+    var fs=gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs,"precision mediump float;void main(){gl_FragColor=vec4(1.,0.5,0.,1.);}");
+    gl.compileShader(fs);
+    var okF=gl.getShaderParameter(fs,gl.COMPILE_STATUS);
+    /* draw call real + readback */
+    var prog=gl.createProgram(); gl.attachShader(prog,vs); gl.attachShader(prog,fs); gl.linkProgram(prog);
+    var linkOk=gl.getProgramParameter(prog,gl.LINK_STATUS);
+    var px="-";
+    if(linkOk){
+      gl.useProgram(prog);
+      var buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+      gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0, 1,0, 0,1]),gl.STATIC_DRAW);
+      var loc=gl.getAttribLocation(prog,"p"); gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+      gl.viewport(0,0,8,8); gl.drawArrays(gl.TRIANGLES,0,3);
+      var px4=new Uint8Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px4);
+      px=Array.from(px4).join(",");
+    }
+    bk("S3","vs="+okV+";fs="+okF+";link="+linkOk+";pixel=["+px+"] (255,128,0 ≈ EL GPU RENDERIZÓ)");
+  }catch(e){ bk("S3","E:"+String((e&&e.message)||e).slice(0,50)); }
+})();
+
+/* S4 — WASM: validate/compile/instantiate mínimo + SIMD + Memory */
+(function(){
+  var m="-",e1="";
+  try{
+    if(typeof WebAssembly!=="object"){ bk("S4","NO-WASM"); return; }
+    /* módulo mínimo válido: (module) vacío */
+    var empty=new Uint8Array([0,97,115,109,1,0,0,0]);
+    var v0=WebAssembly.validate(empty);
+    /* módulo con una función que suma */
+    var sum=new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,115,117,109,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+    var v1=WebAssembly.validate(sum);
+    WebAssembly.instantiate(sum).then(function(r){
+      var val="-";
+      try{ val=String(r.instance.exports.sum(40,2)); }catch(e){}
+      bk("S4R","instantiate=ok;sum(40,2)="+val+" (42 = WASM EJECUTA)");
+    },function(e){ bk("S4R","inst-E:"+String((e&&e.message)||e).slice(0,40)); });
+    var mem="-", simd="-";
+    try{ var mm=new WebAssembly.Memory({initial:1}); mem="ok:"+mm.buffer.byteLength; }catch(e){ mem="E"; }
+    try{ simd=String(WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,6,1,4,0,65,0,11]))); }catch(e){ simd="E"; }
+    m="validateEmpty="+v0+";validateSum="+v1+";mem="+mem+";simd="+simd;
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4",m+";e="+e1);
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v40-gpu complete"); },2500);
+})();
+</script></body></html>

@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>FA-v15-SW</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v15-SW…</pre><script>(function(){"use strict";
+var RID="sw"+Date.now().toString(36).slice(-14), OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function say(s){try{document.getElementById("out").appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function msg(f){try{f();return "ok";}catch(e){return String((e&&e.message)||e).slice(0,30);}}
+function bk(s,b){try{fetch("/beacon/V15-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,240)})}).catch(function(){});}catch(e){}}
+function mk(){return new ReadableStream({}).tee();}
+function poi(a){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=a.length)return{done:true};var v=a[i];i++;return{value:v,done:false};}};};}
+var HB=setInterval(function(){bk("HB","hb");},2000); bk("L","v15-sw;RSCD="+(typeof ReadableStreamDefaultController));
+var CAP=null,PUB=null,N=0;
+Array.prototype[Symbol.iterator]=function(){var t=this;N++;
+  try{ if(CAP===null&&t&&t.length>=2&&typeof t[0]==="object") CAP=[t[0],t[1]]; }catch(e){}
+  var i=0;return{next:function(){if(i>=2)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+try{ PUB=mk(); }catch(e){} rst(); bk("S0","N="+N+";cap="+!!CAP+";pub="+!!PUB);
+function probe(tag,obj){var w=null,rd="-",m="-",fz="-";
+  try{ poi([obj,obj]); w=mk(); }catch(e){} rst();
+  if(w){ try{ var r=new ReadableStreamDefaultReader(w[0]); rd="ctor"; try{r.releaseLock();}catch(e2){} }catch(e){ rd="E"; m=String((e&&e.message)||e).slice(0,32); } }
+  try{ fz=String(Object.isFrozen(obj)); }catch(e){}
+  return tag+"{rd="+rd+";fz="+fz+";m="+m+"}"; }
+var R1=probe("FZ",Object.freeze({ourTag:"fz"})), R2=probe("PL",{ourTag:"pl"}), R3=probe("TA",new Uint8Array(8)), R4=probe("BX",new Boolean(true));
+var c0="-",lk="-",ctl="noCAP";
+if(CAP&&PUB){ try{ PUB[1].cancel(); c0="t"; }catch(e){ c0="E:"+String((e&&e.message)||e).slice(0,26); }
+  try{ lk=String(PUB[1].locked); }catch(e){ lk="E"; } ctl=msg(function(){ new ReadableStreamDefaultController(CAP[1],{},undefined,1,0); }); }
+bk("S1","c0="+c0+";lk="+lk+";ctl="+ctl+";"+R1+";"+R2+";"+R3+";"+R4); say("S1 "+c0+" "+ctl+" "+R1);
+clearInterval(HB); bk("Z","FA-v15-SW complete");
+})();</script></body></html>

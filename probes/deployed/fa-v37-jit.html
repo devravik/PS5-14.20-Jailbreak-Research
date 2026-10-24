@@ -1,0 +1,104 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v37-jit — press-27: probes JIT del G53 (A catch-recovery / B pend-exit / C builtin-delivery)</title></head>
+<body><pre id="out">FA-v37-jit…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v37-jit — press-27 (probes exactos de g53-jit-final.md).
+ * A: ¿el catch de un frame DFG recibe locals/identidad correctos?
+ * B: ¿un OSR-exit de especulación entrega una excepción TRAGADA (streams)
+ *    en el sitio equivocado? (wrong-site)
+ * C: ¿el swallow-path difiere hot-vs-cold? (el lado JIT del K1)
+ * 0-crash por construcción (todo try-wrapped; sin kill-shapes). */
+var RID="v37j"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V37-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+var OE=[];
+window.onerror=function(m){ try{ OE.push(String(m).slice(0,40)); bk("ONERR",String(m).slice(0,80)); }catch(e){} };
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v37-jit; dr="+dr+"; rt="+rt);
+
+/* ===== PROBE-A (exacto del final) ===== */
+function mkA(THROW){
+  var out={tag:"none"};
+  function thrower(f){ if(f) throw new Error("A-MARK"); return 1; }
+  var pre=0x1234, d=1.5, s="pre", later=null, i=0;
+  try{
+    for(i=0;i<20000;i++){ pre=pre+1; d=d+0.5; later="L"+i;
+      if(THROW && i===19998) thrower(true);
+      later="after"; }
+  }catch(e){
+    out={ i:i, pre:pre, d:d, s:s, later:later,
+          msg:(e&&e.message)||String(e), ok:(e instanceof Error) };
+  }
+  return out;
+}
+try{
+  for(var w=0;w<3;w++) mkA(false)();
+  var A_hot=mkA(true);
+  var A_cold=mkA(true);
+  var same=JSON.stringify(A_hot)===JSON.stringify(A_cold);
+  bk("SA","same="+same+";hot="+JSON.stringify(A_hot).slice(0,180)+(same?"":";cold="+JSON.stringify(A_cold).slice(0,140)));
+}catch(e){ bk("SA","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+/* ===== PROBE-A1 (hoist: valueOf loop-invariant que tira dentro del try) ===== */
+try{
+  var innerHit=0, outerHit=0, innerMsg="-";
+  function mkA1(){
+    var a={valueOf:function(){ throw new Error("A1"); }};
+    function inner(){ var log=""; try{ var c=0; for(var q=0;q<20000;q++){ c=a+q; } }catch(e){ log="inner:"+String((e&&e.message)||e).slice(0,12); } return log; }
+    var r="";
+    try{ r=inner(); }catch(e){ r="OUTER:"+String((e&&e.message)||e).slice(0,12); }
+    return r;
+  }
+  var a1r=mkA1();
+  bk("SA1","res="+a1r+" (inner: = handler correcto · OUTER: = bypass del try por hoisting)");
+}catch(e){ bk("SA1","E:"+String((e&&e.message)||e).slice(0,60)); }
+
+/* ===== PROBE-B (pend-exit) en tarea separada (por si el armado mata la tarea) ===== */
+setTimeout(function(){
+  try{
+    function f(x){ return x+1; }
+    for(var k=0;k<20000;k++) f(k);
+    /* control SIN armar primero */
+    var c1=null;
+    try{ c1="resumed:"+f(1.5); }catch(e){ c1="delivered:"+String((e&&e.message)||e).slice(0,20); }
+    /* ahora ARMADO con el swallow de pipeThrough */
+    var b0=null, armed=false, b1=null, b2=null;
+    try{ new ReadableStream({}).pipeThrough(new TransformStream(), {get signal(){ throw new Error("B-MARK"); }});
+         armed=true; }
+    catch(e0){ b0="at-arm:"+String((e0&&e0.message)||e0).slice(0,20); }
+    try{ var r2=f(1.5);
+         b1="resumed:"+r2;
+         b2=(function(){ try{ null.x; }catch(e){ return "next:"+String((e&&e.message)||e).slice(0,20); } })();
+    }catch(e1){ b1="exit-delivered:"+String((e1&&e1.message)||e1).slice(0,24); }
+    bk("SB","ctrl="+c1+";b0="+b0+";armed="+armed+";b1="+b1+";b2="+b2+" (b1=exit-delivered:B-MARK = wrong-site · b2=B-MARK = detona un check después)");
+  }catch(e){ bk("SB","E:"+String((e&&e.message)||e).slice(0,60)); }
+},200);
+
+/* ===== PROBE-C (builtin-delivery hot vs cold) ===== */
+setTimeout(function(){
+  try{
+    function mkC(){ var got=null, site=null, iter=-1;
+      return function hotC(i){ try{
+          new ReadableStream({}).pipeThrough(new TransformStream(), {get signal(){ throw new Error("C-MARK"); }});
+          site=site||"post-call"; return i+1;
+        }catch(e){ got=String((e&&e.message)||e).slice(0,20); site="inner@"+i; return -1; }
+        finally{ iter=i; } };
+    }
+    var Ch=mkC(), rh=0, escH=0;
+    for(var i=0;i<20000;i++){ var rr=Ch(i); if(rr===-1) escH++; }
+    var Cc=mkC(); var rc=Cc(0);
+    bk("SC","hot:esc="+escH+"/20000;cold:esc="+(rc===-1?1:0)+";onerr="+OE.length+" (delta hot-vs-cold = el lado JIT del swallow; onerr>0 = escapa a onerror como en press-14)");
+  }catch(e){ bk("SC","E:"+String((e&&e.message)||e).slice(0,60)); }
+},500);
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v37-jit complete;onerrTotal="+OE.length); },2500);
+})();
+</script></body></html>

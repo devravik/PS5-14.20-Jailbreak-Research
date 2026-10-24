@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>v91-fontuaf</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+</head><body>
+<script src="p229-fontloader-reentrant-v2.js?v=229d"></script>
+<script src="p265-fontloader-reentry.js?v=265b"></script>
+<script>
+// After UAF probes complete (~25s), redirect to MetadataTable probe
+// This prevents the MetadataTable crash from blocking our UAF tests
+setTimeout(function() {
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/beacon/V91-REDIRECT?t=' + Date.now(), false);
+    x.send();
+  } catch(e) {}
+  // Redirect to the other agent's page for their probes
+  location.href = 'fa-v62-p150f.html?t=' + Date.now();
+}, 30000);
+</script>
+</body></html>

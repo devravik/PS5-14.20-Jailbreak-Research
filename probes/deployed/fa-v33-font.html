@@ -1,0 +1,82 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v33-font — press-33: las 7 fuentes malformadas (secuencial, letal última)</title></head>
+<body><pre id="out">FA-v33-font…<br><span id="rx" style="font-family:serif">A</span></pre>
+<script>
+(function(){
+"use strict";
+/* FA-v33-font — press-33: parser de fuentes comiendo nuestros bytes.
+ * Cadena SECUENCIAL: enter→GET→load→res, una por una; el que tenga
+ * enter SIN res en el wire = la fila asesina. Útil = id de variante.
+ * f0=válida (baseline) · f1 offset · f2 itl · f3 numGlyphs · f4 length
+ * · f5 numTables-FFFF · f6 woff2-lie · f7 trunc-dir (LETAL-LAST) */
+var RID="v33f"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("V33-HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("V33-L","v33-font; dr="+dr+"; rt="+rt+"; FF="+(typeof FontFace));
+
+function Trnd(){ return Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36); }
+
+function loadOne(id, src){
+  return new Promise(function(res){
+    bk("V33-E"+id, "enter "+id);
+    var ff;
+    try{
+      ff = (src.ab)
+        ? new FontFace("faf-"+id, src.ab)
+        : new FontFace("faf-"+id, "url(/document/al/ps5/"+src.f+"?t="+Trnd()+")");
+    }catch(e){ bk("V33-R"+id, "constructor-E:"+String((e&&e.message)||e).slice(0,60)); res(); return; }
+    document.fonts.add(ff);
+    var half=setTimeout(function(){
+      bk("V33-R"+id, id+" HALF-TIMEOUT (load colgado 6s)");
+      res();
+    },6000);
+    ff.load().then(function(f){
+      clearTimeout(half);
+      var st="?"; try{ st=f.status; }catch(e){}
+      var w="-";
+      try{ /* render REAL solo si cargó: medir con la fuente */
+        document.getElementById("rx").style.fontFamily="faf-"+id+", serif";
+        w=document.getElementById("rx").getBoundingClientRect().width;
+      }catch(e){ w="E"; }
+      bk("V33-R"+id, id+" OK st="+st+";ancho-render="+w);
+      res();
+    }, function(err){
+      clearTimeout(half);
+      bk("V33-R"+id, id+" rechaza: "+String((err&&err.name)+" "+(err&&err.message)||err).slice(0,70));
+      res();
+    });
+  });
+}
+
+var p=Promise.resolve();
+[
+  ["f0",  {f:"f0.ttf"}],
+  ["f1",  {f:"f1.ttf"}],
+  ["f2",  {f:"f2.ttf"}],
+  ["f3",  {f:"f3.ttf"}],
+  ["f4",  {f:"f4.ttf"}],
+  ["f5",  {f:"f5.ttf"}],
+  ["f6",  {f:"f6.woff2"}]
+].forEach(function(row){
+  p=p.then(function(){ return loadOne(row[0], row[1]); });
+});
+/* ArrayBuffer-source (una fila comparativa) */
+p=p.then(function(){ return loadOne("ab1", {ab:(function(){
+  var b=new ArrayBuffer(740); new Uint8Array(b).set(new Uint8Array(64));
+  return b;})()}); });
+/* LETAL-LAST */
+p=p.then(function(){ return loadOne("f7", {f:"f7.ttf"}); });
+p.then(function(){
+  clearInterval(HB);
+  bk("V33-Z","FA-v33-font complete");
+});
+setTimeout(function(){ clearInterval(HB); bk("V33-Z2","global-timeout (f7 colgó 30s?)"); },30000);
+})();
+</script></body></html>

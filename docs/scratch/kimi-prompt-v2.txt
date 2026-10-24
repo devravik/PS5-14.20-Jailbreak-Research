@@ -1,0 +1,40 @@
+You are a memory safety compliance auditor for embedded WebKit. Analyze these fuzzing results from Safari 17.2.x (AppleWebKit/605.1.15) in a constrained environment (no WASM, no SAB, no WebGL, no ServiceWorker, no IndexedDB).
+
+CONFIRMED MITIGATIONS:
+- Gigacage: airtight from JS level, all escape attempts exhausted
+- DFG JIT: valueOf deoptimization, structure transitions, bounds checks, element type speculation all work correctly
+- FTL JIT: 2M+ iterations, type changes, detached TypedArray reads all handled correctly (returns NaN/undefined)
+- Canvas 2D: zero-initialized pixels, putImageData clips correctly, toBlob uses synchronous snapshot
+- Image parsers: PNG rejects invalid CRC, GIF clips OOB, rejects huge dimensions
+- TextDecoder streaming: robust, no overflow from partials, 16MB OK
+- YARR regex JIT: 500 capture groups handled, catastrophic backtracking mitigated (34ms), lookbehind+backreference correct
+- performance.now: completely degraded (no Spectre v1)
+- structuredClone: copies inline during property walk BEFORE getters fire (stale snapshot, NOT UAF)
+- SVG filters via Image: feTurbulence(oct=30), feDisplacementMap(scale=9999), extreme paths, blur chains ALL work fine individually at 200x200
+
+CRITICAL CRASH FINDING:
+p90 test run: ResizeObserver infinite loop (21+ callbacks) + Custom Element upgrade during parse (removed siblings from innerHTML) + MutationObserver + Range manipulation → SVG filter rendering via Image = WEBVIEW CRASH
+
+p93 isolation results:
+- E1: ResizeObserver infinite loop (21 callbacks) THEN disconnect THEN SVG via Image → SURVIVED (loaded, drawn, read OK)
+- E2: Custom Element upgrade + ResizeObserver + SVG → SURVIVED (ceChildren=3, roCount=16, svg OK)
+- E3: MutationObserver + Range manipulation + SVG → E3-START beacon fired, then SILENCE. No result beacon. No more heartbeats. WEBVIEW DEAD.
+- E4-E6: never ran (E3 killed the process)
+
+CONCLUSION: The crash is specifically in MutationObserver + Range manipulation, NOT ResizeObserver or Custom Elements. The MutObs callback creates new mutations during the callback (infinite microtask cascade), and Range.extractContents/surroundContents operates on the tree while MutObs is mutating it.
+
+p94 is now testing:
+A1: Bounded MutObs cascade alone
+A2: Range manipulation alone (no MutObs)
+A3: Bounded MutObs + Range
+A4: UNBOUNDED MutObs + Range (the crash test)
+A5: Unbounded MutObs without Range
+
+AVAILABLE APIs: Canvas 2D, ResizeObserver, MutationObserver, Custom Elements, ShadowDOM, SVG, MessageChannel, WeakRef, FinalizationRegistry, Intl.Segmenter, Resizable ArrayBuffer (RAB).
+
+QUESTIONS:
+1. The MutObs+Range crash: is this more likely a use-after-free in the DOM tree (Range holds stale node references while MutObs modifies the tree), or a re-entrant layout corruption? What WebKit internal structures (RenderObject tree, ContainerNode children list) would be corrupted?
+2. If the crash IS a UAF in Range, what specific operations (extractContents, surroundContents, deleteContents, cloneContents) are most likely to dereference freed nodes when MutObs is concurrently modifying the tree?
+3. For exploitability: if we get a dangling pointer from Range operating on a MutObs-modified tree, how do we control the freed memory's contents? Can we use the MutObs callback itself to allocate controlled data into the freed slot?
+4. CVE-2024-23222 was a type confusion fixed in Safari 17.3. Our engine is 17.2.x. Are there specific DFG optimization patterns we haven't tested that could trigger it? (We tested valueOf, structure transitions, bounds checks, element morphing, detached arrays.)
+5. Any other pre-17.3 bugs in this WebKit version that could be triggered with the APIs we have available?

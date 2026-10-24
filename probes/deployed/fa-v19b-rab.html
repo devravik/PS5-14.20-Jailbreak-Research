@@ -1,0 +1,103 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v19b-rab — press-12: RAB control de zeroing + probes corregidos (V19-REVIEW)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v19b-rab…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v19b-rab — press-12 (fixes del V19-REVIEW dsh v4-pro sobre mi fa-v19-rab).
+ * S6-CONTROL: ¿el engine PONE A CERO al encoger? (sin esto, los leaked=0 del
+ *   press-10 son ambiguos). prefill v[i]=i → resize(8) → resize(64) →
+ *   contar v[j]===j en 8..63: 56/56 = NO-zeroing (señales raw válidas);
+ *   0/56 = zeroing (press-10 ambiguo).
+ * S7: copyWithin CORREGIDO — to=1, from via valueOf-que-encoge, patrón v[i]=i:
+ *   revalidado → v[1..7]=0..6, bytes 8..63 intactos; count-stale → shift llega a 63.
+ * S4b: sort con comparador-que-encoge + ord8 (hex v[0..7] — delata in-place).
+ * REGLAS DS: RAB <4096B, NUNCA resize(0), maxByteLength=64 (reserva mapeada).
+ * 0-crash: try-catch total, HB 2s, beacons V19B-*. */
+var RID="v19b"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V19B-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v19b-rab; dr="+dr+"; rt="+rt);
+
+/* S6 — CONTROL DE ZEROING (la llave que valida o invalida el press-10) */
+var zeroing="?";
+(function(){
+  var m="E",e1="",kept="-";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=i;
+    rab.resize(8);
+    rab.resize(64);
+    var w=new Uint8Array(rab), k=0;
+    for(var j=8;j<64;j++){ if(w[j]===j) k++; }
+    kept=k+"/56";
+    zeroing=(k===56)?"NO-ZEROING":(k===0?"ZEROING":"PARCIAL:"+k);
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S6","ctl="+m+";e="+e1+";kept="+kept+" → "+zeroing);
+})();
+
+/* S3b — fill(valueOf-encoge) repetido (interpretable solo si S6=NO-ZEROING) */
+(function(){
+  var m="E",e1="",leaked="-",nowLen="-",fired=0;
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=0;
+    var fv={ valueOf:function(){ fired++; try{ rab.resize(8); }catch(e){} return 0x41; } };
+    v.fill(fv);
+    nowLen=String(v.length);
+    rab.resize(64);
+    var w=new Uint8Array(rab), lk=0;
+    for(var j=8;j<64;j++){ if(w[j]===0x41) lk++; }
+    leaked=String(lk);
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S3B","fill="+m+";e="+e1+";nowLen="+nowLen+";fired="+fired+";leaked8_63="+leaked+(zeroing==="NO-ZEROING"?(leaked!=="0"?" ★BUG":" spec-ok"):" (ambiguo si zeroing)"));
+})();
+
+/* S4b — sort(comparador-encoge) + ord8 (hex de v[0..7] tras re-crecer) */
+(function(){
+  var m="E",e1="",nonZero="-",fired=0,ord8="";
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=(i*7)%64;
+    v.sort(function(a,b){ fired++; if(fired===1){ try{ rab.resize(8); }catch(e){} } return a-b; });
+    rab.resize(64);
+    var w=new Uint8Array(rab), nz=0;
+    for(var j=8;j<64;j++){ if(w[j]!==0) nz++; }
+    for(var j2=0;j2<8;j2++){ ord8+=(w[j2]<16?"0":"")+w[j2].toString(16); }
+    nonZero=String(nz);
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S4B","sort="+m+";e="+e1+";fired="+fired+";nonZero8_63="+nonZero+";ord8="+ord8);
+})();
+
+/* S7 — copyWithin CORREGIDO: to=1, from=valueOf-que-encoge, patrón v[i]=i */
+(function(){
+  var m="E",e1="",shifted="-",fired=0;
+  try{
+    var rab=new ArrayBuffer(64,{maxByteLength:64});
+    var v=new Uint8Array(rab);
+    for(var i=0;i<64;i++) v[i]=i;
+    var src={ valueOf:function(){ fired++; try{ rab.resize(8); }catch(e){} return 0; } };
+    v.copyWithin(1, src);   /* revalidado: copia 7 elems (v[1..7]=0..6); stale: shift hasta 63 */
+    rab.resize(64);
+    var w=new Uint8Array(rab), sh=0;
+    for(var j=8;j<64;j++){ if(w[j]===(j-1)) sh++; }  /* patrón shift = count stale */
+    shifted=String(sh)+"/56";
+    m="ok";
+  }catch(e){ e1=String((e&&e.message)||e).slice(0,50); }
+  bk("S7","cw="+m+";e="+e1+";fired="+fired+";shifted8_63="+shifted+(zeroing==="NO-ZEROING"?(shifted!=="0/56"?" spec-ok":" ★COUNT-STALE"):" (ambiguo si zeroing)"));
+})();
+
+setTimeout(function(){ clearInterval(HB); bk("Z","FA-v19b-rab complete; DR_OK="+(rt==="function")+(rt!=="function"?" DRGATE":"")); },1600);
+})();
+</script></body></html>

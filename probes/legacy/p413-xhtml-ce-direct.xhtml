@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>V413</title></head>
+<body>
+<script><![CDATA[
+var BQ=0;
+function B(tag){try{var x=new XMLHttpRequest();x.open('POST','/beacon/V413-'+tag+'?t='+Date.now()+'&q='+(BQ++),false);x.send('');}catch(e){}}
+
+B('BOOT');
+
+// T1: basic JS execution in XHTML
+B('JS-OK');
+
+// T2: custom elements API available
+if(typeof customElements==='undefined'){B('NO-CE-API');B('COMPLETE');return;}
+B('CE-API-OK');
+
+// T3: define a CE and check if it upgrades inline elements
+window.ctorCount=0;
+window.ctorTags=[];
+class TestXml extends HTMLElement {
+  constructor(){
+    super();
+    window.ctorCount++;
+    window.ctorTags.push(this.localName);
+    B('CTOR-FIRE-'+window.ctorCount);
+  }
+}
+customElements.define('test-xml',TestXml);
+B('DEFINED');
+
+// T4: now create one via JS to confirm CE works at all
+var jsEl=document.createElement('test-xml');
+B('JS-CREATE-CTOR-'+window.ctorCount);
+
+// T5: check if the inline <test-xml> below was upgraded
+// (it appears AFTER this script in the document)
+]]></script>
+
+<div id="container">
+<test-xml id="t1">hello</test-xml>
+<test-xml id="t2">world</test-xml>
+</div>
+
+<script><![CDATA[
+// T5: check parser-created elements
+var t1=document.getElementById('t1');
+var t2=document.getElementById('t2');
+B('T1-EXISTS-'+(t1?'Y':'N'));
+B('T2-EXISTS-'+(t2?'Y':'N'));
+B('TOTAL-CTORS-'+window.ctorCount);
+
+if(t1){
+  B('T1-TAG-'+t1.tagName);
+  B('T1-IS-HTMLELEMENT-'+(t1 instanceof HTMLElement));
+  // Check if it was upgraded (has our class)
+  B('T1-UPGRADED-'+(t1.constructor===TestXml));
+}
+
+if(window.ctorCount>=3){
+  B('XML-PARSER-CE-CONFIRMED');
+}else if(window.ctorCount===1){
+  B('ONLY-JS-CREATE-WORKS');
+}else{
+  B('CTOR-COUNT-UNEXPECTED-'+window.ctorCount);
+}
+
+B('COMPLETE');
+]]></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>VSHELL — remote JS terminal (fail-closed)</title></head>
+<body><pre id="out">VSHELL cargando…</pre>
+<script>
+(function(){
+"use strict";
+var RID = "vsh" + Date.now().toString(36).slice(-14);
+var out = document.getElementById("out");
+function say(s){ try{ out.appendChild(document.createTextNode("\n"+s)); }catch(e){} }
+function bk(st, body){
+  try{ fetch("/beacon/VS-"+st, { method:"POST", cache:"no-store",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({r:RID, b:String(body).slice(0,2400)}) }).catch(function(){}); }catch(e){}
+}
+var seen = "";
+try{ seen = sessionStorage.getItem("vshell-seen") || ""; }catch(e){}
+bk("L","vshell-rid="+RID+"; seen-previous="+(seen?"yes":"no"));
+say("VSHELL ready rid="+RID);
+var halted = false;
+function tick(){
+  if (halted) return;
+  try{
+    fetch("/cmd/vshell-cmd.txt?t="+Date.now(), { cache:"no-store" }).then(function(resp){
+      return resp.text();
+    }).then(function(txt){
+      if (halted) return;
+      txt = String(txt||"").trim();
+      if (!txt){ setTimeout(tick, 1500); return; }
+      var job;
+      try{ job = JSON.parse(txt); }catch(e){ setTimeout(tick, 1500); return; }
+      if (job && job.id && job.id !== sessionStorage.getItem("vshell-seen")){
+        try{ sessionStorage.setItem("vshell-seen", job.id); }catch(e){}
+        if (job.halt){ bk("HALT","halt-ack"); say("halt"); halted = true; return; }
+        var result, etype = "OK";
+        try{ result = String(eval(job.code)); }catch(e){ result = String((e&&e.message)||e); etype = "E"; }
+        bk(etype, result.slice(0,2300));
+        say(etype +": "+ result.slice(0,150));
+      }
+      setTimeout(tick, 1100);
+    }).catch(function(){ setTimeout(tick, 2000); });
+  }catch(e){ setTimeout(tick, 2000); }
+}
+setTimeout(tick, 800);
+try{ setInterval(function(){ bk("HB","hb"); }, 3000); }catch(e){}
+})();
+</script></body></html>

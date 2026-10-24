@@ -1,0 +1,66 @@
+<!doctype html><html><head><title>V412</title></head><body>
+<script>
+var qc=0;
+function B(m){new Image().src='/beacon/V412-'+encodeURIComponent(m)+'?t='+Date.now()+'&q='+(qc++);}
+B('INIT');
+</script>
+<p>V412 XHTML iframe test</p>
+
+<!-- Test 1: Load XHTML in iframe to see if XMLDocumentParser processes it -->
+<iframe id="xf" src="p411-xhtml-test.xhtml" width="1" height="1" style="display:none"></iframe>
+
+<!-- Test 2: Also try DOMParser with XHTML custom element -->
+<script>
+setTimeout(function(){
+  // Check iframe loaded
+  try {
+    var ifr = document.getElementById('xf');
+    B('IFRAME-STATE-' + (ifr.contentDocument ? 'HAS-DOC' : 'NO-DOC'));
+    if (ifr.contentDocument) {
+      B('IFRAME-TITLE-' + (ifr.contentDocument.title || 'none'));
+    }
+  } catch(e) {
+    B('IFRAME-ERR-' + (e.message||'').substring(0,60));
+  }
+
+  // Test DOMParser with XHTML
+  try {
+    var dp = new DOMParser();
+    var xdoc = dp.parseFromString(
+      '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><div id="t">OK</div></body></html>',
+      'application/xhtml+xml'
+    );
+    B('DOMPARSER-' + (xdoc ? 'OK' : 'NULL'));
+    if (xdoc) {
+      var t = xdoc.getElementById('t');
+      B('DOMPARSER-EL-' + (t ? t.textContent : 'MISSING'));
+    }
+  } catch(e) {
+    B('DOMPARSER-ERR-' + (e.message||'').substring(0,60));
+  }
+
+  // Test XMLHttpRequest with XHTML document response
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.responseType = 'document';
+    xhr.open('GET', 'p411-xhtml-test.xhtml', true);
+    xhr.onload = function(){
+      B('XHR-STATUS-' + xhr.status);
+      if (xhr.responseXML) {
+        B('XHR-DOC-OK');
+        B('XHR-TITLE-' + (xhr.responseXML.title || 'none'));
+      } else {
+        B('XHR-NO-DOC');
+      }
+    };
+    xhr.onerror = function(){ B('XHR-NETWORK-ERR'); };
+    xhr.send();
+    B('XHR-SENT');
+  } catch(e) {
+    B('XHR-ERR-' + (e.message||'').substring(0,60));
+  }
+
+  B('TESTS-LAUNCHED');
+}, 1000);
+</script>
+</body></html>

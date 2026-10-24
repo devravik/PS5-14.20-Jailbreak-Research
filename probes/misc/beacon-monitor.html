@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PS5 Ops</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#1a1b26;color:#a9b1d6;
+  font:13px/1.6 'JetBrains Mono','Menlo',monospace;
+  padding:20px 20px 40px;max-width:1100px;margin:0 auto;
+}
+::selection{background:#33467c;color:#c0caf5}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#1a1b26}
+::-webkit-scrollbar-thumb{background:#3b4261;border-radius:3px}
+
+/* HEADER */
+.hdr{display:flex;align-items:baseline;gap:12px;margin-bottom:4px;flex-wrap:wrap}
+h1{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;
+  color:#9ece6a;letter-spacing:0.02em;text-shadow:0 0 20px rgba(158,206,106,0.3)}
+.hdr-tag{font-size:10px;color:#565f89;border:1px solid #3b4261;padding:1px 8px;border-radius:3px;letter-spacing:0.08em}
+.sub{color:#565f89;font-size:11px;margin-bottom:16px}
+
+/* LIVE STATUS BAR */
+#status{
+  padding:10px 14px;margin-bottom:12px;
+  background:linear-gradient(135deg,#1e2030,#24283b);
+  border:1px solid #3b4261;border-radius:6px;
+  font-size:13px;font-weight:500;
+  display:flex;align-items:center;gap:10px;
+}
+#status .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;
+  animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.dot-g{background:#9ece6a;box-shadow:0 0 8px #9ece6a}
+.dot-y{background:#e0af68;box-shadow:0 0 8px #e0af68}
+.dot-r{background:#f7768e;box-shadow:0 0 8px #f7768e}
+
+/* LIVE BEACONS */
+#live-beacons{
+  max-height:180px;overflow-y:auto;
+  background:#16161e;border:1px solid #292e42;border-radius:6px;
+  padding:8px 12px;margin-bottom:16px;font-size:11px;
+}
+.bk{padding:2px 0;border-bottom:1px solid #1e2030;display:flex;gap:8px;align-items:baseline}
+.bk:last-child{border-bottom:none}
+.bk-t{color:#3b4261;flex-shrink:0;width:52px}
+.bk-tag{font-weight:600;flex-shrink:0;width:120px}
+.bk-d{color:#565f89;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.new .bk-tag,.new .bk-d{color:#c0caf5}
+.tag-boot{color:#7aa2f7} .tag-uaf{color:#bb9af7} .tag-spray{color:#ff9e64}
+.tag-read{color:#e0af68} .tag-hit{color:#9ece6a} .tag-crash{color:#f7768e}
+.tag-done{color:#9ece6a}
+
+/* TABS */
+.tabs{display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap;border-bottom:2px solid #292e42}
+.tab{
+  padding:6px 16px;cursor:pointer;
+  font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:600;
+  color:#565f89;letter-spacing:0.04em;
+  border-radius:6px 6px 0 0;
+  transition:all 0.15s;
+}
+.tab:hover{color:#7aa2f7;background:#1e2030}
+.tab.active{color:#9ece6a;background:#24283b;border-bottom:2px solid #9ece6a;margin-bottom:-2px}
+
+/* PANELS */
+.panel{display:none}.panel.active{display:block}
+
+/* CARDS */
+.card{
+  background:linear-gradient(135deg,#1e2030,#24283b);
+  border:1px solid #292e42;border-radius:8px;
+  padding:12px 16px;margin-bottom:10px;
+}
+.card:hover{border-color:#3b4261}
+.card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+h2{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:600;color:#7dcfff;
+  text-transform:uppercase;letter-spacing:0.1em;margin:20px 0 8px;
+  padding-bottom:4px;border-bottom:1px solid #292e42}
+h3{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:600;color:#c0caf5;margin:0}
+
+/* PILLS */
+.pill{display:inline-block;font-size:10px;font-weight:600;padding:2px 10px;border-radius:10px;letter-spacing:0.04em}
+.pill-g{background:rgba(158,206,106,0.12);color:#9ece6a;border:1px solid rgba(158,206,106,0.3)}
+.pill-r{background:rgba(247,118,142,0.12);color:#f7768e;border:1px solid rgba(247,118,142,0.3)}
+.pill-y{background:rgba(224,175,104,0.12);color:#e0af68;border:1px solid rgba(224,175,104,0.3)}
+.pill-b{background:rgba(122,162,247,0.12);color:#7aa2f7;border:1px solid rgba(122,162,247,0.3)}
+.pill-p{background:rgba(187,154,247,0.12);color:#bb9af7;border:1px solid rgba(187,154,247,0.3)}
+
+/* GRID */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+.kv{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1e2030}
+.kv:last-child{border-bottom:none}
+.kv-k{color:#565f89;font-size:12px}.kv-v{color:#c0caf5;font-size:12px;text-align:right}
+
+/* TABLE */
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th{text-align:left;color:#7dcfff;font-weight:500;padding:6px 10px;border-bottom:1px solid #292e42;font-size:10px;text-transform:uppercase;letter-spacing:0.06em}
+td{padding:6px 10px;border-bottom:1px solid #1e2030;color:#a9b1d6}
+
+/* STEPS */
+.step{display:flex;gap:12px;margin-bottom:14px}
+.step-n{flex-shrink:0;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;
+  background:rgba(158,206,106,0.1);color:#9ece6a;border:1px solid rgba(158,206,106,0.3)}
+.step-b{min-width:0}
+.step-t{font-weight:600;color:#c0caf5;font-size:13px}
+.step-d{color:#565f89;font-size:12px;line-height:1.5}
+
+code{color:#e0af68;font-size:12px;background:#1e2030;padding:1px 5px;border-radius:3px}
+pre{background:#16161e;border:1px solid #292e42;border-radius:6px;padding:10px 12px;
+  overflow-x:auto;font-size:11px;color:#9ece6a;white-space:pre-wrap;word-break:break-all;margin:8px 0}
+.dead td:first-child{color:#f7768e}
+
+/* CRT SCANLINE OVERLAY */
+body::after{
+  content:'';position:fixed;top:0;left:0;width:100%;height:100%;
+  pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);
+}
+</style></head><body>
+
+<div class="hdr">
+  <h1>PS5_OPS</h1>
+  <span class="hdr-tag">CVE-2026-43720</span>
+  <span class="hdr-tag">FW 14.20</span>
+</div>
+<div class="sub">Canvas2D UAF Butterfly Harvest &bull; WK-1400 &bull; Gigacage OFF</div>
+
+<div id="status"><span class="dot dot-y"></span><span id="status-text">Connecting...</span></div>
+<div id="live-beacons"></div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('t-status')">STATUS</div>
+  <div class="tab" onclick="showTab('t-proc')">PROCEDURE</div>
+  <div class="tab" onclick="showTab('t-agents')">AGENTS</div>
+  <div class="tab" onclick="showTab('t-timing')">TIMING</div>
+  <div class="tab" onclick="showTab('t-watch')">WATCHDOG</div>
+  <div class="tab" onclick="showTab('t-dead')">DEAD ENDS</div>
+</div>
+
+<!-- STATUS -->
+<div id="t-status" class="panel active">
+<div class="grid">
+  <div class="card">
+    <div class="card-head"><h3>Active Probe</h3><span class="pill pill-y">CRASHED</span></div>
+    <div class="kv"><span class="kv-k">Probe</span><span class="kv-v" style="color:#9ece6a">V579</span></div>
+    <div class="kv"><span class="kv-k">Mode</span><span class="kv-v">butterfly harvest</span></div>
+    <div class="kv"><span class="kv-k">Spray</span><span class="kv-v">light (100 ABs)</span></div>
+    <div class="kv"><span class="kv-k">Last beacon</span><span class="kv-v">PRE-UAF then silence</span></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h3>Connection</h3><span class="pill pill-g">LINK</span></div>
+    <div class="kv"><span class="kv-k">PS5</span><span class="kv-v"><PS5_IP></span></div>
+    <div class="kv"><span class="kv-k">Host</span><span class="kv-v"><HOST_IP></span></div>
+    <div class="kv"><span class="kv-k">Tailscale</span><span class="kv-v">100.82.6.48</span></div>
+    <div class="kv"><span class="kv-k">Firmware</span><span class="kv-v">14.20</span></div>
+  </div>
+</div>
+<div class="card">
+  <div class="card-head"><h3>Key Findings</h3></div>
+  <div class="kv"><span class="kv-k">isContextLost()</span><span class="kv-v" style="color:#9ece6a">WebGL-ONLY confirmed</span></div>
+  <div class="kv"><span class="kv-k">Vector cap (32 saves)</span><span class="kv-v">34</span></div>
+  <div class="kv"><span class="kv-k">sizeof(State)</span><span class="kv-v" style="color:#e0af68">~400B (pending verification)</span></div>
+  <div class="kv"><span class="kv-k">lineWidth offset</span><span class="kv-v" style="color:#e0af68">+48 (Opus) vs +144 (DS) — disputed</span></div>
+  <div class="kv"><span class="kv-k">Desktop hex read</span><span class="kv-v" style="color:#bb9af7">0x4094e488e0000000</span></div>
+  <div class="kv"><span class="kv-k">Crash pattern</span><span class="kv-v" style="color:#f7768e">GC during spray? page decommit?</span></div>
+</div>
+</div>
+
+<!-- PROCEDURE -->
+<div id="t-proc" class="panel">
+<div class="step"><div class="step-n">1</div><div class="step-b">
+  <div class="step-t">UAF Trigger</div>
+  <div class="step-d"><code>defineProperty</code> getter &rarr; <code>getContext('2d')</code> + save N + set lineWidth &rarr; <code>getContext('bitmaprenderer')</code>. Context freed, JS wrapper retains dangling ptr.</div>
+</div></div>
+<div class="step"><div class="step-n">2</div><div class="step-b">
+  <div class="step-t">Spray (before read)</div>
+  <div class="step-d">ArrayBuffers matching freed buffer size class (512B aligned). Zero beacons/Images during spray to avoid 768B context slot reclaim.</div>
+</div></div>
+<div class="step"><div class="step-n">3</div><div class="step-b">
+  <div class="step-t">Stale Read</div>
+  <div class="step-d"><code>innerCtx.lineWidth</code> &rarr; jsDynamicCast &rarr; wrapped() &rarr; state() &rarr; m_stateStack.last(). Non-virtual path confirmed.</div>
+</div></div>
+<div class="step"><div class="step-n">4</div><div class="step-b">
+  <div class="step-t">Decode sizeof</div>
+  <div class="step-d">AB fill <code>(si+1)*10M+j</code> encodes position. Cross-validate with miterLimit, globalAlpha, transform reads.</div>
+</div></div>
+<div class="step"><div class="step-n">5</div><div class="step-b">
+  <div class="step-t">DASHFORGE</div>
+  <div class="step-d">Same-type reclaim + lineDash Vector header forge &rarr; arbitrary read. <span style="color:#f7768e">BLOCKED on info leak.</span></div>
+</div></div>
+</div>
+
+<!-- AGENTS -->
+<div id="t-agents" class="panel">
+<div style="overflow-x:auto">
+<table>
+  <tr><th>Agent</th><th>Model</th><th>Task</th><th>Status</th></tr>
+  <tr><td>Opus 4.6</td><td>opus-4.6</td><td>GC crash analysis</td><td><span class="pill pill-g">DONE</span></td></tr>
+  <tr><td>Opus 5.5</td><td>opus-5.5</td><td>sizeof verification</td><td><span class="pill pill-g">DONE &mdash; lw@+48</span></td></tr>
+  <tr><td>DS3</td><td>v4.1-flash</td><td>sizeof calculation</td><td><span class="pill pill-g">DONE &mdash; lw@+144</span></td></tr>
+  <tr><td>DS_R2_3</td><td>v4.1-flash</td><td>sizeof table</td><td><span class="pill pill-g">DONE</span></td></tr>
+  <tr><td>DS_R2_1</td><td>v4.1-flash</td><td>GC/decommit</td><td><span class="pill pill-r">REFUSED</span></td></tr>
+  <tr><td>DS_R2_2</td><td>v4.1-flash</td><td>IEEE 754 analysis</td><td><span class="pill pill-y">REASONING ONLY</span></td></tr>
+  <tr><td>Sol</td><td>gpt-6.1</td><td>libpas audit</td><td><span class="pill pill-r">DAYBREAK</span></td></tr>
+  <tr><td>Cobra</td><td>fork</td><td>GitHub #11</td><td><span class="pill pill-b">RUNNING</span></td></tr>
+</table>
+</div>
+</div>
+
+<!-- TIMING -->
+<div id="t-timing" class="panel">
+<div style="overflow-x:auto">
+<table>
+  <tr><th>Time</th><th>Probe</th><th>Outcome</th></tr>
+  <tr><td>21:57</td><td>V575</td><td style="color:#9ece6a">PASS &mdash; all tests, alias confirmed</td></tr>
+  <tr><td>22:09</td><td>V576</td><td style="color:#f7768e">CRASH &times;4 &mdash; wrong vcap=64, decommitted pages</td></tr>
+  <tr><td>22:28</td><td>V577v1</td><td style="color:#f7768e">CRASH &mdash; vcap=33 bug</td></tr>
+  <tr><td>22:42</td><td>V577v4</td><td style="color:#f7768e">CRASH &mdash; spray=2000, silent after PRE-UAF</td></tr>
+  <tr><td>22:47</td><td>V577v4</td><td style="color:#f7768e">CRASH &mdash; spray=500, silent after PRE-UAF</td></tr>
+  <tr><td>22:53</td><td>V578</td><td style="color:#f7768e">CRASH &mdash; spray=100, silent after PRE-UAF</td></tr>
+  <tr><td style="color:#7dcfff">desktop</td><td>V577v4</td><td style="color:#e0af68">lw=1337.133... hex=0x4094e488e0000000 (spray missed)</td></tr>
+</table>
+</div>
+</div>
+
+<!-- WATCHDOG -->
+<div id="t-watch" class="panel">
+<div class="card">
+  <h3>CLI Monitor</h3>
+  <pre>tail -Fn0 host-beacons.log | python3 -u -c "
+import sys,json,urllib.parse
+for line in sys.stdin:
+  try:
+    r=json.loads(line.strip())
+    e=r.get('event','')
+    d=e.split('?d=')
+    tag=d[0]
+    payload=urllib.parse.unquote(d[1].split('&amp;t=')[0]) if len(d)&gt;1 else ''
+    print(r['ts'][11:19]+' '+(r.get('probe','?'))+'-'+tag+' '+payload[:150])
+  except: pass"</pre>
+</div>
+<div class="card">
+  <h3>Crash Detection</h3>
+  <div class="step-d">BOOT with no DONE within 10s = crash. Triple-burst beacons ensure delivery. Auto-reload 2-8 min or manual nav to <code>/</code>.</div>
+</div>
+<div class="card" style="border-color:rgba(247,118,142,0.3)">
+  <h3 style="color:#f7768e">Rules</h3>
+  <div class="step-d" style="color:#f7768e">NEVER &gt;1 triggerUAF per page. Zero Image/bk() between UAF and reads.</div>
+</div>
+</div>
+
+<!-- DEAD ENDS -->
+<div id="t-dead" class="panel">
+<div style="overflow-x:auto">
+<table>
+  <tr><th>Approach</th><th>Why Dead</th></tr>
+  <tr class="dead"><td>CSSFontFace UAF</td><td>192B sole occupant, no target</td></tr>
+  <tr class="dead"><td>RAB OOB</td><td>ALL WebCore APIs reject</td></tr>
+  <tr class="dead"><td>MetadataTable</td><td>OOM at 38M entries</td></tr>
+  <tr class="dead"><td>WebGL readPixels</td><td>WebGL unavailable</td></tr>
+  <tr class="dead"><td>SVG filter</td><td>CheckedUint32 everywhere</td></tr>
+  <tr class="dead"><td>jsCast confusion</td><td>All type-guarded</td></tr>
+  <tr class="dead"><td>Stream tee()</td><td>jsCast blocks</td></tr>
+  <tr class="dead"><td>AB 768B reclaim</td><td>Zero-init wipes vtable</td></tr>
+  <tr class="dead"><td>Raw read (no spray)</td><td>Pages decommitted</td></tr>
+  <tr class="dead"><td>2023-24 CVEs</td><td>All target JIT</td></tr>
+  <tr class="dead"><td>UMTX kernel</td><td>SHM stubbed on 14.20</td></tr>
+  <tr class="dead"><td>OffscreenCanvas</td><td>undefined on PS5</td></tr>
+</table>
+</div>
+</div>
+
+<script>
+function showTab(id){
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active')});
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
+  document.getElementById(id).classList.add('active');
+  var tabs=['t-status','t-proc','t-agents','t-timing','t-watch','t-dead'];
+  var idx=tabs.indexOf(id);
+  if(idx>=0)document.querySelectorAll('.tab')[idx].classList.add('active');
+}
+var bkEl=document.getElementById('live-beacons');
+var statusEl=document.getElementById('status-text');
+var dotEl=document.querySelector('#status .dot');
+var lastSeq=0;
+function parseB(r){
+  var ev=r.event||'',d=ev.split('?d='),tag=(r.probe||'?')+'-'+d[0];
+  var payload=d[1]?decodeURIComponent(d[1].split('&t=')[0]):(r.body||'');
+  return{tag:tag,payload:payload,ts:(r.ts||'').substring(11,19)};
+}
+function tagCls(t){
+  if(t.indexOf('BOOT')>=0)return'tag-boot';if(t.indexOf('UAF')>=0)return'tag-uaf';
+  if(t.indexOf('SPRAY')>=0)return'tag-spray';if(t.indexOf('READ')>=0)return'tag-read';
+  if(t.indexOf('HIT')>=0)return'tag-hit';if(t.indexOf('CRASH')>=0||t.indexOf('ERR')>=0)return'tag-crash';
+  if(t.indexOf('DONE')>=0)return'tag-done';return'';
+}
+function mkBk(b,isNew){
+  var d=document.createElement('div');d.className='bk'+(isNew?' new':'');
+  d.innerHTML='<span class="bk-t">'+b.ts+'</span><span class="bk-tag '+tagCls(b.tag)+'">'+b.tag+'</span><span class="bk-d">'+b.payload.substring(0,140)+'</span>';
+  return d;
+}
+function poll(){
+  fetch('/api/status?_t='+Date.now()).then(function(r){return r.json()}).then(function(data){
+    var bks=data.recent_beacons||[],nw=[];
+    for(var i=0;i<bks.length;i++)if(bks[i].seq>lastSeq){nw.push(bks[i]);lastSeq=bks[i].seq;}
+    if(nw.length>0){
+      statusEl.textContent='BEACONS FLOWING — '+data.beacons+' total, probe: '+(data.active_probe||'?');
+      dotEl.className='dot dot-g';
+      for(var i=0;i<nw.length;i++)bkEl.insertBefore(mkBk(parseB(nw[i]),true),bkEl.firstChild);
+    }else{
+      statusEl.textContent='Waiting... ('+data.beacons+' total, probe: '+(data.active_probe||'none')+')';
+      dotEl.className='dot dot-y';
+    }
+  }).catch(function(e){statusEl.textContent=e.message;dotEl.className='dot dot-r';});
+}
+fetch('/api/status?_t='+Date.now()).then(function(r){return r.json()}).then(function(data){
+  var bks=data.recent_beacons||[];
+  for(var i=0;i<bks.length;i++){if(bks[i].seq>lastSeq)lastSeq=bks[i].seq;bkEl.appendChild(mkBk(parseB(bks[i]),false));}
+  statusEl.textContent='Loaded '+bks.length+' recent ('+data.beacons+' total)';
+}).catch(function(e){statusEl.textContent='Offline — '+e.message;dotEl.className='dot dot-r';});
+setInterval(poll,1500);
+</script>
+</body></html>

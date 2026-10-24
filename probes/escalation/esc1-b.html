@@ -1,0 +1,48 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ESC1-B</title></head>
+<body><pre id="out">ESC1-B</pre><script>
+(function(){"use strict";
+var RID="escB"+Date.now().toString(36).slice(-13), QP=/kpin=1/.test(location.search);
+function bks(s,b){try{var x=new XMLHttpRequest();x.open("POST","/beacon/E2-"+s,false);x.setRequestHeader("Content-Type","application/json");x.send(JSON.stringify({r:RID,b:String(b).slice(0,230)}));}catch(e){}}
+function ba(s,b){try{fetch("/beacon/E2-"+s,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify({r:RID,b:String(b).slice(0,230)})}).catch(function(){});}catch(e){}}
+var OI=Array.prototype[Symbol.iterator];function rst(){try{Array.prototype[Symbol.iterator]=OI;}catch(e){}}
+function mkt(){var rs=new ReadableStream({});return rs.tee();}
+var HB=setInterval(function(){ba("HB","hb");},2000);ba("L","esc1-b");
+/* S0 DIAG-CAP: factory stashea en window ANTES de cualquier condicional */
+window.__N=0;window.__T="";window.__CAP=null;
+Array.prototype[Symbol.iterator]=function(){var t=this;window.__N=(window.__N|0)+1;
+ try{window.__T=typeof t+"|len="+(t&&t.length)+"|t0="+typeof t[0]+"|same="+(t[0]===t[1]);}catch(e){window.__T="E:"+e.message;}
+ if(window.__CAP===null&&t&&t.length>=2&&typeof t[0]==="object")window.__CAP=[t[0],t[1]];
+ var i=0;return{next:function(){if(i>=2)return{done:true};var v=t[i];i++;return{value:v,done:false};}};};
+var D2=0,aa=[7,8];for(var v of aa)D2++;var e0="";try{mkt();}catch(e){e0=String(e.message).slice(0,50);}
+rst();bks("S0","D2="+D2+";N="+window.__N+";T="+window.__T+";cap="+(window.__CAP?typeof window.__CAP[0]:"null")+";e="+e0);
+/* S1 BRAND-ADJUDICATE: captura real + control negativo */
+var m1="nocap",m2="-";
+if(window.__CAP){try{var r1=new ReadableStreamDefaultReader(window.__CAP[0]),rl="";try{r1.releaseLock();rl="rel-ok";}catch(e2){rl="rel-E";}m1="nothrow;"+rl;}catch(e){m1="MSG:"+String(e.message).slice(0,55);}}
+try{new ReadableStreamDefaultReader({ourTag:"x"});m2="nothrow(!!)";}catch(e){m2="MSG:"+String(e.message).slice(0,55);}
+bks("S1","cap="+m1+"|neg="+m2);
+/* S2 GROW-OBSERVE same-task (crash-class, determinista por diseño). HB OFF; PROHIBIDO beacon/fetch dentro */
+clearInterval(HB);
+var X=window.__X||(window.__X={ourTag:"escB"}),pA=null,g="ok",e3="";
+Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=20)return{done:true};i++;return{value:X,done:false};}};};
+try{mkt();}catch(e){g="E:"+String(e.message).slice(0,40);}rst();
+/* ==== ventana cero-alloc: sólo las dos sentencias siguientes ==== */
+Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=1)return{done:true};i++;return{value:X,done:false};}};};
+try{pA=mkt();}catch(e){e3="E:"+String(e.message).slice(0,40);}rst();
+/* ==== fin ventana (el deref de results[1] ya ocurrió dentro de mkt) ==== */
+var at=pA?typeof pA[1]:"nopA",l="-",orc="-";
+try{l=String(pA[1].locked).slice(0,8);}catch(e){l="E";}
+try{var f=false,s=false;try{pA[0].cancel();}catch(e1){f=true;}try{pA[1].cancel();}catch(e2){s=true;}orc="c0t="+f+";c1t="+s;}catch(e){}
+bks("S2","grow="+g+";a="+at+";l="+l+";"+orc+";e="+e3);
+HB=setInterval(function(){ba("HB","hb");},2000);
+/* S3 KPIN (sólo ?kpin=1): audit de size-class del seed; grow, 24×setTimeout(Kfn,9e6), HB ON, espera, observe */
+if(QP){var Kfn=window.__KFN||(window.__KFN=function(){});
+ Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=20)return{done:true};i++;return{value:X,done:false};}};};
+ try{mkt();}catch(e){}rst();
+ var ids=[];for(var k=0;k<24;k++)ids.push(setTimeout(Kfn,9000000));
+ setTimeout(function(){Array.prototype[Symbol.iterator]=function(){var i=0;return{next:function(){if(i>=1)return{done:true};i++;return{value:X,done:false};}};};
+  var pB=null,e4="";try{pB=mkt();}catch(e){e4="E:"+String(e.message).slice(0,40);}rst();
+  for(var j=0;j<ids.length;j++)clearTimeout(ids[j]);
+  bks("S3","a="+(pB?typeof pB[1]:"nopB")+";e="+e4);ba("Z","ESC1-B complete(kpin)");},2600);
+}else ba("Z","ESC1-B complete");
+})();
+</script></body></html>
