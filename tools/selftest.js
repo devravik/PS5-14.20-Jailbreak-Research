@@ -846,7 +846,7 @@ console.log("loader self-test (protocol + control flow, NOT the ROP chain)\n");
   check("kexp-v0.8-24cf6e5.bin is on disk (shared/)", kexpExists);
   check("elfldr-ps5-v0.26.elf is on disk (shared/)", elfldrExists);
 
-  const { DEFAULT_BINARIES } = await import(join(ROOT, "src/binaries.js"));
+  const { DEFAULT_BINARIES } = await import(pathToFileURL(join(ROOT, "src/binaries.js")).href);
   check("binaries.js declares both bundled paths",
     typeof DEFAULT_BINARIES.KEXP_BIN === "string" &&
     typeof DEFAULT_BINARIES.ELFLDR_ELF === "string");
@@ -2543,7 +2543,7 @@ if (!havePoopsUpstream) {
       // Test parsing either as module or classic script
       if (MODULES.has(rel)) {
         // Module syntax
-        new Function(`import("${join(ROOT, rel)}");`);
+        new Function(`import("${pathToFileURL(join(ROOT, rel)).href}");`);
       } else {
         new Function(src);
       }

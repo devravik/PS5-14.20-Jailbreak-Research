@@ -132,11 +132,11 @@ BMR trigger (bitmaprenderer outer + 2d inner via defineProperty getter) confirme
 
 ### State Buffer Reclaim (V587/V589)
 
-8x `save()` inside getter grows `Vector<State>` out-of-line to ~6400 bytes (bmalloc class 6656). BMR trigger frees inner context + state buffer. AB spray can reclaim the freed state buffer. V589 confirmed BMR trigger works (`uaf-ok: inner=OK`) but crashes during spray phase  - likely GC pressure from 500+ AB allocations.
+8x `save()` inside getter grows `Vector<State>` out-of-line according to WebKit's `cap + cap/4 + 1` formula ($1 \to 2 \to 3 \to 4 \to 6 \to 8 \to 11$), allocating an 11-element buffer of 4136-4488 bytes (bmalloc class 4608, step 512). BMR trigger frees inner context + state buffer. AB spray targeting class 4608 can reclaim the freed state buffer.
 
 ### OOB State Stack Read  - Info Leak Candidate
 
-**Key insight:** After BMR free + same-type reclaim, the stale wrapper retains `m_stateStack.m_size = 9` (from 8 saves) while the new context has `m_size = 1`. Reading `m_stateStack.last()` through the stale wrapper indexes at `buffer[8]` = offset 3200 = **2800 bytes past the end** of the new context's 1-State buffer.
+**Mechanics:** After BMR free + same-type reclaim, the newly constructed context re-initializes `m_stateStack` in the reclaimed 768B slot with `m_size = 1` and `m_capacity = 1`. Calling `lineWidth` through the stale wrapper dereferences the new context's inline buffer (reading default `1.0`). Therefore, unconstrained reading requires forging `m_stateStack` (`m_buffer +112`, `m_capacity +120`, `m_size +124`) in an aliased ArrayBuffer (validated in V650-V655) or reclaiming the 4608-byte buffer.
 
 This reads from adjacent heap allocations. A 48-bit x86-64 pointer is exactly representable as IEEE 754 float64, so `lineWidth` returns the raw pointer value as a JavaScript number.
 
