@@ -67,7 +67,7 @@ The info leak is the current blocker. We have full R/W of typed Canvas2D state f
 
 ### Current info leak candidate
 
-**OOB state stack read:** Stale wrapper retains `m_stateStack.m_size = 9` (from 8 saves) while new context has `m_size = 1`. Reading `last()` indexes at `buffer[8]` = 2800 bytes past end of 1-State buffer. Reads adjacent heap as float64. 48-bit x86-64 pointer is exactly representable as IEEE 754 float64.
+**OOB state stack read:** After 8 saves, `m_stateStack` grows to capacity 11 (class 4608). Same-type reclaim sets `m_size = 1` in the new context; unconstrained OOB read is achieved via forged `m_stateStack` (`m_buffer +112`, `m_capacity +120`, `m_size +124`) in an aliased ArrayBuffer. Reads adjacent heap as float64. 48-bit x86-64 pointer is exactly representable as IEEE 754 float64.
 
 **APNG overread (V674):** 1651 heap pointers leaked via animated PNG processing overread on device.
 
