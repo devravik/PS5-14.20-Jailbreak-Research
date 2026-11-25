@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -52,7 +53,9 @@ def should_include(rel_path):
         return False
     if rel_path.startswith("installer"):
         return False
-    if rel_path.endswith((".elf", ".exe")):
+    if "__pycache__" in rel_path or rel_path.endswith(".pyc"):
+        return False
+    if rel_path.endswith((".elf", ".exe")) and not rel_path.startswith("shared/"):
         return False
     if rel_path in ("build_release.sh", "Makefile"):
         return False
@@ -152,9 +155,22 @@ def generate_server_cert():
                 f"subjectAltName = DNS:{CERT_TARGET}, IP:127.0.0.1\n"
                 "basicConstraints = critical, CA:FALSE\n"
             )
+        openssl_bin = shutil.which("openssl")
+        if not openssl_bin:
+            for candidate in [
+                r"C:\Program Files\Git\usr\bin\openssl.exe",
+                r"C:\Program Files\Git\ucrt64\bin\openssl.exe",
+                r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+                r"C:\OpenSSL-Win64\bin\openssl.exe",
+            ]:
+                if os.path.isfile(candidate):
+                    openssl_bin = candidate
+                    break
+        if not openssl_bin:
+            openssl_bin = "openssl"
         subprocess.run(
             [
-                "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                openssl_bin, "req", "-x509", "-newkey", "rsa:2048",
                 "-nodes", "-days", "3650", "-sha256",
                 "-keyout", key_path, "-out", cert_path,
                 "-config", conf,
@@ -204,8 +220,13 @@ def main(argv=None):
         prog="build_host.py",
         description="Build standalone webkit-remote-loader-host.py with embedded files and certs.",
     )
-    parser.add_argument("--input", default=os.path.join(repo_root(), "host.py"),
-                        help="Source host script (default: host.py).")
+    default_input = (
+        os.path.join(repo_root(), "tools", "host.py")
+        if os.path.exists(os.path.join(repo_root(), "tools", "host.py"))
+        else os.path.join(repo_root(), "host.py")
+    )
+    parser.add_argument("--input", default=default_input,
+                        help="Source host script (default: tools/host.py or host.py).")
     parser.add_argument("--output", default=os.path.join(repo_root(), "webkit-remote-loader-host.py"),
                         help="Output script (default: webkit-remote-loader-host.py).")
     parser.add_argument("--version", default=None,

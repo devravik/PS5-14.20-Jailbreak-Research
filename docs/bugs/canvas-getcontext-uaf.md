@@ -84,7 +84,7 @@ Device evidence:
 Forging `m_stateStack` (Vector at context offset +112) in an aliased ArrayBuffer:
 
 1. Set `m_buffer` (ptr at AB+112) to target address
-2. Set `m_size` (u32 at AB+120) to 2
+2. Set `m_capacity` (u32 at AB+120) to 2, `m_size` (u32 at AB+124) to 1
 3. Read `lineWidth` through dangling `innerCtx` -> reads float64 at `target + 48`
 4. If target page is mapped: returns 8 bytes of data
 5. If target page is unmapped: SIGSEGV, PS5 browser reloads
@@ -103,9 +103,9 @@ exploitation chain.
 1. **UAF trigger** -> `innerCtx` points to freed 768B slot
 2. **Same-type reclaim** -> spray ctx aliases `innerCtx`
 3. **Info leak** -> APNG overread leaks heap pointers (V674)
-4. **State buffer grow** -> 8x save() = 6400B out-of-line buffer
+4. **State buffer grow** -> 8x save() = 11-element out-of-line buffer (4136-4488B -> bmalloc class 4608)
 5. **State buffer free** -> BMR trigger frees inner ctx + state buffer
-6. **AB reclaim state buffer** -> 200x ArrayBuffer(6400) sprayed
+6. **AB reclaim state buffer** -> ArrayBuffer(4608) sprayed
 7. **Forge lineDash Vector** -> set m_buffer=target, m_size=N in AB
 8. **Arbitrary read** -> getLineDash through alias reads from m_buffer
 9. **Arbitrary write** -> setLineDash writes in-place when capacity >= N
@@ -120,21 +120,21 @@ exploitation chain.
 | +32 | m_canvas | Ref<HTMLCanvasElement> -- GC reads this |
 | +40 | CanvasPath vptr | |
 | +48 | m_path | |
-| +112 | m_stateStack | Vector<State>: m_buffer(ptr) + m_size(u32) + m_capacity(u32) |
+| +112 | m_stateStack | Vector<State>: m_buffer(ptr) + m_capacity(u32) + m_size(u32) |
 | +128 | inline buffer | First State struct starts here |
 | +592 | m_unrealizedSaveCount | |
 
-## State Struct Layout (sizeof = 400B)
+## State Struct Layout (sizeof ~376-408B, WK-1400 drop-verified)
 
 | Offset | Field | Type | Read via |
 |--------|-------|------|----------|
-| +0 | globalAlpha | double | `globalAlpha` |
-| +16 | fillStyle | CanvasStyle (16B) | `fillStyle` |
-| +32 | strokeStyle | CanvasStyle (16B) | `strokeStyle` |
+| +0 | transform | AffineTransform (48B) | `getTransform` |
 | +48 | lineWidth | double | `lineWidth` |
-| +64 | miterLimit | double | `miterLimit` |
-| +88 | shadowBlur | double | `shadowBlur` |
-| +112 | transform | AffineTransform (48B) | `getTransform` |
+| +56 | miterLimit | double | `miterLimit` |
+| +64 | globalAlpha | double | `globalAlpha` |
+| +72 | shadowBlur | double | `shadowBlur` |
+| +80 | shadowOffsetX | double | `shadowOffsetX` |
+| +88 | shadowOffsetY | double | `shadowOffsetY` |
 | +168 | lineDash | Vector<double> | `getLineDash` / `setLineDash` |
 | +224 | FontProxy vptr | pointer | `font` (string only) |
 

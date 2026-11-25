@@ -56,7 +56,7 @@ EMBEDDED_ZIP_B64 = ""
 
 DEFAULT_TARGET = "manuals.playstation.net"
 DEFAULT_TTL = 300
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "." if EMBEDDED_ZIP_B64 else ".."))
 BEACON_LOG = os.path.join(REPO_ROOT, "host-beacons.log")
 
 
@@ -580,6 +580,9 @@ def choose_index_page(firmware, query_exploit):
                 target = fn[:-3]  # strip .on
                 if os.path.isfile(os.path.join(REPO_ROOT, target)):
                     return target
+                probe_target = os.path.join("probes", "canvas-uaf", target)
+                if os.path.isfile(os.path.join(REPO_ROOT, probe_target)):
+                    return probe_target
     except OSError:
         pass
 
@@ -626,13 +629,14 @@ def resolve_file(rel_path, firmware=None, query_exploit=None):
     """
     candidates = [rel_path]
 
-    is_index = not rel_path or rel_path.endswith("/")
+    is_index = not rel_path or rel_path.endswith("/") or rel_path in ("index.html", "index.htm")
     if is_index:
+        dir_prefix = rel_path if rel_path.endswith("/") else ""
         preferred = choose_index_page(firmware, query_exploit)
         if preferred:
-            candidates = [preferred, rel_path + "index.html", rel_path + "index.htm"]
+            candidates = [dir_prefix + preferred, dir_prefix + "index.html", dir_prefix + "index.htm"]
         else:
-            candidates = [rel_path + "index.html", rel_path + "index.htm"]
+            candidates = [dir_prefix + "index.html", dir_prefix + "index.htm"]
     elif rel_path == "relapse.html":
         candidates.append("index.html")
 
@@ -936,6 +940,17 @@ class GuideHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _resolve(self):
+        """Resolve request path using User-Agent firmware and query params."""
+        ua = self.headers.get("User-Agent", "") if hasattr(self, "headers") and self.headers else ""
+        firmware = detect_firmware(ua)
+        query_exploit = None
+        if hasattr(self, "path") and "?" in self.path:
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            query_exploit = qs.get("exploit", [None])[0]
+        rel = normalize_request_path(self.path) if hasattr(self, "path") else ""
+        return resolve_file(rel, firmware, query_exploit)
+
     def send_head(self):
         """Resolve and serve a file with appropriate headers."""
         raw_path = self.path.split("?", 1)[0].split("#", 1)[0]
@@ -948,16 +963,7 @@ class GuideHandler(SimpleHTTPRequestHandler):
             ))
             return None
 
-        # Firmware detection + query param routing
-        ua = self.headers.get("User-Agent", "")
-        firmware = detect_firmware(ua)
-        query_exploit = None
-        if "?" in self.path:
-            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
-            query_exploit = qs.get("exploit", [None])[0]
-
-        rel = normalize_request_path(self.path)
-        resolved = resolve_file(rel, firmware, query_exploit)
+        resolved = self._resolve()
 
         if resolved is None:
             self.send_error(404, "File not found")

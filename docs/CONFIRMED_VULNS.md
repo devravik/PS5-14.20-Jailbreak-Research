@@ -50,10 +50,10 @@ The bitmaprenderer outer avoids same-size-class reuse (80B vs 768B) that kills t
 **Confirmed primitives:**
 1. Same-type Canvas2D reclaim: 500x canvas spray reclaims freed 768B slot
 2. Bidirectional R/W: lineWidth, miterLimit, globalAlpha, fillStyle, getTransform, getLineDash all work through stale wrapper
-3. State buffer reclaim: 8 saves → 6400B out-of-line buffer, AB spray can reclaim
+3. State buffer reclaim: 8 saves → 11-element out-of-line buffer (bmalloc class 4608), AB spray can reclaim
 
 **Info leak candidate (OOB state stack read):**
-Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + same-type reclaim, new ctx has 0 saves (`m_size=1`). Stale wrapper reads `m_stateStack.last()` using stale `m_size=9` → `buffer[8]` = offset 3200 = 2800 bytes past end of 1-State buffer. Reads adjacent heap allocations as float64. 48-bit x86-64 pointer is exactly representable as float64. libpas uses out-of-band bitmap tracking  - freed chunks retain all stale data, not zeroed.
+Inner ctx created with 8 saves → `m_stateStack` expands out-of-line to 11 states (4136-4488B in bmalloc class 4608). After same-type reclaim, the newly constructed context re-initializes `m_size = 1` in the reclaimed slot. Thus, unconstrained OOB reading via `m_stateStack` requires forging the `Vector` header (`m_buffer +112`, `m_capacity +120`, `m_size +124`) in an aliased ArrayBuffer (the V650-V655 crash oracle) or reclaiming the freed 4608-byte state buffer with controlled data.
 
 **Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values  - no path found to read a raw heap pointer. 10 dedicated info leak paths exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Freed memory reads crash (destructor nulls m_stateStack.m_buffer). AB reclaim zeros data. DontInitialize AB paths return zeros on device. Community help wanted on the info leak primitive.
 

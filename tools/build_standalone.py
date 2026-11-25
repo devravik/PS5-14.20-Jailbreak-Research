@@ -582,18 +582,37 @@ def build_html(payloads, title=None, include_kexp=True, embedded_files=None,
         with open(filename, "rb") as f:
             binaries[path] = base64.b64encode(f.read()).decode("ascii")
 
-    index_html = read_text("index.html")
-    style = re.search(r"<style>(?P<body>.*?)</style>", index_html, re.DOTALL)
-    body = re.search(r"<body>(?P<body>.*?)</body>", index_html, re.DOTALL)
-    if not style or not body:
-        raise SystemExit("index.html no longer has the <style>/<body> this tool copies")
+    index_candidates = [
+        "index.html",
+        os.path.join("archive", "index-backups", "index.loader-backup.html"),
+    ]
+    index_html = None
+    style = None
+    body = None
+    for cand in index_candidates:
+        try:
+            cand_html = read_text(cand)
+            cand_style = re.search(r"<style>(?P<body>.*?)</style>", cand_html, re.DOTALL)
+            cand_body = re.search(r"<body>(?P<body>.*?)</body>", cand_html, re.DOTALL)
+            if cand_style and cand_body:
+                index_html, style, body = cand_html, cand_style, cand_body
+                break
+            if cand_body and not body:
+                index_html, style, body = cand_html, cand_style, cand_body
+        except (OSError, FileNotFoundError):
+            pass
+
+    if not body:
+        raise SystemExit("index.html no longer has the <body> this tool copies")
     markup = re.sub(r"<script\b[^>]*>.*?</script>", "", body.group("body"), flags=re.DOTALL)
     # A standalone page opens no loader socket. Keep the served page's HUD and
     # its reserved console space out of the generated document.
     markup = re.sub(r"<!-- Remote-loader only -->.*?<!-- End remote-loader only -->",
                     "", markup, flags=re.DOTALL)
-    page_style = re.sub(r"/\* Remote-loader only \*/.*?/\* End remote-loader only \*/",
-                        "", style.group("body"), flags=re.DOTALL)
+    page_style = ""
+    if style:
+        page_style = re.sub(r"/\* Remote-loader only \*/.*?/\* End remote-loader only \*/",
+                            "", style.group("body"), flags=re.DOTALL)
 
     page_title = title or (", ".join(p.label for p in payloads)[:80]) or "payloads"
     rendered_title = page_title
